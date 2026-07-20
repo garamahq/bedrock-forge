@@ -105,7 +105,7 @@ services:
           cpus: '0.30'
           memory: 384M
     ports:
-      - '3001:3000'
+      - '127.0.0.1:3001:3000'
     depends_on:
       postgres:
         condition: service_healthy
@@ -148,7 +148,7 @@ services:
           cpus: '0.05'
           memory: 32M
     ports:
-      - '3002:8080'
+      - '127.0.0.1:3002:8080'
     depends_on:
       forge:
         condition: service_healthy
