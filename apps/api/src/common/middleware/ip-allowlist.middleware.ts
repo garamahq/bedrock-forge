@@ -2,6 +2,7 @@ import { Injectable, NestMiddleware, Logger, UnauthorizedException } from "@nest
 import type { Request, Response, NextFunction } from "express";
 import * as ipaddr from "ipaddr.js";
 import { JwtService } from "@nestjs/jwt";
+import { ConfigService } from "@nestjs/config";
 import { SettingsRepository } from "../../modules/settings/settings.repository";
 
 // CIDRs that are always allowed, regardless of the user-configured allowlist.
@@ -25,11 +26,13 @@ export class IpAllowlistMiddleware implements NestMiddleware {
   constructor(
     private readonly settingsRepo: SettingsRepository,
     private readonly jwtService: JwtService,
+    private readonly config: ConfigService,
   ) {}
 
   async use(req: Request, res: Response, next: NextFunction) {
-    // Break-glass override env toggle to bypass IP allowlist entirely
-    const isIpAllowlistEnabled = process.env.ENABLE_IP_ALLOWLIST !== "false";
+    // Break-glass override toggle to bypass IP allowlist entirely
+    const isIpAllowlistEnabled =
+      this.config.get<boolean>("security.enableIpAllowlist") ?? true;
 
     if (isIpAllowlistEnabled) {
       let userCidrs: string[] = [];

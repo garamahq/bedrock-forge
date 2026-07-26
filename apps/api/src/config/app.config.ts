@@ -23,4 +23,7 @@ export default () => ({
   encryption: {
     key: process.env.ENCRYPTION_KEY,
   },
+  security: {
+    enableIpAllowlist: process.env.ENABLE_IP_ALLOWLIST !== "false",
+  },
 });
