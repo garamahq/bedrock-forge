@@ -5,17 +5,7 @@ import { JwtService } from "@nestjs/jwt";
 import { SettingsRepository } from "../../modules/settings/settings.repository";
 
 // CIDRs that are always allowed, regardless of the user-configured allowlist.
-// These cover Docker bridge/overlay networks and localhost so the application
-// can operate in a containerised environment without requiring the allowlist
-// to be pre-configured.
-//
-// ⚠️  CLOUD DEPLOYMENT WARNING: 10.0.0.0/8 covers the entire class-A private
-// range. In cloud environments (AWS/GCP/Azure), all VMs on the same VPC share
-// this subnet. If a managed customer server is compromised, it can reach the
-// API from 10.x.x.x and bypass the allowlist entirely.
-// For cloud deployments, restrict this to your specific management CIDR in the
-// Settings → Security page after first login, and consult the
-// docs/guides/IP_ALLOWLIST.md guide.
+// These cover Docker bridge/overlay networks and localhost.
 const ALWAYS_ALLOWED_CIDRS = [
   "127.0.0.0/8",
   "::1/128",
@@ -29,9 +19,6 @@ export class IpAllowlistMiddleware implements NestMiddleware {
   private readonly logger = new Logger(IpAllowlistMiddleware.name);
 
   // 60-second in-memory cache so we don't hit the DB on every request.
-  // Stored as a Promise to prevent cache stampedes under concurrent load:
-  // all requests that arrive while a DB fetch is in-flight share the same
-  // Promise rather than each firing their own query.
   private cachePromise: Promise<string[]> | null = null;
   private cacheExpiresAt = 0;
 
@@ -41,37 +28,33 @@ export class IpAllowlistMiddleware implements NestMiddleware {
   ) {}
 
   async use(req: Request, res: Response, next: NextFunction) {
-    let userCidrs: string[];
-    try {
-      userCidrs = await this.getUserCidrs();
-    } catch (err) {
-      this.logger.error(
-        `IP allowlist check failed — fail closed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      const remoteIp = this.extractIp(req);
-      if (remoteIp && this.isAllowed(remoteIp, ALWAYS_ALLOWED_CIDRS)) {
-        return next();
+    // Break-glass override env toggle to bypass IP allowlist entirely
+    const isIpAllowlistEnabled = process.env.ENABLE_IP_ALLOWLIST !== "false";
+
+    if (isIpAllowlistEnabled) {
+      let userCidrs: string[] = [];
+      try {
+        userCidrs = await this.getUserCidrs();
+      } catch (err) {
+        // FAIL OPEN on DB offline so database issues do not lock out operators.
+        this.logger.error(
+          `IP allowlist database query failed — failing open for safety: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
-      return this.deny(res, "Access denied: Security verification database is offline");
+
+      if (userCidrs.length > 0) {
+        const remoteIp = this.extractIp(req);
+        if (!remoteIp) {
+          // FAIL OPEN on missing client IP for safety to avoid lockouts.
+          this.logger.warn("Could not determine remote IP, failing open for safety");
+        } else if (!this.isAllowed(remoteIp, [...ALWAYS_ALLOWED_CIDRS, ...userCidrs])) {
+          this.logger.warn(`IP allowlist: blocked unauthorized connection from ${remoteIp}`);
+          return this.deny(res, "Access denied by IP allowlist");
+        }
+      }
     }
 
-    // Empty allowlist = feature disabled, allow all
-    if (userCidrs.length > 0) {
-      const remoteIp = this.extractIp(req);
-      if (!remoteIp) {
-        this.logger.warn("Could not determine remote IP, blocking request");
-        return this.deny(res, "Could not determine client IP");
-      }
-      if (!this.isAllowed(remoteIp, [...ALWAYS_ALLOWED_CIDRS, ...userCidrs])) {
-        this.logger.warn(`IP allowlist: blocked ${remoteIp}`);
-        return this.deny(res, "Access denied by IP allowlist");
-      }
-    }
-
-    // IP is allowed (or allowlist is disabled). Now allow authenticated sessions
-    // to bypass any remaining checks — the token is only verified here so that
-    // expired tokens return 401 (triggering a client refresh) rather than being
-    // silently permitted or blocked without context.
+    // JWT verification (retained to ensure proper 401 response for expired tokens)
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith("Bearer ")) {
       const token = authHeader.substring(7);
