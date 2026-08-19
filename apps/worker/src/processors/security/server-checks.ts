@@ -51,22 +51,7 @@ export async function runSshAudit(exec: Executor): Promise<SecurityFinding[]> {
       .map((l) => l.trim())
       .filter((l) => l && !l.startsWith("#"));
 
-    if (keys.length > 3) {
-      findings.push(
-        makeFinding(
-          "medium",
-          "AUTHORIZED_KEYS",
-          `${keys.length} authorized keys found in ${path}`,
-          `Large number of authorized SSH keys detected. Review each key to ensure they are all legitimate.`,
-          {
-            remediation:
-              "Remove any unrecognised or stale public keys from the authorized_keys file.",
-            resource: path,
-            metadata: { key_count: keys.length },
-          },
-        ),
-      );
-    } else if (keys.length > 0) {
+    if (keys.length > 0) {
       findings.push(
         makeFinding(
           "info",
@@ -428,10 +413,10 @@ export async function runSshAudit(exec: Executor): Promise<SecurityFinding[]> {
       { timeout: 10000 },
     );
 
-    // Standard ports + CyberPanel/OpenLiteSpeed admin + common mail ports
+    // Standard web/hosting ports + CyberPanel + mail + DNS + FTP
     const knownPorts = new Set([
-      22, 25, 80, 443, 587, 993, 995, 3306, 5432, 6379, 7080, 8080, 8090, 8443,
-      8888,
+      20, 21, 22, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995, 3306, 33060, 5432, 6379, 7080, 8080, 8088, 8090, 8443,
+      8888, 11211,
     ]);
     const openPorts: number[] = [];
 
@@ -439,7 +424,8 @@ export async function runSshAudit(exec: Executor): Promise<SecurityFinding[]> {
       const match = line.match(/:(\d+)\s/);
       if (match) {
         const port = parseInt(match[1], 10);
-        if (!isNaN(port) && !knownPorts.has(port) && port < 65535) {
+        // Exclude ephemeral / passive FTP port range (40000-50000)
+        if (!isNaN(port) && !knownPorts.has(port) && (port < 40000 || port > 50000) && port < 65535) {
           if (!openPorts.includes(port)) openPorts.push(port);
         }
       }
@@ -700,26 +686,6 @@ export async function runServerHardening(
     );
   }
 
-  // 7. Auditd — kernel-level audit trail
-  const { stdout: auditdStatus } = await exec.execute(
-    `systemctl is-active auditd 2>/dev/null || echo inactive`,
-    { timeout: 10000 },
-  );
-  if (!auditdStatus.trim().startsWith("active")) {
-    findings.push(
-      makeFinding(
-        "info",
-        "SECURITY_TOOLS",
-        "auditd is not running",
-        "The Linux audit daemon provides kernel-level logging of privileged actions, file access, and system calls.",
-        {
-          remediation:
-            "apt install auditd audispd-plugins -y && systemctl enable auditd && systemctl start auditd",
-        },
-      ),
-    );
-  }
-
   return findings;
 }
 
@@ -789,23 +755,20 @@ export async function runMalwareScan(
 
   // 3. Pattern-based scan (always runs — no tool dependency)
   const suspiciousPatterns = [
-    { name: "base64_decode eval", pattern: `eval(base64_decode` },
-    { name: "preg_replace eval (/e)", pattern: `preg_replace.*\\/e` },
-    { name: "assert(base64_decode)", pattern: `assert.base64_decode` },
-    { name: "POST execution (webshell)", pattern: `\\$_POST.*eval` },
+    { name: "base64_decode eval", pattern: "eval\\s*\\(\\s*base64_decode\\s*\\(" },
+    { name: "gzinflate eval chain", pattern: "eval\\s*\\(\\s*gzinflate\\s*\\(" },
+    { name: "assert execution", pattern: "assert\\s*\\(\\s*base64_decode\\s*\\(" },
+    { name: "POST webshell dispatch", pattern: "\\$_POST\\[['\"][a-zA-Z0-9_-]+['\"]\\]\\(\\$_POST" },
     {
-      name: "c99/r57 webshell signature",
-      pattern: `FilesMan\\|c99shell\\|r57shell`,
+      name: "c99/r57/WSO webshell signature",
+      pattern: "FilesMan|c99shell|r57shell|WSOset",
     },
-    {
-      name: "gzinflate/eval chain",
-      pattern: `gzinflate.*eval\\|eval.*gzinflate`,
-    },
+    { name: "system execution from query", pattern: "system\\(\\$_GET\\[" },
   ];
 
   for (const { name, pattern } of suspiciousPatterns) {
     const { stdout: matches } = await exec.execute(
-      `grep -rl "${pattern}" /home/*/public_html --include="*.php" 2>/dev/null | head -20 || true`,
+      `grep -rl --exclude-dir=vendor --exclude-dir=wp-includes -E "${pattern}" /home/*/public_html --include="*.php" 2>/dev/null | head -20 || true`,
       { timeout: 60000 },
     );
     const files = matches
@@ -1240,25 +1203,30 @@ export async function runProcessAudit(exec: Executor): Promise<SecurityFinding[]
     }
   }
 
-  // 2. Processes executing out of /tmp, /var/tmp, /dev/shm
+  // 2. Processes executing out of /tmp, /var/tmp, /dev/shm (excluding legitimate temporary management scripts)
   const { stdout: tmpProcs } = await exec.execute(
-    `ls -l /proc/*/cwd /proc/*/exe 2>/dev/null | grep -E '(/tmp|/var/tmp|/dev/shm)' || true`,
+    `ls -l /proc/*/cwd /proc/*/exe 2>/dev/null | grep -E '(/tmp|/var/tmp|/dev/shm)' | grep -v -E '(composer_mgr_|bf-|wp-cli-|composer\\.phar)' || true`,
     { timeout: 15000 },
   );
   if (tmpProcs.trim()) {
-    const lines = tmpProcs.split("\n").filter(Boolean);
-    findings.push(
-      makeFinding(
-        "critical",
-        "PROCESS_ANOMALY",
-        `Processes executing or based in temporary directories (/tmp, /var/tmp, /dev/shm)`,
-        `Found processes whose current working directory or binary path points into world-writable temporary directories.`,
-        {
-          remediation: "Inspect the process PIDs and binaries immediately. Terminate malicious processes.",
-          metadata: { raw: lines.slice(0, 10) },
-        },
-      ),
+    const rawLines = tmpProcs.split("\n").map((l) => l.trim()).filter(Boolean);
+    const suspiciousLines = rawLines.filter(
+      (l) => !l.includes("composer_mgr_") && !l.includes("bf-") && !l.includes("wp-cli"),
     );
+    if (suspiciousLines.length > 0) {
+      findings.push(
+        makeFinding(
+          "critical",
+          "PROCESS_ANOMALY",
+          `Processes executing or based in temporary directories (/tmp, /var/tmp, /dev/shm)`,
+          `Found processes whose current working directory or binary path points into world-writable temporary directories.`,
+          {
+            remediation: "Inspect the process PIDs and binaries immediately. Terminate malicious processes.",
+            metadata: { raw: suspiciousLines.slice(0, 10) },
+          },
+        ),
+      );
+    }
   }
 
   // 3. Web server spawning interactive shells (PHP -> sh/bash)
@@ -1575,9 +1543,11 @@ export async function runServiceAudit(exec: Executor): Promise<SecurityFinding[]
 export async function runFilesystemAudit(exec: Executor): Promise<SecurityFinding[]> {
   const findings: SecurityFinding[] = [];
 
-  // 1. Exposed database dumps & archives in web roots
+  // 1. Exposed database dumps & archives in web-accessible roots only
+  // For Bedrock, web-accessible is /home/*/public_html/web; for standard WP, /home/*/public_html
   const { stdout: exposedDumps } = await exec.execute(
-    `find /home/*/public_html /var/www/*/web /var/www/*/public -maxdepth 3 -type f \\( -name "*.sql" -o -name "*.sql.gz" -o -name "*.sql.tar" -o -name "*.sql.zip" \\) 2>/dev/null | head -15 || true`,
+    `find /home/*/public_html/web /home/*/public_html/app /var/www/*/web /var/www/*/public -maxdepth 3 -type f \\( -name "*.sql" -o -name "*.sql.gz" -o -name "*.sql.tar" -o -name "*.sql.zip" \\) 2>/dev/null; ` +
+    `for d in /home/*/public_html; do [ -d "$d" ] && [ ! -d "$d/web" ] && find "$d" -maxdepth 2 -type f \\( -name "*.sql" -o -name "*.sql.gz" -o -name "*.sql.tar" -o -name "*.sql.zip" \\) 2>/dev/null; done | head -15 || true`,
     { timeout: 20000 },
   );
   const dumpFiles = exposedDumps
@@ -1593,7 +1563,7 @@ export async function runFilesystemAudit(exec: Executor): Promise<SecurityFindin
         `${dumpFiles.length} database SQL dump file(s) exposed in web root`,
         `Directly accessible SQL database backups found in web-accessible directories. Anyone on the internet can download these databases.`,
         {
-          remediation: "Delete or move SQL dumps outside of public_html immediately.",
+          remediation: "Delete or move SQL dumps outside of public_html/web immediately.",
           resource: dumpFiles.join(", "),
           remediation_available: true,
           remediation_type: "command",
@@ -1770,9 +1740,9 @@ export async function runCyberPanelAudit(exec: Executor): Promise<SecurityFindin
 export async function runPhpAudit(exec: Executor): Promise<SecurityFinding[]> {
   const findings: SecurityFinding[] = [];
 
-  // Find installed PHP binaries
+  // Find installed PHP binaries and deduplicate canonical paths (resolving symlinks)
   const { stdout: phpBins } = await exec.execute(
-    `which php 2>/dev/null; ls -d /usr/bin/php* /usr/local/lsws/lsphp* 2>/dev/null || true`,
+    `for b in $(which php 2>/dev/null; ls -d /usr/bin/php* /usr/local/lsws/lsphp* 2>/dev/null); do [ -x "$b" ] && [ ! -d "$b" ] && (readlink -f "$b" 2>/dev/null || realpath "$b" 2>/dev/null || echo "$b"); done | sort -u || true`,
     { timeout: 10000 },
   );
   const bins = Array.from(
@@ -1783,6 +1753,8 @@ export async function runPhpAudit(exec: Executor): Promise<SecurityFinding[]> {
         .filter((b) => b && !b.endsWith(".old") && !b.endsWith(".bak")),
     ),
   );
+
+  const exposePhpFoundIn: string[] = [];
 
   for (const bin of bins.slice(0, 5)) {
     const { stdout: iniInfo } = await exec.execute(
@@ -1806,19 +1778,24 @@ export async function runPhpAudit(exec: Executor): Promise<SecurityFinding[]> {
     }
 
     if (iniInfo.includes("expose_php => On")) {
-      findings.push(
-        makeFinding(
-          "low",
-          "PHP_CONFIG",
-          `expose_php is enabled in ${bin}`,
-          "expose_php reveals exact PHP version headers in HTTP responses.",
-          {
-            remediation: "Set 'expose_php = Off' in php.ini.",
-            resource: bin,
-          },
-        ),
-      );
+      exposePhpFoundIn.push(bin);
     }
+  }
+
+  if (exposePhpFoundIn.length > 0) {
+    findings.push(
+      makeFinding(
+        "low",
+        "PHP_CONFIG",
+        `expose_php is enabled in PHP runtime (${exposePhpFoundIn.join(", ")})`,
+        "expose_php reveals exact PHP version headers in HTTP responses.",
+        {
+          remediation: "Set 'expose_php = Off' in php.ini.",
+          resource: exposePhpFoundIn[0],
+          metadata: { binaries: exposePhpFoundIn },
+        },
+      ),
+    );
   }
 
   return findings;

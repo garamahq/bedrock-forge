@@ -71,22 +71,22 @@ async function fixWorldWritable(
   exec: Executor,
 ): Promise<HardeningActionResult> {
   const action = "FIX_WORLD_WRITABLE";
-  // Find world-writable files under /home (excluding symlinks and special fs)
+  // Find world-writable regular files under /home/*/public_html (excluding special fs/sockets)
   const find = await run(
     exec,
-    "find /home -xdev -type f -perm -002 2>/dev/null | head -500",
+    "find /home/*/public_html -xdev -type f -perm -002 2>/dev/null | head -500",
   );
   const files = find.stdout.trim();
-  if (!files) return skip(action, "No world-writable files found in /home");
+  if (!files) return skip(action, "No world-writable files found in public_html directories");
 
   const fix = await run(
     exec,
-    "find /home -xdev -type f -perm -002 -exec chmod o-w {} \\;",
+    "find /home/*/public_html -xdev -type f -perm -002 -exec chmod o-w {} \\;",
   );
   if (fix.code !== 0) return fail(action, fix.stderr || "chmod failed");
 
-  const count = files.split("\n").length;
-  return ok(action, `Removed world-writable bit from ${count} file(s)`);
+  const count = files.split("\n").filter(Boolean).length;
+  return ok(action, `Removed world-writable bit from ${count} file(s) in public_html`);
 }
 
 async function disableX11Forwarding(
@@ -432,29 +432,61 @@ async function blockPhpUploads(
   webRoot: string,
 ): Promise<HardeningActionResult> {
   const action = "BLOCK_PHP_UPLOADS";
-  const htaccess = `${webRoot}/wp-content/uploads/.htaccess`;
   const block =
-    '<FilesMatch "\\.(php|php5|phtml)$">\n  Deny from all\n</FilesMatch>';
+    '<FilesMatch "\\.(php|php3|php4|php5|phtml|phar|sh|pl|py|cgi)$">\n' +
+    '  <IfModule mod_authz_core.c>\n    Require all denied\n  </IfModule>\n' +
+    '  <IfModule !mod_authz_core.c>\n    Order Deny,Allow\n    Deny from all\n  </IfModule>\n' +
+    '</FilesMatch>';
 
-  // Ensure the uploads directory exists
-  const mkDir = await run(exec, `mkdir -p "${webRoot}/wp-content/uploads"`);
-  if (mkDir.code !== 0)
-    return fail(action, mkDir.stderr || "Cannot create uploads dir");
+  // Support both standard wp-content/uploads and Bedrock app/uploads
+  const targetUploadDirs = [
+    `${webRoot}/app/uploads`,
+    `${webRoot}/wp-content/uploads`,
+  ];
+  let writtenCount = 0;
+  let alreadyPresentCount = 0;
 
-  const check = await run(
-    exec,
-    `grep -q "FilesMatch" "${htaccess}" 2>/dev/null`,
-  );
-  if (check.code === 0) return skip(action, "PHP block rule already present");
+  for (const dir of targetUploadDirs) {
+    const isDir = await run(exec, `[ -d "${dir}" ] && echo yes || echo no`);
+    if (isDir.stdout.trim() === "yes") {
+      const htaccess = `${dir}/.htaccess`;
+      const check = await run(
+        exec,
+        `grep -q "FilesMatch" "${htaccess}" 2>/dev/null`,
+      );
+      if (check.code === 0) {
+        alreadyPresentCount++;
+        continue;
+      }
+      const write = await run(
+        exec,
+        `printf '%s\\n' '${block.replace(/'/g, "'\\''")}' >> "${htaccess}"`,
+      );
+      if (write.code === 0) {
+        writtenCount++;
+      }
+    }
+  }
 
-  const write = await run(
-    exec,
-    `printf '%s\\n' '${block.replace(/'/g, "'\\''")}' >> "${htaccess}"`,
-  );
-  if (write.code !== 0)
-    return fail(action, write.stderr || "Failed to write .htaccess");
+  if (writtenCount === 0 && alreadyPresentCount > 0) {
+    return skip(action, "PHP execution block already present in uploads directories");
+  }
 
-  return ok(action, `PHP execution blocked in ${htaccess}`);
+  if (writtenCount === 0 && alreadyPresentCount === 0) {
+    // Create standard dir and apply
+    const defaultDir = (await run(exec, `[ -d "${webRoot}/app" ] && echo bedrock || echo standard`)).stdout.trim() === "bedrock"
+      ? `${webRoot}/app/uploads`
+      : `${webRoot}/wp-content/uploads`;
+    await run(exec, `mkdir -p "${defaultDir}"`);
+    const write = await run(
+      exec,
+      `printf '%s\\n' '${block.replace(/'/g, "'\\''")}' >> "${defaultDir}/.htaccess"`,
+    );
+    if (write.code !== 0) return fail(action, write.stderr || "Failed to write .htaccess");
+    return ok(action, `PHP execution blocked in ${defaultDir}/.htaccess`);
+  }
+
+  return ok(action, `PHP execution blocked in ${writtenCount} uploads directory/directories`);
 }
 
 async function blockXmlrpc(
@@ -662,21 +694,23 @@ async function blockSensitiveFiles(
   const action = "BLOCK_SENSITIVE_FILES";
   const htaccess = `${webRoot}/.htaccess`;
   const wpContentDir = `${webRoot}/wp-content`;
-  const appHtaccess = `${wpContentDir}/.htaccess`;
+  const appDir = `${webRoot}/app`;
+
+  // Clean up any legacy buggy _bf_app_path_guard_ blocks if present
+  for (const dir of [wpContentDir, appDir]) {
+    const targetHtaccess = `${dir}/.htaccess`;
+    await run(
+      exec,
+      `[ -f "${targetHtaccess}" ] && sed -i '/# _bf_app_path_guard_/,/<\/IfModule>/d' "${targetHtaccess}" 2>/dev/null || true`,
+    );
+  }
+
   const rootCheck = await run(
     exec,
     `grep -q "_bf_sensitive_block_" "${htaccess}" 2>/dev/null`,
   );
-  const appCheck = await run(
-    exec,
-    `grep -q "_bf_app_path_guard_" "${appHtaccess}" 2>/dev/null`,
-  );
-  if (rootCheck.code === 0 && appCheck.code === 0)
-    return skip(action, "Sensitive file and Bedrock app path blocks present");
-
-  const mkDir = await run(exec, `mkdir -p "${wpContentDir}"`);
-  if (mkDir.code !== 0)
-    return fail(action, mkDir.stderr || "Cannot create wp-content dir");
+  if (rootCheck.code === 0)
+    return skip(action, "Sensitive file access blocks already present in .htaccess");
 
   const denyBlock = [
     "  <IfModule mod_authz_core.c>",
@@ -689,59 +723,25 @@ async function blockSensitiveFiles(
   ].join("\n");
   const block = [
     "",
-    "# _bf_sensitive_block_ Deny access to backup, config, and package files",
-    '<FilesMatch "\\.(env|bak|sql|gz|tar|zip|log)$">',
+    "# _bf_sensitive_block_ Deny direct web access to secrets, backup, and package metadata",
+    '<FilesMatch "(^#.*#|\\.(bak|conf|dist|fla|in[ci]|log|psd|sh|sql|sw[op]|sqlite|sqlite3|db|env|env\\..*|tgz|tar|gz|zip|bz2))$">',
     denyBlock,
     "</FilesMatch>",
-    '<FilesMatch "^(composer\\.(json|lock)|package\\.json|yarn\\.lock|\\.htpasswd)$">',
+    '<FilesMatch "^(composer\\.(json|lock)|package\\.json|package-lock\\.json|yarn\\.lock|pnpm-lock\\.yaml|auth\\.json|\\.htpasswd|\\.git.*)$">',
     denyBlock,
     "</FilesMatch>",
   ].join("\n");
 
-  if (rootCheck.code !== 0) {
-    const writeRoot = await run(
-      exec,
-      `printf '%s\\n' '${block.replace(/'/g, "'\\''")}' >> "${htaccess}"`,
-    );
-    if (writeRoot.code !== 0)
-      return fail(action, writeRoot.stderr || "Failed to write .htaccess");
-  }
-
-  if (appCheck.code !== 0) {
-    const appGuard = [
-      "",
-      "# _bf_app_path_guard_ Deny unsafe direct file access in wp-content/app",
-      "Options -Indexes",
-      '<FilesMatch "^\\.">',
-      denyBlock,
-      "</FilesMatch>",
-      '<FilesMatch "\\.(php|php3|php4|php5|phtml|phar|pl|py|jsp|asp|aspx|cgi|sh|log|ini|conf|bak|sql|env|gz|tar|zip)$">',
-      denyBlock,
-      "</FilesMatch>",
-      '<FilesMatch "^(composer\\.(json|lock)|package\\.json|yarn\\.lock|pnpm-lock\\.yaml|\\.htpasswd)$">',
-      denyBlock,
-      "</FilesMatch>",
-      "<IfModule mod_rewrite.c>",
-      "  RewriteEngine On",
-      "  RewriteCond %{REQUEST_FILENAME} -f",
-      "  RewriteCond %{REQUEST_URI} !\\.(css|js|mjs|map|json|jpg|jpeg|png|gif|webp|svg|ico|woff|woff2|ttf|eot|otf|pdf|txt|xml|mp4|webm|mp3|wav|avif)$ [NC]",
-      "  RewriteRule ^ - [F,L]",
-      "</IfModule>",
-    ].join("\n");
-    const writeApp = await run(
-      exec,
-      `printf '%s\\n' '${appGuard.replace(/'/g, "'\\''")}' >> "${appHtaccess}"`,
-    );
-    if (writeApp.code !== 0)
-      return fail(
-        action,
-        writeApp.stderr || "Failed to write wp-content .htaccess",
-      );
-  }
+  const writeRoot = await run(
+    exec,
+    `printf '%s\\n' '${block.replace(/'/g, "'\\''")}' >> "${htaccess}"`,
+  );
+  if (writeRoot.code !== 0)
+    return fail(action, writeRoot.stderr || "Failed to write .htaccess");
 
   return ok(
     action,
-    `Sensitive file access blocked in ${htaccess}; Bedrock app path guard enforced in ${appHtaccess}`,
+    `Sensitive file access protection safely applied to ${htaccess}`,
   );
 }
 
@@ -814,11 +814,7 @@ async function forceReinstallCore(
   webRoot: string,
 ): Promise<HardeningActionResult> {
   const action = "FORCE_REINSTALL_CORE";
-  const cmd = `wp core download --version=$(wp core version --path="${webRoot}" --skip-plugins --allow-root) --force --path="${webRoot}" --skip-plugins --allow-root`;
-  const runCmd = await run(exec, cmd);
-  if (runCmd.code !== 0)
-    return fail(action, runCmd.stderr || "wp core download failed");
-  return ok(action, "WordPress core files reinstalled successfully");
+  return skip(action, "Core reinstalls are managed safely through Composer dependencies");
 }
 
 async function updateAllPlugins(
@@ -826,11 +822,7 @@ async function updateAllPlugins(
   webRoot: string,
 ): Promise<HardeningActionResult> {
   const action = "UPDATE_ALL_PLUGINS";
-  const cmd = `wp plugin update --all --path="${webRoot}" --skip-plugins --allow-root`;
-  const runCmd = await run(exec, cmd);
-  if (runCmd.code !== 0)
-    return fail(action, runCmd.stderr || "wp plugin update failed");
-  return ok(action, "All plugins updated to their latest versions");
+  return skip(action, "Plugin updates are managed safely through Composer in Packages/Plugins");
 }
 
 // ─── Malware Quarantine ──────────────────────────────────────────────────────
@@ -971,13 +963,13 @@ export async function applyServerHardeningActions(
           results.push(await installFail2ban(exec, trustedCidrs));
           break;
         case "INSTALL_AUDITD":
-          results.push(await installAuditd(exec));
+          results.push(skip("INSTALL_AUDITD", "auditd installation is retired to prevent excessive disk I/O and log churn"));
           break;
         case "BLOCK_BRUTE_FORCE_IPS":
-          results.push(await blockBruteForceIps(exec, trustedCidrs));
+          results.push(skip("BLOCK_BRUTE_FORCE_IPS", "Brute-force protection is handled dynamically via fail2ban"));
           break;
         case "DELETE_PHP_UPLOAD_FILES":
-          results.push(await deletePhpUploadFilesServer(exec));
+          results.push(skip("DELETE_PHP_UPLOAD_FILES", "Direct deletion is retired; use Quarantine Malware or Block PHP in Uploads"));
           break;
         case "CLEAN_HTACCESS_REDIRECTS":
           results.push(await cleanHtaccessRedirectsServer(exec));
@@ -1033,7 +1025,7 @@ export async function applyEnvironmentHardeningActions(
           results.push(await disableDirectoryListing(exec, webRoot));
           break;
         case "DELETE_PHP_UPLOAD_FILES":
-          results.push(await deletePhpUploadFilesEnv(exec, webRoot));
+          results.push(skip("DELETE_PHP_UPLOAD_FILES", "Direct deletion is retired; use Quarantine Malware or Block PHP in Uploads"));
           break;
         case "CLEAN_HTACCESS_REDIRECTS":
           results.push(await cleanHtaccessRedirectsEnv(exec, webRoot));

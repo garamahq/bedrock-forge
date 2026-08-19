@@ -69,7 +69,7 @@ export const SERVER_HARDENING_ACTIONS = [
   {
     id: "FIX_WORLD_WRITABLE",
     label: "Fix world-writable files",
-    description: "Remove world-writable permissions from files in /home",
+    description: "Remove world-writable permissions from files in public_html",
   },
   {
     id: "DISABLE_X11_FORWARDING",
@@ -89,23 +89,7 @@ export const SERVER_HARDENING_ACTIONS = [
   {
     id: "INSTALL_FAIL2BAN",
     label: "Install / start fail2ban",
-    description: "Install fail2ban and enable it to auto-ban brute-force IPs",
-  },
-  {
-    id: "INSTALL_AUDITD",
-    label: "Install / start auditd",
-    description:
-      "Install the Linux audit daemon for kernel-level event logging",
-  },
-  {
-    id: "BLOCK_BRUTE_FORCE_IPS",
-    label: "Block brute-force IPs",
-    description: "Auto-detect IPs with ≥50 failed SSH logins and ufw deny each",
-  },
-  {
-    id: "DELETE_PHP_UPLOAD_FILES",
-    label: "Delete PHP files in uploads",
-    description: "Remove .php files found inside WordPress uploads directories",
+    description: "Install fail2ban and enable it to dynamically auto-ban brute-force IPs",
   },
   {
     id: "CLEAN_HTACCESS_REDIRECTS",
@@ -125,7 +109,7 @@ export const ENVIRONMENT_HARDENING_ACTIONS = [
   {
     id: "BLOCK_PHP_UPLOADS",
     label: "Block PHP in uploads",
-    description: "Deny PHP execution in wp-content/uploads via .htaccess",
+    description: "Deny PHP execution in uploads directories via .htaccess",
     group: "recommended",
     risk: "safe",
     preview:
@@ -168,18 +152,6 @@ export const ENVIRONMENT_HARDENING_ACTIONS = [
       "Adds Options -Indexes to prevent visitors browsing directory contents.",
   },
   {
-    id: "DELETE_PHP_UPLOAD_FILES",
-    label: "Delete PHP files in uploads",
-    description:
-      "Opt-in cleanup: remove .php files found inside wp-content/uploads",
-    risky: true,
-    defaultSelected: false,
-    group: "cleanup",
-    risk: "risky",
-    preview:
-      "Deletes PHP files inside uploads. Use during malware cleanup after confirming those files are not expected.",
-  },
-  {
     id: "CLEAN_HTACCESS_REDIRECTS",
     label: "Clean suspicious .htaccess redirects",
     description:
@@ -207,7 +179,7 @@ export const ENVIRONMENT_HARDENING_ACTIONS = [
     group: "recommended",
     risk: "safe",
     preview:
-      "Blocks secrets, backups, package metadata, and unsafe Bedrock app-path files while allowing normal static assets.",
+      "Safely blocks secrets, backups, and package metadata without interfering with legitimate plugin endpoints.",
   },
   {
     id: "DISABLE_FILE_EDITOR",
@@ -230,30 +202,6 @@ export const ENVIRONMENT_HARDENING_ACTIONS = [
       "Adds a rewrite guard to stop ?author=N username discovery redirects.",
   },
   {
-    id: "FORCE_REINSTALL_CORE",
-    label: "Force reinstall WP core",
-    description:
-      "Opt-in repair: overwrites core files with a fresh copy to remove unauthorized changes",
-    risky: true,
-    defaultSelected: false,
-    group: "repair",
-    risk: "risky",
-    preview:
-      "Runs a WordPress core reinstall. This can overwrite modified core files and should be paired with a backup.",
-  },
-  {
-    id: "UPDATE_ALL_PLUGINS",
-    label: "Update all plugins",
-    description:
-      "Opt-in update: brings all plugins to the latest version to patch vulnerabilities",
-    risky: true,
-    defaultSelected: false,
-    group: "updates",
-    risk: "risky",
-    preview:
-      "Updates all plugins through WP-CLI. Test compatibility on staging before applying to production.",
-  },
-  {
     id: "QUARANTINE_MALWARE",
     label: "Quarantine malware files",
     description:
@@ -270,8 +218,6 @@ export const ENVIRONMENT_HARDENING_ACTIONS = [
 export const HARDENING_ACTION_GROUP_LABELS: Record<string, string> = {
   recommended: "Recommended safe protections",
   cleanup: "Cleanup actions",
-  repair: "Repair actions",
-  updates: "Updates",
   incident: "Incident response",
 };
 
