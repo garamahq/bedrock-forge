@@ -16,3 +16,10 @@ export interface CloudflareDnsRecord {
   proxied?: boolean;
   ttl?: number;
 }
+
+export interface PagespeedStatus {
+  configured: boolean;
+  provider: "auto" | "local" | "pagespeed";
+  hasApiKey: boolean;
+  apiKeyPreview: string | null;
+}

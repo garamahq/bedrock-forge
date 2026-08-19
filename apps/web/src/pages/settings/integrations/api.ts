@@ -1,5 +1,10 @@
 import { api } from "@/lib/api-client";
-import { GdriveStatus, CloudflareStatus, CloudflareDnsRecord } from "./types";
+import {
+  GdriveStatus,
+  CloudflareStatus,
+  CloudflareDnsRecord,
+  PagespeedStatus,
+} from "./types";
 
 export const integrationsApi = {
   getGdriveStatus: () => api.get<GdriveStatus>("/settings/gdrive"),
@@ -38,4 +43,19 @@ export const integrationsApi = {
 
   updateDnsRecord: (recordId: string, params: { proxied: boolean }) =>
     api.put(`/settings/cloudflare/dns-records/${recordId}`, params),
+
+  getPagespeedStatus: () => api.get<PagespeedStatus>("/settings/pagespeed"),
+
+  savePagespeed: (params: {
+    apiKey?: string;
+    provider?: "auto" | "local" | "pagespeed";
+  }) => api.put("/settings/pagespeed", params),
+
+  testPagespeed: (url?: string) =>
+    api.post<{ success: boolean; message: string; data?: unknown }>(
+      "/settings/pagespeed/test",
+      { url },
+    ),
+
+  deletePagespeed: () => api.delete("/settings/pagespeed"),
 };

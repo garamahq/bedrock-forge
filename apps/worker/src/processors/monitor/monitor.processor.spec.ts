@@ -3,6 +3,7 @@ import { getQueueToken } from "@nestjs/bullmq";
 import { ConfigService } from "@nestjs/config";
 import { MonitorProcessor } from "./monitor.processor";
 import { PrismaService } from "../../prisma/prisma.service";
+import { EncryptionService } from "../../encryption/encryption.service";
 import { JOB_TYPES, QUEUES } from "@bedrock-forge/shared";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -32,6 +33,9 @@ type MockPrisma = {
   maintenanceWindow: {
     count: jest.Mock;
   };
+  appSetting: {
+    findUnique: jest.Mock;
+  };
 };
 
 function makePrisma(): MockPrisma {
@@ -60,6 +64,9 @@ function makePrisma(): MockPrisma {
     maintenanceWindow: {
       count: jest.fn().mockResolvedValue(0),
     },
+    appSetting: {
+      findUnique: jest.fn().mockResolvedValue(null),
+    },
   };
 }
 
@@ -68,11 +75,8 @@ function makeNotifQueue() {
 }
 
 function baseMonitor(
-  overrides: Partial<{
-    last_checked_at: Date | null;
-    last_status: number | null;
-  }> = {},
-) {
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
   return {
     id: BigInt(1),
     environment_id: BigInt(5),
@@ -108,6 +112,13 @@ describe("MonitorProcessor", () => {
         MonitorProcessor,
         { provide: PrismaService, useValue: prisma },
         { provide: ConfigService, useValue: { get: jest.fn() } },
+        {
+          provide: EncryptionService,
+          useValue: {
+            decrypt: jest.fn((v: string) => v),
+            encrypt: jest.fn((v: string) => v),
+          },
+        },
         { provide: getQueueToken(QUEUES.MONITORS), useValue: monitorsQueue },
         { provide: getQueueToken(QUEUES.NOTIFICATIONS), useValue: notifQueue },
       ],

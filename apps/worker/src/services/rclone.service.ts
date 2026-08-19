@@ -200,6 +200,33 @@ export class RcloneService {
     return { child, stream: child.stdout as Readable };
   }
 
+  /**
+   * Get a shareable Google Drive web URL for a file using `rclone link`.
+   */
+  async getShareLink(folderId: string, filename: string): Promise<string | null> {
+    try {
+      const { stdout } = await execFileAsync(
+        "rclone",
+        [
+          "link",
+          "--config",
+          this.configPath,
+          "--drive-root-folder-id",
+          folderId,
+          `${this.remoteName}:${filename}`,
+        ],
+        { timeout: 30_000 },
+      );
+      const link = stdout.trim();
+      return link.startsWith("http") ? link : null;
+    } catch (err) {
+      this.logger.warn(
+        `Failed to generate Google Drive share link for ${filename}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+  }
+
   get remote(): string {
     return this.remoteName;
   }

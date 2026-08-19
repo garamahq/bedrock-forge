@@ -142,3 +142,53 @@ export function useToggleDnsProxy() {
       }),
   });
 }
+
+export function usePagespeedStatus() {
+  return useQuery({
+    queryKey: ["pagespeed-status"],
+    queryFn: integrationsApi.getPagespeedStatus,
+  });
+}
+
+export function useSavePagespeed() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: integrationsApi.savePagespeed,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["pagespeed-status"] });
+      toast({ title: "PageSpeed & Lighthouse settings saved" });
+    },
+    onError: (err: any) =>
+      toast({
+        title: "Failed to save settings",
+        description: err?.message ?? "An error occurred.",
+        variant: "destructive",
+      }),
+  });
+}
+
+export function useTestPagespeed() {
+  return useMutation({
+    mutationFn: integrationsApi.testPagespeed,
+    onError: (err: any) => {
+      toast({
+        title: "PageSpeed test failed",
+        description: err?.message ?? "Failed to connect to Google PageSpeed API.",
+        variant: "destructive",
+      });
+    },
+  });
+}
+
+export function useDeletePagespeed() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: integrationsApi.deletePagespeed,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["pagespeed-status"] });
+      toast({ title: "PageSpeed configuration removed" });
+    },
+    onError: () =>
+      toast({ title: "Failed to remove configuration", variant: "destructive" }),
+  });
+}

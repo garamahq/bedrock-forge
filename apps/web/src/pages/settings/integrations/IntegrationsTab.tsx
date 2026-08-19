@@ -2,6 +2,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { NotificationsPage } from "@/pages/NotificationsPage";
 import { GdriveStorage } from "./components/GdriveStorage";
 import { CloudflareDns } from "./components/CloudflareDns";
+import { PageSpeedIntegration } from "./components/PageSpeedIntegration";
 
 export function IntegrationsTab() {
   return (
@@ -11,6 +12,7 @@ export function IntegrationsTab() {
           <TabsTrigger value="messaging">Messaging</TabsTrigger>
           <TabsTrigger value="storage">Storage</TabsTrigger>
           <TabsTrigger value="cloudflare">Cloudflare</TabsTrigger>
+          <TabsTrigger value="pagespeed">PageSpeed / Lighthouse</TabsTrigger>
         </TabsList>
 
         <TabsContent value="messaging">
@@ -23,6 +25,10 @@ export function IntegrationsTab() {
 
         <TabsContent value="cloudflare">
           <CloudflareDns />
+        </TabsContent>
+
+        <TabsContent value="pagespeed">
+          <PageSpeedIntegration />
         </TabsContent>
       </Tabs>
     </div>

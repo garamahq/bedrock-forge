@@ -2,8 +2,11 @@ import { Processor, WorkerHost } from "@nestjs/bullmq";
 import { Logger } from "@nestjs/common";
 import { Job } from "bullmq";
 import { PrismaClient } from "@prisma/client";
+import { mkdir, writeFile, unlink } from "fs/promises";
+import { join } from "path";
 import { PrismaService } from "../../prisma/prisma.service";
 import { EncryptionService } from "../../encryption/encryption.service";
+import { RcloneService } from "../../services/rclone.service";
 import { QUEUES, JOB_TYPES } from "@bedrock-forge/shared";
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -48,52 +51,47 @@ function fmtBytes(bytes: number): string {
 type ReportPeriod =
   | "last_7d"
   | "last_30d"
-  | "last_90d"
-  | "this_month"
-  | "last_month";
-
-const PERIOD_LABELS: Record<ReportPeriod, string> = {
-  last_7d: "Last 7 days",
-  last_30d: "Last 30 days",
-  last_90d: "Last 90 days",
-  this_month: "This month",
-  last_month: "Last month",
-};
+  | "current_month"
+  | "previous_month";
 
 function computeDateRange(
   period: ReportPeriod,
   now: Date,
 ): { startDate: Date; dateRange: string; periodLabel: string } {
   let startDate: Date;
+  let periodLabel: string;
+
   switch (period) {
     case "last_30d":
       startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+      periodLabel = "Last 30 Days";
       break;
-    case "last_90d":
-      startDate = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+    case "current_month":
+      startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+      periodLabel = `${now.toLocaleString("default", { month: "long" })} ${now.getFullYear()}`;
       break;
-    case "this_month": {
-      startDate = new Date(
-        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1),
-      );
-      break;
+    case "previous_month": {
+      const prevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      startDate = prevMonth;
+      const endPrevMonth = new Date(now.getFullYear(), now.getMonth(), 0);
+      const label = `${prevMonth.toLocaleString("default", { month: "long" })} ${prevMonth.getFullYear()}`;
+      return {
+        startDate,
+        dateRange: `${fmt(prevMonth)} to ${fmt(endPrevMonth)}`,
+        periodLabel: label,
+      };
     }
-    case "last_month": {
-      const y =
-        now.getUTCMonth() === 0
-          ? now.getUTCFullYear() - 1
-          : now.getUTCFullYear();
-      const m = now.getUTCMonth() === 0 ? 11 : now.getUTCMonth() - 1;
-      startDate = new Date(Date.UTC(y, m, 1));
-      break;
-    }
-    default: // last_7d
+    case "last_7d":
+    default:
       startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+      periodLabel = "Weekly Report";
+      break;
   }
+
   return {
     startDate,
-    dateRange: `${fmt(startDate)} → ${fmt(now)}`,
-    periodLabel: PERIOD_LABELS[period] ?? PERIOD_LABELS.last_7d,
+    dateRange: `${fmt(startDate)} to ${fmt(now)}`,
+    periodLabel,
   };
 }
 
@@ -104,6 +102,16 @@ function th(text: string) {
 function cell(text: string, color?: string) {
   return { text, fontSize: 8, color: color ?? "#333" };
 }
+
+type ServerRow = {
+  name: string;
+  ip: string;
+  provider: string;
+  status: string;
+  cyberpanel: string;
+  envCount: number;
+  securityScore: number | null;
+};
 
 type BackupRow = {
   projectName: string;
@@ -129,20 +137,62 @@ function buildDocDef(
   generatedAt: Date,
   backups: BackupRow[],
   monitors: MonitorRow[],
+  servers: ServerRow[] = [],
 ) {
   const failedBackups = backups.filter((b) => b.status === "failed").length;
   const okBackups = backups.filter((b) => b.status === "completed").length;
   const downMonitors = monitors.filter(
     (m) => m.lastStatus !== null && (m.lastStatus === 0 || m.lastStatus >= 400),
   ).length;
+  const onlineServers = servers.filter(
+    (s) => s.status === "active" || s.status === "online" || s.status === "connected",
+  ).length;
+  const totalEnvs = servers.reduce((acc, s) => acc + s.envCount, 0);
 
   const summaryCard = (label: string, value: string, color = "#1a1a2e") => ({
     stack: [
-      { text: value, fontSize: 20, bold: true, color },
+      { text: value, fontSize: 18, bold: true, color },
       { text: label, fontSize: 7, color: "#666" },
     ],
-    margin: [4, 4, 4, 4] as [number, number, number, number],
+    margin: [2, 4, 2, 4] as [number, number, number, number],
   });
+
+  const serverTableBody: unknown[][] = [
+    [
+      th("Server Name"),
+      th("IP Address"),
+      th("Provider"),
+      th("CyberPanel"),
+      th("Status"),
+      th("Envs"),
+      th("Security"),
+    ],
+    ...servers.map((s) => {
+      const isOnline =
+        s.status === "active" || s.status === "online" || s.status === "connected";
+      return [
+        cell(s.name),
+        cell(s.ip),
+        cell(s.provider),
+        cell(s.cyberpanel),
+        cell(
+          s.status.toUpperCase(),
+          isOnline ? "#15803d" : s.status === "maintenance" ? "#d97706" : "#b91c1c",
+        ),
+        cell(String(s.envCount)),
+        cell(
+          s.securityScore != null ? `${s.securityScore}/100` : "—",
+          s.securityScore != null
+            ? s.securityScore >= 85
+              ? "#15803d"
+              : s.securityScore >= 70
+                ? "#d97706"
+                : "#b91c1c"
+            : "#666",
+        ),
+      ];
+    }),
+  ];
 
   const backupTableBody: unknown[][] = [
     [
@@ -171,7 +221,7 @@ function buildDocDef(
   ];
 
   const monitorTableBody: unknown[][] = [
-    [th("Project / URL"), th("Status"), th("Uptime %"), th("Checks (7d)")],
+    [th("Project / URL"), th("Status"), th("Uptime %"), th("Checks in Period")],
     ...monitors.map((m) => {
       const isDown =
         m.lastStatus !== null && (m.lastStatus === 0 || m.lastStatus >= 400);
@@ -225,21 +275,43 @@ function buildDocDef(
       { text: "\n" },
       {
         columns: [
-          summaryCard("Backups", String(backups.length)),
-          summaryCard("Successful", String(okBackups), "#15803d"),
           summaryCard(
-            "Failed",
-            String(failedBackups),
+            "Servers Online",
+            `${onlineServers} / ${servers.length || 1}`,
+            "#15803d",
+          ),
+          summaryCard("Active Envs", String(totalEnvs || backups.length)),
+          summaryCard(
+            "Backups OK",
+            `${okBackups} / ${backups.length}`,
             failedBackups > 0 ? "#b91c1c" : "#15803d",
           ),
           summaryCard(
-            "Monitors Down",
-            String(downMonitors),
+            "Monitors",
+            downMonitors > 0 ? `${downMonitors} Down` : "All Up",
             downMonitors > 0 ? "#b91c1c" : "#15803d",
           ),
         ],
         margin: [0, 0, 0, 12] as [number, number, number, number],
       },
+      ...(servers.length > 0
+        ? [
+            {
+              text: "Infrastructure & Server Health",
+              style: "sectionHeader",
+              margin: [0, 0, 0, 4] as [number, number, number, number],
+            },
+            {
+              table: {
+                headerRows: 1,
+                widths: ["*", 85, 75, 60, 50, 35, 50],
+                body: serverTableBody,
+              },
+              layout: "lightHorizontalLines" as const,
+              margin: [0, 0, 0, 12] as [number, number, number, number],
+            },
+          ]
+        : []),
       {
         text: "Backup Status",
         style: "sectionHeader",
@@ -256,7 +328,7 @@ function buildDocDef(
             margin: [0, 0, 0, 12] as [number, number, number, number],
           }
         : {
-            text: "No backups in the last 7 days.",
+            text: "No backups in the specified period.",
             color: "#666",
             margin: [0, 0, 0, 12] as [number, number, number, number],
           },
@@ -610,6 +682,7 @@ export class ReportProcessor extends WorkerHost {
   constructor(
     private readonly prisma: PrismaService,
     private readonly encryption: EncryptionService,
+    private readonly rclone: RcloneService,
   ) {
     super();
   }
@@ -640,6 +713,35 @@ export class ReportProcessor extends WorkerHost {
     });
 
     try {
+      // ── 0. Server infrastructure data ──────────────────────────────────────
+      const rawServers = await this.prisma.server.findMany({
+        select: {
+          name: true,
+          ip_address: true,
+          provider: true,
+          status: true,
+          cyberpanel_version: true,
+          environments: { select: { id: true } },
+          security_scans: {
+            where: { status: "completed" },
+            orderBy: { completed_at: "desc" },
+            take: 1,
+            select: { score: true },
+          },
+        },
+        orderBy: { name: "asc" },
+      });
+
+      const servers: ServerRow[] = rawServers.map((s) => ({
+        name: s.name,
+        ip: s.ip_address,
+        provider: s.provider ?? "Custom / VPS",
+        status: s.status,
+        cyberpanel: s.cyberpanel_version ? `v${s.cyberpanel_version}` : "No",
+        envCount: s.environments.length,
+        securityScore: s.security_scans[0]?.score ?? null,
+      }));
+
       // ── 1. Backup data ─────────────────────────────────────────────────────
 
       const rawBackups = (await this.prisma.backup.findMany({
@@ -702,9 +804,14 @@ export class ReportProcessor extends WorkerHost {
         now,
         backups,
         monitors,
+        servers,
       );
 
-      // ── 4. Send to notification channels ───────────────────────────────────
+      // ── 4. Upload to Google Drive (if configured) ───────────────────────────
+      const filename = `bedrock-forge-report-${period}-${fmt(now)}.pdf`;
+      const driveLink = await this.uploadToGoogleDrive(pdfBuffer, filename);
+
+      // ── 5. Send to notification channels ───────────────────────────────────
 
       // Honor channelIds filter when provided (manual trigger with specific channels)
       const channelWhere = channelIds?.length
@@ -725,7 +832,6 @@ export class ReportProcessor extends WorkerHost {
         );
       } else {
         const { WebClient } = await import("@slack/web-api");
-        const filename = `bedrock-forge-report-${period}-${fmt(now)}.pdf`;
         const okBackups = backups.filter(
           (b) => b.status === "completed",
         ).length;
@@ -737,22 +843,40 @@ export class ReportProcessor extends WorkerHost {
             m.lastStatus !== null &&
             (m.lastStatus === 0 || m.lastStatus >= 400),
         ).length;
+        const onlineServers = servers.filter(
+          (s) =>
+            s.status === "active" ||
+            s.status === "online" ||
+            s.status === "connected",
+        ).length;
+        const totalEnvs = servers.reduce((acc, s) => acc + s.envCount, 0);
 
         const initialComment = [
           `*Bedrock Forge — ${periodLabel}* (${dateRange})`,
           ``,
+          `• Infrastructure: *${onlineServers}/${servers.length || 1} servers online* · *${totalEnvs} active environments*`,
           `• Backups: *${okBackups} successful*, ${failedBackups > 0 ? `*${failedBackups} failed*` : "0 failed"} in period`,
           `• Monitors: ${downMonitors > 0 ? `*${downMonitors} currently down*` : "all up"} of ${monitors.length} total`,
+          ...(driveLink
+            ? [``, `📁 *Google Drive Report:* <${driveLink}|Open PDF on Google Drive>`]
+            : []),
           ``,
           `_(PDF attached)_`,
         ].join("\n");
+
         const googleChatSummary = [
-          `Bedrock Forge - ${periodLabel} (${dateRange})`,
+          `*Bedrock Forge — ${periodLabel}* (${dateRange})`,
           ``,
-          `Backups: ${okBackups} successful, ${failedBackups} failed in period`,
-          `Monitors: ${downMonitors > 0 ? `${downMonitors} currently down` : "all up"} of ${monitors.length} total`,
-          ``,
-          `PDF report generated in Forge.`,
+          `• Infrastructure: ${onlineServers}/${servers.length || 1} servers online · ${totalEnvs} active environments`,
+          `• Backups: ${okBackups} successful, ${failedBackups} failed in period`,
+          `• Monitors: ${downMonitors > 0 ? `${downMonitors} currently down` : "all up"} of ${monitors.length} total`,
+          ...(driveLink
+            ? [
+                ``,
+                `📄 *View / Download Report on Google Drive:*`,
+                `${driveLink}`,
+              ]
+            : [``, `PDF report generated in Forge.`]),
         ].join("\n");
 
         for (const channel of channels) {
@@ -921,7 +1045,11 @@ export class ReportProcessor extends WorkerHost {
         doc.end();
       });
 
-      // ── 4. Send to notification channels ─────────────────────────────────────
+      // ── 4. Upload to Google Drive (if configured) ───────────────────────────
+      const filename = `bedrock-forge-security-report-${fmt(now)}.pdf`;
+      const driveLink = await this.uploadToGoogleDrive(pdfBuffer, filename);
+
+      // ── 5. Send to notification channels ─────────────────────────────────────
 
       const channelWhere = channelIds?.length
         ? { active: true, id: { in: channelIds.map((id) => BigInt(id)) } }
@@ -935,24 +1063,45 @@ export class ReportProcessor extends WorkerHost {
         this.logger.warn("No active notification channels for security report");
       } else {
         const { WebClient } = await import("@slack/web-api");
-        const filename = `bedrock-forge-security-report-${fmt(now)}.pdf`;
+        const criticalCount = scans.reduce(
+          (s, r) => s + (r.summary?.critical ?? 0),
+          0,
+        );
+        const highCount = scans.reduce(
+          (s, r) => s + (r.summary?.high ?? 0),
+          0,
+        );
+        const mediumCount = scans.reduce(
+          (s, r) => s + (r.summary?.medium ?? 0),
+          0,
+        );
+
         const initialComment = [
           `*Bedrock Forge — Security Report* (${scopeLabel})`,
           ``,
-          `• Total findings: Critical *${scans.reduce((s, r) => s + (r.summary?.critical ?? 0), 0)}* · High *${scans.reduce((s, r) => s + (r.summary?.high ?? 0), 0)}* · Medium ${scans.reduce((s, r) => s + (r.summary?.medium ?? 0), 0)}`,
+          `• Total findings: Critical *${criticalCount}* · High *${highCount}* · Medium ${mediumCount}`,
           `• Acknowledged: ${ackCount}`,
           `• Scans included: ${scans.length}`,
+          ...(driveLink
+            ? [``, `📁 *Google Drive Report:* <${driveLink}|Open PDF on Google Drive>`]
+            : []),
           ``,
           `_(PDF attached)_`,
         ].join("\n");
+
         const googleChatSummary = [
-          `Bedrock Forge - Security Report (${scopeLabel})`,
+          `*Bedrock Forge — Security Report* (${scopeLabel})`,
           ``,
-          `Total findings: Critical ${scans.reduce((s, r) => s + (r.summary?.critical ?? 0), 0)} · High ${scans.reduce((s, r) => s + (r.summary?.high ?? 0), 0)} · Medium ${scans.reduce((s, r) => s + (r.summary?.medium ?? 0), 0)}`,
-          `Acknowledged: ${ackCount}`,
-          `Scans included: ${scans.length}`,
-          ``,
-          `PDF report generated in Forge.`,
+          `• Total findings: Critical ${criticalCount} · High ${highCount} · Medium ${mediumCount}`,
+          `• Acknowledged: ${ackCount}`,
+          `• Scans included: ${scans.length}`,
+          ...(driveLink
+            ? [
+                ``,
+                `📄 *View / Download Report on Google Drive:*`,
+                `${driveLink}`,
+              ]
+            : [``, `PDF report generated in Forge.`]),
         ].join("\n");
 
         for (const channel of channels) {
@@ -1010,6 +1159,51 @@ export class ReportProcessor extends WorkerHost {
     }
   }
 
+  private async uploadToGoogleDrive(
+    pdfBuffer: Buffer,
+    filename: string,
+  ): Promise<string | null> {
+    try {
+      const setting = await this.prisma.appSetting.findUnique({
+        where: { key: "rclone_gdrive_config" },
+      });
+      if (!setting?.value) return null;
+
+      const configured = await this.rclone.writeConfig();
+      if (!configured) return null;
+
+      const folderSetting = await this.prisma.appSetting.findUnique({
+        where: { key: "forge_system_backup_folder_id" },
+      });
+      const folderId = folderSetting?.value?.trim();
+      if (!folderId) {
+        this.logger.warn(
+          "Google Drive configured, but forge_system_backup_folder_id is not set",
+        );
+        return null;
+      }
+
+      const tmpDir = "/tmp/forge-reports";
+      await mkdir(tmpDir, { recursive: true });
+      const tmpPath = join(tmpDir, filename);
+      await writeFile(tmpPath, pdfBuffer);
+
+      await this.rclone.upload(tmpPath, folderId, filename);
+      const shareLink = await this.rclone.getShareLink(folderId, filename);
+      await unlink(tmpPath).catch(() => {});
+
+      this.logger.log(
+        `Report uploaded to Google Drive: ${filename} (link: ${shareLink ?? "none"})`,
+      );
+      return shareLink;
+    } catch (err) {
+      this.logger.warn(
+        `Failed to upload report to Google Drive: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+  }
+
   private async sendGoogleChatSummary(
     webhookUrlEnc: string | null,
     text: string,
@@ -1035,6 +1229,7 @@ export class ReportProcessor extends WorkerHost {
     generatedAt: Date,
     backups: BackupRow[],
     monitors: MonitorRow[],
+    servers: ServerRow[] = [],
   ): Promise<Buffer> {
     const printer = new PdfPrinter(FONTS, undefined, NOOP_RESOLVER);
     const docDef = buildDocDef(
@@ -1043,6 +1238,7 @@ export class ReportProcessor extends WorkerHost {
       generatedAt,
       backups,
       monitors,
+      servers,
     );
     const doc = await printer.createPdfKitDocument(docDef);
 

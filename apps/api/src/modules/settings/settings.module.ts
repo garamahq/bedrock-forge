@@ -5,6 +5,7 @@ import { SettingsRepository } from "./settings.repository";
 import { BillingSettingsService } from "./services/billing-settings.service";
 import { CloudflareSettingsService } from "./services/cloudflare-settings.service";
 import { GdriveSettingsService } from "./services/gdrive-settings.service";
+import { PagespeedSettingsService } from "./services/pagespeed-settings.service";
 import { EncryptionModule } from "../../common/encryption/encryption.module";
 
 @Module({
@@ -16,6 +17,7 @@ import { EncryptionModule } from "../../common/encryption/encryption.module";
     BillingSettingsService,
     CloudflareSettingsService,
     GdriveSettingsService,
+    PagespeedSettingsService,
   ],
   exports: [
     SettingsService,
@@ -23,6 +25,7 @@ import { EncryptionModule } from "../../common/encryption/encryption.module";
     BillingSettingsService,
     CloudflareSettingsService,
     GdriveSettingsService,
+    PagespeedSettingsService,
   ],
 })
 export class SettingsModule {}

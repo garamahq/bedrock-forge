@@ -8,6 +8,7 @@ import * as http from "http";
 import * as tls from "tls";
 import * as dns from "dns";
 import { PrismaService } from "../../prisma/prisma.service";
+import { EncryptionService } from "../../encryption/encryption.service";
 import { isHttpStatusWorking, JOB_TYPES, QUEUES } from "@bedrock-forge/shared";
 
 interface HttpCheckResult {
@@ -41,6 +42,7 @@ export class MonitorProcessor extends WorkerHost {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    private readonly encryption: EncryptionService,
     @InjectQueue(QUEUES.MONITORS)
     private readonly monitorsQueue: Queue,
     @InjectQueue(QUEUES.NOTIFICATIONS)
@@ -468,7 +470,51 @@ export class MonitorProcessor extends WorkerHost {
     }
   }
 
-  private async fetchPageSpeed(url: string, strategy: LighthouseStrategy) {
+  private async getResolvedPagespeedConfig(): Promise<{
+    apiKey: string | null;
+    provider: LighthouseProvider;
+  }> {
+    let apiKey = this.config.get<string>("pagespeed.apiKey") ?? null;
+    let provider = String(
+      this.config.get<string>("pagespeed.provider") ?? "auto",
+    ).toLowerCase() as LighthouseProvider;
+
+    try {
+      const [keySetting, providerSetting] = await Promise.all([
+        this.prisma.appSetting.findUnique({
+          where: { key: "pagespeed_api_key" },
+        }),
+        this.prisma.appSetting.findUnique({
+          where: { key: "pagespeed_provider" },
+        }),
+      ]);
+
+      if (keySetting?.value) {
+        try {
+          apiKey = this.encryption.decrypt(keySetting.value);
+        } catch {
+          apiKey = keySetting.value;
+        }
+      }
+
+      if (providerSetting?.value) {
+        const storedProvider = providerSetting.value.toLowerCase();
+        if (["auto", "local", "pagespeed"].includes(storedProvider)) {
+          provider = storedProvider as LighthouseProvider;
+        }
+      }
+    } catch (err) {
+      this.logger.warn(`Failed to read stored pagespeed settings: ${err}`);
+    }
+
+    return { apiKey, provider };
+  }
+
+  private async fetchPageSpeed(
+    url: string,
+    strategy: LighthouseStrategy,
+    apiKey: string | null,
+  ) {
     const endpoint = new URL(
       "https://www.googleapis.com/pagespeedonline/v5/runPagespeed",
     );
@@ -482,7 +528,6 @@ export class MonitorProcessor extends WorkerHost {
     ]) {
       endpoint.searchParams.append("category", category);
     }
-    const apiKey = this.config.get<string>("pagespeed.apiKey");
     if (apiKey) endpoint.searchParams.set("key", apiKey);
 
     const res = await fetch(endpoint, { signal: AbortSignal.timeout(120_000) });
@@ -492,7 +537,7 @@ export class MonitorProcessor extends WorkerHost {
         body?.error?.message ??
         `PageSpeed request failed with HTTP ${res.status}`;
       const message = /quota/i.test(rawMessage)
-        ? `PageSpeed quota exceeded. Switch LIGHTHOUSE_PROVIDER=local or wait for Google quota reset. ${rawMessage}`
+        ? `PageSpeed quota exceeded. Configure a Google PageSpeed API key in Settings > Integrations > PageSpeed, switch LIGHTHOUSE_PROVIDER=local, or wait for Google quota reset. ${rawMessage}`
         : rawMessage;
       throw new Error(message);
     }
@@ -503,9 +548,8 @@ export class MonitorProcessor extends WorkerHost {
     url: string,
     strategy: LighthouseStrategy,
   ): Promise<{ provider: "local" | "pagespeed"; result: any }> {
-    const provider = String(
-      this.config.get<string>("pagespeed.provider") ?? "auto",
-    ).toLowerCase() as LighthouseProvider;
+    const { apiKey, provider } = await this.getResolvedPagespeedConfig();
+
     if (!["auto", "local", "pagespeed"].includes(provider)) {
       throw new Error(
         `Invalid LIGHTHOUSE_PROVIDER=${provider}. Use auto, local, or pagespeed.`,
@@ -521,23 +565,28 @@ export class MonitorProcessor extends WorkerHost {
       } catch (err) {
         if (provider === "local") throw err;
         this.logger.warn(
-          `Local Lighthouse failed, falling back to PageSpeed: ${
+          `Local Lighthouse failed, falling back to Google PageSpeed Insights: ${
             err instanceof Error ? err.message : String(err)
           }`,
         );
       }
     }
 
-    const apiKey = this.config.get<string>("pagespeed.apiKey");
-    if (!apiKey && provider === "auto") {
-      throw new Error(
-        "Local Lighthouse failed and PAGESPEED_API_KEY is not configured for fallback.",
-      );
+    try {
+      return {
+        provider: "pagespeed",
+        result: await this.fetchPageSpeed(url, strategy, apiKey),
+      };
+    } catch (err) {
+      if (!apiKey) {
+        throw new Error(
+          `Local Lighthouse failed and Google PageSpeed Insights returned an error: ${
+            err instanceof Error ? err.message : String(err)
+          }. Tip: Add a Google PageSpeed API key in Settings > Integrations to ensure reliable audits.`,
+        );
+      }
+      throw err;
     }
-    return {
-      provider: "pagespeed",
-      result: await this.fetchPageSpeed(url, strategy),
-    };
   }
 
   private async runLocalLighthouse(url: string, strategy: LighthouseStrategy) {

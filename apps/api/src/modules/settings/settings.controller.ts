@@ -18,7 +18,12 @@ import { SettingsService } from "./settings.service";
 import { BillingSettingsService } from "./services/billing-settings.service";
 import { CloudflareSettingsService } from "./services/cloudflare-settings.service";
 import { GdriveSettingsService } from "./services/gdrive-settings.service";
+import {
+  PagespeedSettingsService,
+  PagespeedConfigResponse,
+} from "./services/pagespeed-settings.service";
 import { SetGdriveDto } from "./dto/gdrive-settings.dto";
+import { SetPagespeedSettingsDto } from "./dto/pagespeed-settings.dto";
 import { SetSettingDto } from "./dto/setting.dto";
 import { SetSshKeyDto } from "./dto/ssh-key.dto";
 import { SetBillingSettingsDto } from "./dto/billing-settings.dto";
@@ -37,6 +42,7 @@ export class SettingsController {
     private readonly billing: BillingSettingsService,
     private readonly cloudflare: CloudflareSettingsService,
     private readonly gdrive: GdriveSettingsService,
+    private readonly pagespeed: PagespeedSettingsService,
   ) {}
 
   /** Returns all non-sensitive settings as a key:value map. */
@@ -141,6 +147,28 @@ export class SettingsController {
     @Body("enabled") enabled: boolean,
   ) {
     return this.cloudflare.setCloudflareDevelopmentMode(enabled);
+  }
+
+  // ── PageSpeed / Lighthouse ─────────────────────────────────────────────
+
+  @Get("pagespeed") async getPagespeed(): Promise<PagespeedConfigResponse> {
+    return this.pagespeed.getPagespeedConfig();
+  }
+
+  @Put("pagespeed")
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async setPagespeed(@Body() dto: SetPagespeedSettingsDto) {
+    await this.pagespeed.setPagespeedConfig(dto);
+  }
+
+  @Delete("pagespeed")
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async deletePagespeed() {
+    await this.pagespeed.deletePagespeedConfig();
+  }
+
+  @Post("pagespeed/test") async testPagespeed(@Body("url") url?: string) {
+    return this.pagespeed.testPagespeed(url);
   }
 
   // ── System Backup Folder ID ─────────────────────────────────────────────
