@@ -1036,6 +1036,828 @@ export async function runMalwareScan(
   return findings;
 }
 
+// ─── SYSTEM_AUDIT ─────────────────────────────────────────────────────────────
+
+export async function runSystemAudit(exec: Executor): Promise<SecurityFinding[]> {
+  const findings: SecurityFinding[] = [];
+
+  // 1. OS details & pending updates
+  const { stdout: osRelease } = await exec.execute(
+    `cat /etc/os-release 2>/dev/null || true`,
+    { timeout: 10000 },
+  );
+  const prettyNameMatch = osRelease.match(/PRETTY_NAME="([^"]+)"/);
+  const prettyName = prettyNameMatch ? prettyNameMatch[1] : "Unknown Linux";
+
+  // 2. Kernel & Reboot required
+  const { stdout: kernel } = await exec.execute(`uname -r 2>/dev/null || true`, {
+    timeout: 5000,
+  });
+  const { stdout: rebootReq } = await exec.execute(
+    `test -f /var/run/reboot-required && echo "reboot_required" || echo "ok"`,
+    { timeout: 5000 },
+  );
+  if (rebootReq.trim() === "reboot_required") {
+    findings.push(
+      makeFinding(
+        "low",
+        "SYSTEM_HEALTH",
+        "System reboot required for pending kernel/package updates",
+        "The server has updated core packages or kernel that require a system reboot to take effect.",
+        {
+          remediation: "Schedule a maintenance window and reboot the server.",
+          metadata: { os: prettyName, kernel: kernel.trim() },
+        },
+      ),
+    );
+  }
+
+  // 3. Disk Space & Inode Usage
+  const { stdout: dfOut } = await exec.execute(
+    `df -Pk / 2>/dev/null | tail -1 || true`,
+    { timeout: 10000 },
+  );
+  const dfParts = dfOut.trim().split(/\s+/);
+  if (dfParts.length >= 5) {
+    const usePercent = parseInt(dfParts[4].replace("%", ""), 10);
+    if (!isNaN(usePercent)) {
+      if (usePercent >= 90) {
+        findings.push(
+          makeFinding(
+            "critical",
+            "SYSTEM_HEALTH",
+            `Root filesystem disk usage critically high (${usePercent}%)`,
+            `The root filesystem has reached ${usePercent}% capacity. Services or database transactions may fail due to lack of disk space.`,
+            {
+              remediation: "Clean up system logs (/var/log), temporary files, old backups, or resize disk volume.",
+              resource: "/",
+              metadata: { usedPercent: usePercent, mount: dfParts[5] || "/" },
+            },
+          ),
+        );
+      } else if (usePercent >= 80) {
+        findings.push(
+          makeFinding(
+            "medium",
+            "SYSTEM_HEALTH",
+            `Root filesystem disk usage elevated (${usePercent}%)`,
+            `The root filesystem has reached ${usePercent}% capacity.`,
+            {
+              remediation: "Monitor disk growth and clean up unused files or logs.",
+              resource: "/",
+              metadata: { usedPercent: usePercent },
+            },
+          ),
+        );
+      }
+    }
+  }
+
+  // 4. Inode Usage
+  const { stdout: dfiOut } = await exec.execute(
+    `df -Pi / 2>/dev/null | tail -1 || true`,
+    { timeout: 10000 },
+  );
+  const dfiParts = dfiOut.trim().split(/\s+/);
+  if (dfiParts.length >= 5) {
+    const inodePercent = parseInt(dfiParts[4].replace("%", ""), 10);
+    if (!isNaN(inodePercent) && inodePercent >= 85) {
+      findings.push(
+        makeFinding(
+          "high",
+          "SYSTEM_HEALTH",
+          `Root filesystem inode usage elevated (${inodePercent}%)`,
+          `The root filesystem has used ${inodePercent}% of available inodes, typically caused by millions of small cache, session, or mail files.`,
+          {
+            remediation: "Find and remove large directories containing excessive small files (e.g. PHP session files in /var/lib/php/sessions).",
+            resource: "/",
+            metadata: { inodePercent },
+          },
+        ),
+      );
+    }
+  }
+
+  // 5. Memory & Swap
+  const { stdout: freeOut } = await exec.execute(`free -m 2>/dev/null || true`, {
+    timeout: 5000,
+  });
+  const memLine = freeOut.split("\n").find((l) => l.startsWith("Mem:"));
+  if (memLine) {
+    const memParts = memLine.trim().split(/\s+/);
+    if (memParts.length >= 7) {
+      const totalMem = parseInt(memParts[1], 10);
+      const availMem = parseInt(memParts[6], 10);
+      if (totalMem > 0 && availMem >= 0) {
+        const freePct = Math.round((availMem / totalMem) * 100);
+        if (freePct < 5) {
+          findings.push(
+            makeFinding(
+              "high",
+              "SYSTEM_HEALTH",
+              `Available system memory critically low (${freePct}% available)`,
+              `Only ${availMem} MB of ${totalMem} MB memory is currently available. The system is at risk of invoking OOM-killer on critical services.`,
+              {
+                remediation: "Investigate memory consumers using top/htop or configure swap space.",
+                metadata: { totalMem, availMem, freePct },
+              },
+            ),
+          );
+        }
+      }
+    }
+  }
+
+  // 6. Time Synchronization (NTP)
+  const { stdout: timedateOut } = await exec.execute(
+    `timedatectl status 2>/dev/null || chronyc tracking 2>/dev/null || true`,
+    { timeout: 5000 },
+  );
+  if (
+    timedateOut &&
+    (timedateOut.includes("NTP service: inactive") ||
+      timedateOut.includes("System clock synchronized: no"))
+  ) {
+    findings.push(
+      makeFinding(
+        "low",
+        "SYSTEM_HEALTH",
+        "NTP time synchronization is inactive or not synchronized",
+        "The system clock is not synchronized with an NTP server. Inaccurate system time causes TLS certificate verification errors and corrupted log timestamps.",
+        {
+          remediation: "Enable systemd-timesyncd or chrony (e.g. timedatectl set-ntp true).",
+        },
+      ),
+    );
+  }
+
+  return findings;
+}
+
+// ─── PROCESS_AUDIT ────────────────────────────────────────────────────────────
+
+export async function runProcessAudit(exec: Executor): Promise<SecurityFinding[]> {
+  const findings: SecurityFinding[] = [];
+
+  // 1. Deleted-running executables (/proc/*/exe -> deleted) — primary indicator of stealth malware
+  const { stdout: deletedExes } = await exec.execute(
+    `ls -l /proc/*/exe 2>/dev/null | grep -i '(deleted)' || true`,
+    { timeout: 15000 },
+  );
+  const deletedLines = deletedExes
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  if (deletedLines.length > 0) {
+    const suspiciousPids: { pid: string; path: string; cmdline: string }[] = [];
+    for (const line of deletedLines) {
+      const match = line.match(/\/proc\/(\d+)\/exe\s*->\s*(.+)/);
+      if (match) {
+        const pid = match[1];
+        const exePath = match[2];
+        const { stdout: cmdline } = await exec.execute(
+          `cat /proc/${pid}/cmdline 2>/dev/null | tr '\\0' ' ' || true`,
+          { timeout: 5000 },
+        );
+        suspiciousPids.push({ pid, path: exePath, cmdline: cmdline.trim() });
+      }
+    }
+
+    if (suspiciousPids.length > 0) {
+      findings.push(
+        makeFinding(
+          "critical",
+          "DELETED_EXECUTABLE",
+          `${suspiciousPids.length} process(es) running from deleted binaries (/proc/*/exe)`,
+          `Processes are running whose executable files have been unlinked from the filesystem. This is a signature technique used by malware and cryptominers to evade filesystem scans.`,
+          {
+            remediation: "Inspect the PID and command line. Terminate suspicious processes and isolate the server if unauthorized.",
+            metadata: { processes: suspiciousPids },
+          },
+        ),
+      );
+    }
+  }
+
+  // 2. Processes executing out of /tmp, /var/tmp, /dev/shm
+  const { stdout: tmpProcs } = await exec.execute(
+    `ls -l /proc/*/cwd /proc/*/exe 2>/dev/null | grep -E '(/tmp|/var/tmp|/dev/shm)' || true`,
+    { timeout: 15000 },
+  );
+  if (tmpProcs.trim()) {
+    const lines = tmpProcs.split("\n").filter(Boolean);
+    findings.push(
+      makeFinding(
+        "critical",
+        "PROCESS_ANOMALY",
+        `Processes executing or based in temporary directories (/tmp, /var/tmp, /dev/shm)`,
+        `Found processes whose current working directory or binary path points into world-writable temporary directories.`,
+        {
+          remediation: "Inspect the process PIDs and binaries immediately. Terminate malicious processes.",
+          metadata: { raw: lines.slice(0, 10) },
+        },
+      ),
+    );
+  }
+
+  // 3. Web server spawning interactive shells (PHP -> sh/bash)
+  const { stdout: webShells } = await exec.execute(
+    `ps -eo pid,ppid,user,args 2>/dev/null | grep -E '(php-fpm|lsphp|httpd|apache2|nginx).*([0-9]+).*(sh|bash|python|perl|nc|curl|wget)' | grep -v grep || true`,
+    { timeout: 10000 },
+  );
+  if (webShells.trim()) {
+    const lines = webShells.split("\n").filter(Boolean);
+    findings.push(
+      makeFinding(
+        "critical",
+        "PROCESS_ANOMALY",
+        "Web server process spawned an interactive shell or downloader tool",
+        "A web server or PHP worker process appears to have spawned a child shell or downloader process (sh/bash/curl/nc). This indicates remote command execution (RCE).",
+        {
+          remediation: "Investigate web access logs for corresponding POST requests, identify the compromised PHP file, and quarantine it.",
+          metadata: { matches: lines.slice(0, 10) },
+        },
+      ),
+    );
+  }
+
+  // 4. Excessive CPU utilization by unknown process
+  const { stdout: highCpu } = await exec.execute(
+    `ps -eo pid,user,%cpu,%mem,command --sort=-%cpu 2>/dev/null | head -5 || true`,
+    { timeout: 10000 },
+  );
+  const cpuLines = highCpu.split("\n").filter(Boolean);
+  if (cpuLines.length > 1) {
+    const topProc = cpuLines[1].trim().split(/\s+/);
+    if (topProc.length >= 4) {
+      const cpuVal = parseFloat(topProc[2]);
+      if (!isNaN(cpuVal) && cpuVal >= 90) {
+        findings.push(
+          makeFinding(
+            "medium",
+            "PROCESS_ANOMALY",
+            `Process PID ${topProc[0]} (${topProc[1]}) consuming ${cpuVal}% CPU`,
+            `High CPU load detected from process: ${topProc.slice(4).join(" ")}`,
+            {
+              remediation: "Verify if this high CPU activity is expected (e.g. backup compression) or unapproved (cryptomining/runaway loop).",
+              metadata: { pid: topProc[0], user: topProc[1], cpu: cpuVal, cmd: topProc.slice(4).join(" ") },
+            },
+          ),
+        );
+      }
+    }
+  }
+
+  return findings;
+}
+
+// ─── NETWORK_AUDIT ────────────────────────────────────────────────────────────
+
+export async function runNetworkAudit(exec: Executor): Promise<SecurityFinding[]> {
+  const findings: SecurityFinding[] = [];
+
+  // 1. Listening ports
+  const { stdout: ssOut } = await exec.execute(
+    `ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null || true`,
+    { timeout: 15000 },
+  );
+
+  const lines = ssOut.split("\n").filter(Boolean);
+  const exposedDbPorts: { port: number; name: string; addr: string }[] = [];
+
+  const sensitivePorts: Record<number, string> = {
+    3306: "MySQL / MariaDB",
+    33060: "MySQL X-Protocol",
+    5432: "PostgreSQL",
+    6379: "Redis",
+    11211: "Memcached",
+    27017: "MongoDB",
+    9200: "Elasticsearch",
+  };
+
+  for (const line of lines) {
+    for (const [portStr, name] of Object.entries(sensitivePorts)) {
+      const port = Number(portStr);
+      // Matches :3306 bound to 0.0.0.0:* or *:* or [::]:*
+      if (
+        (line.includes(`:${port} `) || line.includes(`:${port}\t`)) &&
+        (line.includes("0.0.0.0:") || line.includes("*:") || line.includes("[::]:"))
+      ) {
+        exposedDbPorts.push({ port, name, addr: "0.0.0.0 / [::]" });
+      }
+    }
+  }
+
+  if (exposedDbPorts.length > 0) {
+    for (const db of exposedDbPorts) {
+      findings.push(
+        makeFinding(
+          db.port === 6379 || db.port === 11211 ? "critical" : "high",
+          "LISTENING_PORTS",
+          `${db.name} (port ${db.port}) listening on public network interface (0.0.0.0)`,
+          `The database/cache service is bound to all network interfaces. Unless strictly protected by a firewall, it may be exposed to unauthorized network access or brute-force attacks.`,
+          {
+            remediation: `Configure ${db.name} bind-address to 127.0.0.1 in its configuration file, or restrict access via UFW firewall.`,
+            resource: `Port ${db.port}`,
+            metadata: { service: db.name, port: db.port, bind: db.addr },
+          },
+        ),
+      );
+    }
+  }
+
+  // 2. Insecure protocols (Telnet / Rlogin)
+  for (const line of lines) {
+    if (line.includes(":23 ") && (line.includes("0.0.0.0") || line.includes("*"))) {
+      findings.push(
+        makeFinding(
+          "critical",
+          "LISTENING_PORTS",
+          "Telnet daemon (port 23) listening on public network interface",
+          "Telnet transmits credentials and traffic in plaintext. It should never be used.",
+          {
+            remediation: "Disable and remove telnetd immediately; use SSH exclusively.",
+            resource: "Port 23",
+          },
+        ),
+      );
+    }
+  }
+
+  return findings;
+}
+
+// ─── FIREWALL_AUDIT ───────────────────────────────────────────────────────────
+
+export async function runFirewallAudit(exec: Executor): Promise<SecurityFinding[]> {
+  const findings: SecurityFinding[] = [];
+
+  // Check UFW
+  const { stdout: ufwStatus } = await exec.execute(`ufw status 2>/dev/null || true`, {
+    timeout: 10000,
+  });
+  // Check iptables
+  const { stdout: iptablesRules } = await exec.execute(
+    `iptables -L -n 2>/dev/null | grep -E '^(Chain|ACCEPT|DROP|REJECT)' || true`,
+    { timeout: 10000 },
+  );
+
+  const isUfwActive = ufwStatus.includes("Status: active");
+  const hasIptablesRules = iptablesRules.includes("Chain INPUT") && (iptablesRules.includes("DROP") || iptablesRules.includes("REJECT"));
+
+  if (!isUfwActive && !hasIptablesRules) {
+    findings.push(
+      makeFinding(
+        "high",
+        "FIREWALL",
+        "No host-based firewall (UFW/iptables) is active",
+        "The server does not have an active host firewall. All listening ports are directly accessible from the network.",
+        {
+          remediation: "Enable UFW with default deny incoming: 'ufw default deny incoming && ufw allow ssh && ufw allow http && ufw allow https && ufw enable'.",
+        },
+      ),
+    );
+  } else if (isUfwActive) {
+    // Check if OpenLiteSpeed/CyberPanel port 8090 is open
+    if (ufwStatus.includes("8090") && ufwStatus.includes("ALLOW")) {
+      findings.push(
+        makeFinding(
+          "low",
+          "FIREWALL",
+          "CyberPanel admin port 8090 is accessible in UFW",
+          "Port 8090 is allowed in UFW rules. Consider restricting access to trusted management IPs only.",
+          {
+            remediation: "Restrict port 8090 access in UFW to your VPN or office IP allowlist.",
+            resource: "Port 8090",
+          },
+        ),
+      );
+    }
+  }
+
+  return findings;
+}
+
+// ─── FAIL2BAN_AUDIT ───────────────────────────────────────────────────────────
+
+export async function runFail2BanAudit(exec: Executor): Promise<SecurityFinding[]> {
+  const findings: SecurityFinding[] = [];
+
+  const { stdout: f2bActive } = await exec.execute(
+    `systemctl is-active fail2ban 2>/dev/null || true`,
+    { timeout: 5000 },
+  );
+
+  if (f2bActive.trim() !== "active") {
+    findings.push(
+      makeFinding(
+        "high",
+        "FAIL2BAN",
+        "Fail2Ban is not installed or service is inactive",
+        "Fail2Ban is not running to protect against SSH and web brute-force attacks.",
+        {
+          remediation: "Install and enable Fail2Ban: 'apt install -y fail2ban && systemctl enable --now fail2ban'.",
+        },
+      ),
+    );
+  } else {
+    const { stdout: f2bStatus } = await exec.execute(
+      `fail2ban-client status 2>/dev/null || true`,
+      { timeout: 10000 },
+    );
+    const jailMatch = f2bStatus.match(/Jail list:\s*(.+)/);
+    const jails = jailMatch
+      ? jailMatch[1]
+          .split(",")
+          .map((j) => j.trim())
+          .filter(Boolean)
+      : [];
+
+    if (jails.length === 0) {
+      findings.push(
+        makeFinding(
+          "medium",
+          "FAIL2BAN",
+          "Fail2Ban is running but has no active jails configured",
+          "The Fail2Ban daemon is running without any active monitoring jails.",
+          {
+            remediation: "Enable at least the sshd jail in /etc/fail2ban/jail.local.",
+          },
+        ),
+      );
+    } else {
+      // Collect total currently banned IPs across jails
+      let totalBanned = 0;
+      for (const jail of jails) {
+        const { stdout: jailOut } = await exec.execute(
+          `fail2ban-client status ${jail} 2>/dev/null || true`,
+          { timeout: 5000 },
+        );
+        const countMatch = jailOut.match(/Currently banned:\s*(\d+)/);
+        if (countMatch) {
+          totalBanned += parseInt(countMatch[1], 10);
+        }
+      }
+
+      findings.push(
+        makeFinding(
+          "info",
+          "FAIL2BAN",
+          `Fail2Ban active with ${jails.length} jail(s) (${totalBanned} currently banned IPs)`,
+          `Active jails: ${jails.join(", ")}. Currently enforcing ${totalBanned} active IP ban(s).`,
+          {
+            metadata: { jails, totalBanned },
+          },
+        ),
+      );
+    }
+  }
+
+  return findings;
+}
+
+// ─── SERVICE_AUDIT ────────────────────────────────────────────────────────────
+
+export async function runServiceAudit(exec: Executor): Promise<SecurityFinding[]> {
+  const findings: SecurityFinding[] = [];
+
+  // 1. Failed systemd services
+  const { stdout: failedServices } = await exec.execute(
+    `systemctl --failed --no-legend --no-pager 2>/dev/null | awk '{print $1, $2, $3, $4}' || true`,
+    { timeout: 10000 },
+  );
+  const failedList = failedServices
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (failedList.length > 0) {
+    findings.push(
+      makeFinding(
+        "low",
+        "SERVICES",
+        `${failedList.length} systemd service(s) currently in failed state`,
+        `The following services have failed: ${failedList.slice(0, 5).join(", ")}`,
+        {
+          remediation: "Inspect service failure causes via 'journalctl -u <service_name> -e'.",
+          metadata: { failedServices: failedList },
+        },
+      ),
+    );
+  }
+
+  // 2. Custom systemd unit files in /etc/systemd/system pointing to unusual locations
+  const { stdout: suspiciousUnits } = await exec.execute(
+    `grep -rE 'ExecStart=.*(/tmp|/var/tmp|/dev/shm|/home/)' /etc/systemd/system/ 2>/dev/null || true`,
+    { timeout: 15000 },
+  );
+  if (suspiciousUnits.trim()) {
+    const lines = suspiciousUnits.split("\n").filter(Boolean);
+    findings.push(
+      makeFinding(
+        "high",
+        "SERVICES",
+        "Systemd unit file executes binaries from user home or temporary directories",
+        "Found systemd service definitions that execute binaries directly from /home or /tmp.",
+        {
+          remediation: "Verify service validity; move legitimate service binaries to /usr/local/bin or standard directories.",
+          metadata: { entries: lines.slice(0, 5) },
+        },
+      ),
+    );
+  }
+
+  return findings;
+}
+
+// ─── FILESYSTEM_AUDIT ─────────────────────────────────────────────────────────
+
+export async function runFilesystemAudit(exec: Executor): Promise<SecurityFinding[]> {
+  const findings: SecurityFinding[] = [];
+
+  // 1. Exposed database dumps & archives in web roots
+  const { stdout: exposedDumps } = await exec.execute(
+    `find /home/*/public_html /var/www/*/web /var/www/*/public -maxdepth 3 -type f \\( -name "*.sql" -o -name "*.sql.gz" -o -name "*.sql.tar" -o -name "*.sql.zip" \\) 2>/dev/null | head -15 || true`,
+    { timeout: 20000 },
+  );
+  const dumpFiles = exposedDumps
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  if (dumpFiles.length > 0) {
+    findings.push(
+      makeFinding(
+        "critical",
+        "EXPOSED_BACKUPS",
+        `${dumpFiles.length} database SQL dump file(s) exposed in web root`,
+        `Directly accessible SQL database backups found in web-accessible directories. Anyone on the internet can download these databases.`,
+        {
+          remediation: "Delete or move SQL dumps outside of public_html immediately.",
+          resource: dumpFiles.join(", "),
+          remediation_available: true,
+          remediation_type: "command",
+          metadata: { files: dumpFiles },
+        },
+      ),
+    );
+  }
+
+  // 2. World-writable files in /etc
+  const { stdout: worldWritableEtc } = await exec.execute(
+    `find /etc -maxdepth 3 -type f -perm -0002 2>/dev/null | head -10 || true`,
+    { timeout: 15000 },
+  );
+  const etcFiles = worldWritableEtc
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (etcFiles.length > 0) {
+    findings.push(
+      makeFinding(
+        "critical",
+        "WORLD_WRITABLE",
+        `${etcFiles.length} world-writable file(s) found in /etc`,
+        "Configuration files in /etc are world-writable, allowing any local user to modify system configuration.",
+        {
+          remediation: "Fix permissions using 'chmod o-w <file>' immediately.",
+          resource: etcFiles.join(", "),
+          metadata: { files: etcFiles },
+        },
+      ),
+    );
+  }
+
+  return findings;
+}
+
+// ─── CRON_AUDIT ───────────────────────────────────────────────────────────────
+
+export async function runCronAudit(exec: Executor): Promise<SecurityFinding[]> {
+  const findings: SecurityFinding[] = [];
+
+  const { stdout: cronContent } = await exec.execute(
+    `cat /etc/crontab /etc/cron.d/* /var/spool/cron/crontabs/* 2>/dev/null || true`,
+    { timeout: 15000 },
+  );
+
+  const lines = cronContent.split("\n").filter((l) => l.trim() && !l.trim().startsWith("#"));
+  const suspiciousLines: string[] = [];
+
+  for (const line of lines) {
+    if (
+      line.includes("curl ") && (line.includes("| sh") || line.includes("| bash") || line.includes("|sh") || line.includes("|bash")) ||
+      line.includes("wget ") && (line.includes("| sh") || line.includes("| bash") || line.includes("|sh") || line.includes("|bash")) ||
+      line.includes("/tmp/") ||
+      line.includes("/dev/shm/") ||
+      line.includes("base64 -d")
+    ) {
+      suspiciousLines.push(line.trim());
+    }
+  }
+
+  if (suspiciousLines.length > 0) {
+    findings.push(
+      makeFinding(
+        "critical",
+        "CRON_JOBS",
+        `${suspiciousLines.length} suspicious cron job command(s) detected`,
+        "Found scheduled cron tasks that download and execute scripts directly or execute from temporary directories.",
+        {
+          remediation: "Inspect /etc/crontab and /var/spool/cron/crontabs/*; remove malicious cron entries.",
+          metadata: { suspiciousEntries: suspiciousLines },
+        },
+      ),
+    );
+  }
+
+  return findings;
+}
+
+// ─── USER_AUDIT ───────────────────────────────────────────────────────────────
+
+export async function runUserAudit(exec: Executor): Promise<SecurityFinding[]> {
+  const findings: SecurityFinding[] = [];
+
+  // 1. UID 0 accounts check (only root should have UID 0)
+  const { stdout: uidZero } = await exec.execute(
+    `awk -F: '($3 == 0) {print $1}' /etc/passwd 2>/dev/null || true`,
+    { timeout: 5000 },
+  );
+  const uidZeroUsers = uidZero
+    .split("\n")
+    .map((u) => u.trim())
+    .filter(Boolean);
+
+  const nonRootUidZero = uidZeroUsers.filter((u) => u !== "root");
+  if (nonRootUidZero.length > 0) {
+    findings.push(
+      makeFinding(
+        "critical",
+        "USERS",
+        `Non-root user(s) with UID 0 detected: ${nonRootUidZero.join(", ")}`,
+        "Backdoor accounts with UID 0 have complete root privileges.",
+        {
+          remediation: "Disable or remove unauthorized UID 0 accounts immediately.",
+          resource: nonRootUidZero.join(", "),
+          metadata: { accounts: nonRootUidZero },
+        },
+      ),
+    );
+  }
+
+  // 2. Sudoers with NOPASSWD: ALL
+  const { stdout: nopasswdSudo } = await exec.execute(
+    `grep -rE 'NOPASSWD:\\s*ALL' /etc/sudoers /etc/sudoers.d/ 2>/dev/null || true`,
+    { timeout: 5000 },
+  );
+  if (nopasswdSudo.trim()) {
+    const lines = nopasswdSudo.split("\n").filter((l) => l.trim() && !l.trim().startsWith("#"));
+    if (lines.length > 0) {
+      findings.push(
+        makeFinding(
+          "medium",
+          "USERS",
+          "Passwordless sudo (NOPASSWD: ALL) configured for one or more users",
+          "Users with NOPASSWD: ALL can escalate to root privileges without entering a password.",
+          {
+            remediation: "Require passwords for sudo commands where appropriate.",
+            metadata: { entries: lines },
+          },
+        ),
+      );
+    }
+  }
+
+  return findings;
+}
+
+// ─── CYBERPANEL_AUDIT ─────────────────────────────────────────────────────────
+
+export async function runCyberPanelAudit(exec: Executor): Promise<SecurityFinding[]> {
+  const findings: SecurityFinding[] = [];
+
+  const { stdout: cpVersionRaw } = await exec.execute(
+    `cat /usr/local/CyberCP/version.txt 2>/dev/null || true`,
+    { timeout: 5000 },
+  );
+
+  if (cpVersionRaw.trim()) {
+    const version = cpVersionRaw.trim();
+    const { stdout: lscpdActive } = await exec.execute(
+      `systemctl is-active lscpd 2>/dev/null || true`,
+      { timeout: 5000 },
+    );
+
+    findings.push(
+      makeFinding(
+        "info",
+        "CYBERPANEL",
+        `CyberPanel v${version} detected (lscpd service: ${lscpdActive.trim() || "unknown"})`,
+        `CyberPanel management service is installed and operational.`,
+        {
+          metadata: { version, serviceStatus: lscpdActive.trim() },
+        },
+      ),
+    );
+  }
+
+  return findings;
+}
+
+// ─── PHP_AUDIT ────────────────────────────────────────────────────────────────
+
+export async function runPhpAudit(exec: Executor): Promise<SecurityFinding[]> {
+  const findings: SecurityFinding[] = [];
+
+  // Find installed PHP binaries
+  const { stdout: phpBins } = await exec.execute(
+    `which php 2>/dev/null; ls -d /usr/bin/php* /usr/local/lsws/lsphp* 2>/dev/null || true`,
+    { timeout: 10000 },
+  );
+  const bins = Array.from(
+    new Set(
+      phpBins
+        .split("\n")
+        .map((b) => b.trim())
+        .filter((b) => b && !b.endsWith(".old") && !b.endsWith(".bak")),
+    ),
+  );
+
+  for (const bin of bins.slice(0, 5)) {
+    const { stdout: iniInfo } = await exec.execute(
+      `${bin} -i 2>/dev/null | grep -E '^(allow_url_fopen|allow_url_include|disable_functions|expose_php)' || true`,
+      { timeout: 10000 },
+    );
+
+    if (iniInfo.includes("allow_url_include => On")) {
+      findings.push(
+        makeFinding(
+          "critical",
+          "PHP_CONFIG",
+          `allow_url_include is enabled in ${bin}`,
+          "allow_url_include allows remote file inclusion (RFI) attacks in vulnerable PHP scripts.",
+          {
+            remediation: "Set 'allow_url_include = Off' in php.ini.",
+            resource: bin,
+          },
+        ),
+      );
+    }
+
+    if (iniInfo.includes("expose_php => On")) {
+      findings.push(
+        makeFinding(
+          "low",
+          "PHP_CONFIG",
+          `expose_php is enabled in ${bin}`,
+          "expose_php reveals exact PHP version headers in HTTP responses.",
+          {
+            remediation: "Set 'expose_php = Off' in php.ini.",
+            resource: bin,
+          },
+        ),
+      );
+    }
+  }
+
+  return findings;
+}
+
+// ─── SECURITY_TOOLS_AUDIT ─────────────────────────────────────────────────────
+
+export async function runSecurityToolsAudit(exec: Executor): Promise<SecurityFinding[]> {
+  const findings: SecurityFinding[] = [];
+
+  const { stdout: toolsStatus } = await exec.execute(
+    `echo "fail2ban:$(systemctl is-active fail2ban 2>/dev/null || echo missing)"; ` +
+      `echo "clamav:$(systemctl is-active clamav-daemon 2>/dev/null || echo missing)"; ` +
+      `echo "ufw:$(ufw status 2>/dev/null | head -1 || echo missing)"; ` +
+      `echo "apparmor:$(systemctl is-active apparmor 2>/dev/null || echo missing)"`,
+    { timeout: 10000 },
+  );
+
+  const toolMap: Record<string, string> = {};
+  for (const line of toolsStatus.split("\n").filter(Boolean)) {
+    const [k, v] = line.split(":");
+    if (k && v) toolMap[k.trim()] = v.trim();
+  }
+
+  findings.push(
+    makeFinding(
+      "info",
+      "SECURITY_TOOLS",
+      "Security tools inventory and status summary",
+      `Discovered security tool statuses: Fail2Ban (${toolMap.fail2ban || "unknown"}), UFW (${toolMap.ufw || "unknown"}), ClamAV (${toolMap.clamav || "unknown"}), AppArmor (${toolMap.apparmor || "unknown"}).`,
+      {
+        metadata: toolMap,
+      },
+    ),
+  );
+
+  return findings;
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 async function resolveAuthLog(exec: Executor): Promise<string | null> {

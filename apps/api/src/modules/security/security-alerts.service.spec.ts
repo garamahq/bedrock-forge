@@ -30,12 +30,22 @@ describe("SecurityService server alert settings", () => {
       repo as any,
       securityQueue as any,
     );
+    const baselineSvc = {} as any;
+    const incidentsSvc = {} as any;
+    const alertRulesSvc = {} as any;
+    const remediationsSvc = {} as any;
+    const watcherSvc = {} as any;
 
     const service = new SecurityService(
       scanSvc,
       findingsSvc,
       schedulesSvc,
       alertsSvc,
+      baselineSvc,
+      incidentsSvc,
+      alertRulesSvc,
+      remediationsSvc,
+      watcherSvc,
     );
     return { service, repo, securityQueue };
   }

@@ -2,6 +2,15 @@
 
 export type SecuritySeverity = "critical" | "high" | "medium" | "low" | "info";
 
+export type SecurityFindingStatus =
+  | "new"
+  | "investigating"
+  | "acknowledged"
+  | "remediated"
+  | "resolved"
+  | "ignored"
+  | "false_positive";
+
 export type SecurityFindingCategory =
   | "SSH_CONFIG"
   | "AUTHORIZED_KEYS"
@@ -22,7 +31,25 @@ export type SecurityFindingCategory =
   | "HTACCESS"
   | "VERSION_DISCLOSURE"
   | "REVERSE_SHELL"
-  | "SECURITY_TOOLS";
+  | "SECURITY_TOOLS"
+  | "PROCESS_ANOMALY"
+  | "DELETED_EXECUTABLE"
+  | "LISTENING_PORTS"
+  | "FAIL2BAN"
+  | "USERS"
+  | "SERVICES"
+  | "CYBERPANEL"
+  | "MALWARE_INDICATORS"
+  | "SYSTEM_HEALTH"
+  | "EXPOSED_BACKUPS"
+  | "WORDPRESS_CORE"
+  | "INACTIVE_PLUGINS"
+  | "VULNERABLE_PLUGINS"
+  | "ABANDONED_PLUGINS"
+  | "INACTIVE_THEMES"
+  | "CONFIG_DRIFT"
+  | "BASE_DRIFT"
+  | "INCIDENT";
 
 export interface SecurityFinding {
   id: string;
@@ -33,6 +60,49 @@ export interface SecurityFinding {
   remediation?: string;
   resource?: string;
   metadata?: Record<string, unknown>;
+  remediation_available?: boolean;
+  remediation_type?: string;
+  remediation_meta?: Record<string, unknown>;
+}
+
+export interface SecurityFindingRecord {
+  id: number;
+  scan_id?: number | null;
+  server_id?: number | null;
+  environment_id?: number | null;
+  incident_id?: number | null;
+  category: SecurityFindingCategory;
+  severity: SecuritySeverity;
+  status: SecurityFindingStatus;
+  title: string;
+  description: string;
+  evidence?: unknown;
+  resource?: string | null;
+  recommendation?: string | null;
+  remediation_available: boolean;
+  remediation_type?: string | null;
+  remediation_meta?: Record<string, unknown> | null;
+  first_seen_at: string;
+  last_seen_at: string;
+  resolved_at?: string | null;
+  scanner_version?: string | null;
+  dedup_key?: string | null;
+  created_at: string;
+  updated_at: string;
+  server?: { id: number; name: string; ip_address: string } | null;
+  environment?: { id: number; type: string; url: string; project?: { id: number; name: string } } | null;
+  transitions?: SecurityFindingTransitionRecord[];
+}
+
+export interface SecurityFindingTransitionRecord {
+  id: number;
+  finding_id: number;
+  from_status: SecurityFindingStatus | null;
+  to_status: SecurityFindingStatus;
+  actor_id?: number | null;
+  actor?: { id: number; name: string; email: string } | null;
+  note?: string | null;
+  created_at: string;
 }
 
 export type SecurityScanSummary = Record<SecuritySeverity, number>;
@@ -60,12 +130,26 @@ export type SecurityScanType =
   | "WP_AUDIT"
   | "PROJECT_MALWARE"
   | "BACKDOOR_SEARCH"
-  | "PLUGIN_AUDIT";
+  | "PLUGIN_AUDIT"
+  | "SYSTEM_AUDIT"
+  | "PROCESS_AUDIT"
+  | "NETWORK_AUDIT"
+  | "FILESYSTEM_AUDIT"
+  | "SERVICE_AUDIT"
+  | "CYBERPANEL_AUDIT"
+  | "PHP_AUDIT";
 
 export const SERVER_SCAN_TYPES: SecurityScanType[] = [
   "SSH_AUDIT",
   "SERVER_HARDENING",
   "MALWARE_SCAN",
+  "SYSTEM_AUDIT",
+  "PROCESS_AUDIT",
+  "NETWORK_AUDIT",
+  "FILESYSTEM_AUDIT",
+  "SERVICE_AUDIT",
+  "CYBERPANEL_AUDIT",
+  "PHP_AUDIT",
 ];
 
 export const ENVIRONMENT_SCAN_TYPES: SecurityScanType[] = [
@@ -193,4 +277,102 @@ export interface SecurityEnvironmentHardeningPayload {
   environmentId: number;
   jobExecutionId: number;
   actions: EnvironmentHardeningActionType[];
+}
+
+export interface SecurityBaselineItemRecord {
+  id: number;
+  baseline_id: number;
+  category: string;
+  key: string;
+  value: unknown;
+  created_at: string;
+}
+
+export interface SecurityBaselineRecord {
+  id: number;
+  server_id?: number | null;
+  environment_id?: number | null;
+  label?: string | null;
+  created_by_id?: number | null;
+  created_at: string;
+  items?: SecurityBaselineItemRecord[];
+}
+
+export interface SecurityDriftEventRecord {
+  id: number;
+  server_id?: number | null;
+  environment_id?: number | null;
+  baseline_id: number;
+  category: string;
+  key: string;
+  change_type: "added" | "removed" | "modified" | "permission_changed" | "owner_changed";
+  old_value?: unknown;
+  new_value?: unknown;
+  detected_at: string;
+  finding_id?: number | null;
+}
+
+export type SecurityIncidentStatus =
+  | "open"
+  | "investigating"
+  | "contained"
+  | "resolved"
+  | "false_positive";
+
+export interface SecurityIncidentRecord {
+  id: number;
+  server_id?: number | null;
+  title: string;
+  summary?: string | null;
+  severity: SecuritySeverity;
+  status: SecurityIncidentStatus;
+  confidence: string;
+  detected_at: string;
+  resolved_at?: string | null;
+  created_at: string;
+  updated_at: string;
+  server?: { id: number; name: string } | null;
+  findings?: SecurityFindingRecord[];
+}
+
+export interface SecurityAlertRuleRecord {
+  id: number;
+  name: string;
+  enabled: boolean;
+  min_severity?: SecuritySeverity | null;
+  categories: string[];
+  server_ids: number[];
+  channel_ids: number[];
+  create_incident: boolean;
+  cooldown_minutes: number;
+  last_fired_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type SecurityWatcherMode = "agentless" | "agent";
+export type SecurityWatcherStatus = "online" | "degraded" | "offline" | "disabled";
+
+export interface SecurityWatcherRecord {
+  id: number;
+  server_id: number;
+  enabled: boolean;
+  mode: SecurityWatcherMode;
+  status: SecurityWatcherStatus;
+  interval_minutes: number;
+  last_heartbeat?: string | null;
+  last_event_at?: string | null;
+  collector_version?: string | null;
+  watcher_errors: string[];
+  watch_processes: boolean;
+  watch_files: boolean;
+  watch_auth: boolean;
+  watch_services: boolean;
+  watch_cron: boolean;
+  watch_wordpress: boolean;
+  extra_watch_paths: string[];
+  excluded_paths: string[];
+  created_at: string;
+  updated_at: string;
+  server?: { id: number; name: string; ip_address: string; status: string } | null;
 }

@@ -93,6 +93,10 @@ export const JOB_TYPES = {
   SECURITY_ATTACK_WATCH: "security:attack-watch",
   SECURITY_ALERT_POLL: "security:alert-poll",
   SECURITY_DATA_RETENTION: "security:data-retention",
+  SECURITY_BASELINE_CREATE: "security:baseline-create",
+  SECURITY_BASELINE_COMPARE: "security:baseline-compare",
+  SECURITY_WATCH_COLLECT: "security:watch-collect",
+  SECURITY_INCIDENT_CORRELATE: "security:incident-correlate",
 } as const;
 
 // ─── Default Job Options ──────────────────────────────────────────────────────

@@ -978,3 +978,150 @@ export async function runBackdoorSearch(
 
   return findings;
 }
+
+// ─── PLUGIN_AUDIT ───────────────────────────────────────────────────────────
+
+export async function runPluginAudit(
+  exec: Executor,
+  rootPath: string,
+): Promise<SecurityFinding[]> {
+  const findings: SecurityFinding[] = [];
+  const q = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
+
+  // 1. WP-CLI Plugin List Audit
+  const { stdout: wpCliCheck } = await exec.execute(
+    `which wp 2>/dev/null && echo found || echo missing`,
+  );
+
+  let pluginsList: Array<{
+    name: string;
+    status: string;
+    update: string;
+    version: string;
+  }> = [];
+
+  if (wpCliCheck.trim() === "found") {
+    const { stdout: pluginOut } = await exec.execute(
+      `wp plugin list --path=${q(rootPath)} --format=json --skip-plugins --skip-themes 2>/dev/null || true`,
+      { timeout: 30000 },
+    );
+    try {
+      if (pluginOut.trim().startsWith("[")) {
+        pluginsList = JSON.parse(pluginOut.trim());
+      }
+    } catch {
+      // JSON parse error
+    }
+  }
+
+  // 2. Inactive Plugins Check (Attack surface hygiene)
+  const inactivePlugins = pluginsList.filter((p) => p.status === "inactive");
+  if (inactivePlugins.length > 0) {
+    findings.push(
+      makeFinding(
+        "low",
+        "INACTIVE_PLUGINS",
+        `${inactivePlugins.length} inactive plugin(s) found`,
+        "Inactive plugins still pose a security risk if they contain known vulnerabilities, as PHP files inside plugin folders can often still be executed directly via HTTP.",
+        {
+          remediation:
+            "Delete unused and inactive plugins to minimize attack surface: wp plugin delete <slug>",
+          metadata: {
+            inactive_plugins: inactivePlugins.map((p) => `${p.name} (${p.version})`),
+          },
+        },
+      ),
+    );
+  }
+
+  // 3. Outdated Plugins Check
+  const outdatedPlugins = pluginsList.filter((p) => p.update === "available");
+  if (outdatedPlugins.length > 0) {
+    findings.push(
+      makeFinding(
+        "medium",
+        "VULNERABLE_PLUGINS",
+        `${outdatedPlugins.length} plugin(s) have pending security/feature updates`,
+        "Outdated WordPress plugins are the most frequent entry point for automated exploits and website compromise.",
+        {
+          remediation:
+            'Update all plugins to their latest versions: wp plugin update --all',
+          metadata: {
+            outdated_plugins: outdatedPlugins.map((p) => `${p.name} (${p.version})`),
+          },
+        },
+      ),
+    );
+  }
+
+  // 4. Plugin Checksum Verification (Tampering / Malware Injection in Plugins)
+  if (wpCliCheck.trim() === "found") {
+    const { stdout: checksumOut, code } = await exec.execute(
+      `wp plugin verify-checksums --all --path=${q(rootPath)} --format=json --skip-plugins --skip-themes 2>/dev/null || true`,
+      { timeout: 60000 },
+    );
+    if (code !== 0 && checksumOut.trim().startsWith("[")) {
+      try {
+        const failedPlugins = JSON.parse(checksumOut.trim()) as Array<{
+          plugin_name: string;
+          file: string;
+          message: string;
+        }>;
+        if (failedPlugins.length > 0) {
+          findings.push(
+            makeFinding(
+              "critical",
+              "VULNERABLE_PLUGINS",
+              `Plugin file integrity verification failed for ${failedPlugins.length} file(s)`,
+              "Files inside official wordpress.org plugins were modified or added. This strongly indicates plugin tampering, injection, or malware infection.",
+              {
+                remediation:
+                  "Reinstall the affected plugins from clean official sources using 'wp plugin install <name> --force'.",
+                metadata: { modified_files: failedPlugins.slice(0, 25) },
+              },
+            ),
+          );
+        }
+      } catch {
+        // Parse error
+      }
+    }
+  }
+
+  // 5. Must-Use Plugins (mu-plugins) Audit
+  const muDirs = [
+    `${rootPath}/wp-content/mu-plugins`,
+    `${rootPath}/web/app/mu-plugins`,
+  ];
+  for (const muDir of muDirs) {
+    const { stdout: muFiles } = await exec.execute(
+      `test -d ${q(muDir)} && find ${q(muDir)} -maxdepth 2 -type f -name "*.php" 2>/dev/null || true`,
+      { timeout: 15000 },
+    );
+    const files = muFiles.split("\n").map((f) => f.trim()).filter(Boolean);
+    if (files.length > 0) {
+      // Look for suspicious obfuscation in mu-plugins
+      const { stdout: evalInMu } = await exec.execute(
+        `grep -rnE '(eval\\s*\\(|base64_decode|gzuncompress|assert\\s*\\()' ${q(muDir)} 2>/dev/null | head -10 || true`,
+        { timeout: 15000 },
+      );
+      if (evalInMu.trim()) {
+        findings.push(
+          makeFinding(
+            "critical",
+            "SUSPICIOUS_FILES",
+            `Suspicious obfuscated code pattern detected in mu-plugins`,
+            "Must-Use plugins run automatically on every request with highest privilege. Found eval/base64/gzuncompress calls.",
+            {
+              remediation: `Inspect files in ${muDir} and remove any unrecognized or obfuscated PHP scripts.`,
+              resource: muDir,
+              metadata: { suspicious_lines: evalInMu.split("\n").filter(Boolean) },
+            },
+          ),
+        );
+      }
+    }
+  }
+
+  return findings;
+}

@@ -16,9 +16,29 @@ import {
   runSshAudit,
   runServerHardening,
   runMalwareScan,
+  runSystemAudit,
+  runProcessAudit,
+  runNetworkAudit,
+  runFirewallAudit,
+  runFail2BanAudit,
+  runServiceAudit,
+  runFilesystemAudit,
+  runCronAudit,
+  runUserAudit,
+  runCyberPanelAudit,
+  runPhpAudit,
+  runSecurityToolsAudit,
 } from "../server-checks";
-import { runWpAudit, runProjectMalware } from "../environment-checks";
+import {
+  runWpAudit,
+  runProjectMalware,
+  runBackdoorSearch,
+  runPluginAudit,
+} from "../environment-checks";
 import { StepTracker } from "../../../services/step-tracker";
+import { FindingDeduplicationService } from "./finding-deduplication.service";
+import { SecurityIncidentCorrelationService } from "./security-incident-correlation.service";
+import { SecurityAlertRuleEngineService } from "./security-alert-rule-engine.service";
 
 @Injectable()
 export class SecurityScanRunnerService {
@@ -27,6 +47,9 @@ export class SecurityScanRunnerService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly sshKey: SshKeyService,
+    private readonly findingDedup: FindingDeduplicationService,
+    private readonly incidentCorrelation: SecurityIncidentCorrelationService,
+    private readonly alertRuleEngine: SecurityAlertRuleEngineService,
     @InjectQueue(QUEUES.NOTIFICATIONS)
     private readonly notificationsQueue: Queue,
   ) {}
@@ -56,7 +79,7 @@ export class SecurityScanRunnerService {
           await this.sshKey.getSshConfig(server),
         );
       } catch (err) {
-        for (const scanId of scanIds) {
+        for (const scanId of scanIds ?? []) {
           await this.prisma.securityScan.update({
             where: { id: BigInt(scanId) },
             data: { status: "failed", error: "SSH key unavailable" },
@@ -69,30 +92,49 @@ export class SecurityScanRunnerService {
 
       for (let i = 0; i < scanTypes.length; i++) {
         const scanType = scanTypes[i] as SecurityScanType;
-        const scanId = scanIds[i];
+        const scanId = scanIds?.[i];
 
-        await this.prisma.securityScan.update({
-          where: { id: BigInt(scanId) },
-          data: { status: "running", started_at: new Date() },
-        });
+        await tracker.track({ step: `Running ${scanType}`, level: "info" });
+
+        if (scanId) {
+          await this.prisma.securityScan.update({
+            where: { id: BigInt(scanId) },
+            data: { status: "running", started_at: new Date() },
+          });
+        }
 
         try {
           const findings = await this.runServerCheck(scanType, remoteExecutor);
           const score = calculateScore(findings);
           const summary = buildSummary(findings);
 
-          await this.prisma.securityScan.update({
-            where: { id: BigInt(scanId) },
-            data: {
-              status: "completed",
-              score,
-              summary: summary as any,
-              findings: findings as unknown as Parameters<
-                typeof this.prisma.securityScan.update
-              >[0]["data"]["findings"],
-              completed_at: new Date(),
-            },
-          });
+          if (scanId) {
+            await this.prisma.securityScan.update({
+              where: { id: BigInt(scanId) },
+              data: {
+                status: "completed",
+                score,
+                summary: summary as any,
+                findings: findings as unknown as Parameters<
+                  typeof this.prisma.securityScan.update
+                >[0]["data"]["findings"],
+                completed_at: new Date(),
+              },
+            });
+
+            await this.findingDedup.upsertFindings({
+              serverId,
+              scanId,
+              findings,
+              scannerVersion: "1.0.0",
+            });
+          }
+
+          await this.alertRuleEngine.evaluateFindings(
+            serverId,
+            undefined,
+            findings,
+          );
 
           this.logger.log(
             `[Server ${serverId}] ${scanType} completed — score: ${score}, findings: ${findings.length}`,
@@ -100,10 +142,12 @@ export class SecurityScanRunnerService {
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           this.logger.error(`[Server ${serverId}] ${scanType} failed: ${msg}`);
-          await this.prisma.securityScan.update({
-            where: { id: BigInt(scanId) },
-            data: { status: "failed", error: msg, completed_at: new Date() },
-          });
+          if (scanId) {
+            await this.prisma.securityScan.update({
+              where: { id: BigInt(scanId) },
+              data: { status: "failed", error: msg, completed_at: new Date() },
+            });
+          }
         }
 
         await job.updateProgress(
@@ -111,10 +155,11 @@ export class SecurityScanRunnerService {
         );
       }
 
+      await this.incidentCorrelation.correlateServerIncidents(serverId);
       await tracker.complete();
 
       const scheduleId = (job.data as { scheduleId?: number }).scheduleId;
-      if (scheduleId) {
+      if (scheduleId && scanIds?.length) {
         await this.maybeNotify("server", serverId, scanIds);
       }
     } catch (err: unknown) {
@@ -149,7 +194,7 @@ export class SecurityScanRunnerService {
           await this.sshKey.getSshConfig(environment.server),
         );
       } catch (err) {
-        for (const scanId of scanIds) {
+        for (const scanId of scanIds ?? []) {
           await this.prisma.securityScan.update({
             where: { id: BigInt(scanId) },
             data: { status: "failed", error: "SSH key unavailable" },
@@ -162,12 +207,16 @@ export class SecurityScanRunnerService {
 
       for (let i = 0; i < scanTypes.length; i++) {
         const scanType = scanTypes[i] as SecurityScanType;
-        const scanId = scanIds[i];
+        const scanId = scanIds?.[i];
 
-        await this.prisma.securityScan.update({
-          where: { id: BigInt(scanId) },
-          data: { status: "running", started_at: new Date() },
-        });
+        await tracker.track({ step: `Running ${scanType}`, level: "info" });
+
+        if (scanId) {
+          await this.prisma.securityScan.update({
+            where: { id: BigInt(scanId) },
+            data: { status: "running", started_at: new Date() },
+          });
+        }
 
         try {
           const findings = await this.runEnvironmentCheck(
@@ -178,18 +227,33 @@ export class SecurityScanRunnerService {
           const score = calculateScore(findings);
           const summary = buildSummary(findings);
 
-          await this.prisma.securityScan.update({
-            where: { id: BigInt(scanId) },
-            data: {
-              status: "completed",
-              score,
-              summary: summary as any,
-              findings: findings as unknown as Parameters<
-                typeof this.prisma.securityScan.update
-              >[0]["data"]["findings"],
-              completed_at: new Date(),
-            },
-          });
+          if (scanId) {
+            await this.prisma.securityScan.update({
+              where: { id: BigInt(scanId) },
+              data: {
+                status: "completed",
+                score,
+                summary: summary as any,
+                findings: findings as unknown as Parameters<
+                  typeof this.prisma.securityScan.update
+                >[0]["data"]["findings"],
+                completed_at: new Date(),
+              },
+            });
+
+            await this.findingDedup.upsertFindings({
+              environmentId,
+              scanId,
+              findings,
+              scannerVersion: "1.0.0",
+            });
+          }
+
+          await this.alertRuleEngine.evaluateFindings(
+            undefined,
+            environmentId,
+            findings,
+          );
 
           this.logger.log(
             `[Env ${environmentId}] ${scanType} completed — score: ${score}, findings: ${findings.length}`,
@@ -199,10 +263,12 @@ export class SecurityScanRunnerService {
           this.logger.error(
             `[Env ${environmentId}] ${scanType} failed: ${msg}`,
           );
-          await this.prisma.securityScan.update({
-            where: { id: BigInt(scanId) },
-            data: { status: "failed", error: msg, completed_at: new Date() },
-          });
+          if (scanId) {
+            await this.prisma.securityScan.update({
+              where: { id: BigInt(scanId) },
+              data: { status: "failed", error: msg, completed_at: new Date() },
+            });
+          }
         }
 
         await job.updateProgress(
@@ -213,7 +279,7 @@ export class SecurityScanRunnerService {
       await tracker.complete();
 
       const scheduleId = (job.data as { scheduleId?: number }).scheduleId;
-      if (scheduleId) {
+      if (scheduleId && scanIds?.length) {
         await this.maybeNotify("environment", environmentId, scanIds);
       }
     } catch (err: unknown) {
@@ -233,6 +299,37 @@ export class SecurityScanRunnerService {
         return runServerHardening(executor);
       case "MALWARE_SCAN":
         return runMalwareScan(executor);
+      case "SYSTEM_AUDIT": {
+        const results = await Promise.all([
+          runSystemAudit(executor),
+          runCronAudit(executor),
+          runUserAudit(executor),
+        ]);
+        return results.flat();
+      }
+      case "PROCESS_AUDIT":
+        return runProcessAudit(executor);
+      case "NETWORK_AUDIT": {
+        const results = await Promise.all([
+          runNetworkAudit(executor),
+          runFirewallAudit(executor),
+          runFail2BanAudit(executor),
+        ]);
+        return results.flat();
+      }
+      case "FILESYSTEM_AUDIT":
+        return runFilesystemAudit(executor);
+      case "SERVICE_AUDIT": {
+        const results = await Promise.all([
+          runServiceAudit(executor),
+          runSecurityToolsAudit(executor),
+        ]);
+        return results.flat();
+      }
+      case "CYBERPANEL_AUDIT":
+        return runCyberPanelAudit(executor);
+      case "PHP_AUDIT":
+        return runPhpAudit(executor);
       default:
         return [];
     }
@@ -248,6 +345,10 @@ export class SecurityScanRunnerService {
         return runWpAudit(executor, rootPath);
       case "PROJECT_MALWARE":
         return runProjectMalware(executor, rootPath);
+      case "BACKDOOR_SEARCH":
+        return runBackdoorSearch(executor, rootPath);
+      case "PLUGIN_AUDIT":
+        return runPluginAudit(executor, rootPath);
       default:
         return [];
     }

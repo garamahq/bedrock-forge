@@ -1,6 +1,58 @@
-// ─── Shared types for the Security feature ───────────────────────────────────
-
 export type Severity = "critical" | "high" | "medium" | "low" | "info";
+
+export type FindingStatus =
+  | "new"
+  | "investigating"
+  | "acknowledged"
+  | "remediated"
+  | "resolved"
+  | "ignored"
+  | "false_positive";
+
+export interface SecurityFindingTransition {
+  id: number;
+  finding_id: number;
+  from_status: FindingStatus | null;
+  to_status: FindingStatus;
+  actor_id: number | null;
+  actor?: { id: number; name: string; email: string } | null;
+  note?: string | null;
+  created_at: string;
+}
+
+export interface SecurityFindingItem {
+  id: number;
+  scan_id?: number | null;
+  server_id?: number | null;
+  environment_id?: number | null;
+  incident_id?: number | null;
+  category: string;
+  severity: Severity;
+  status: FindingStatus;
+  title: string;
+  description: string;
+  evidence?: unknown;
+  resource?: string | null;
+  recommendation?: string | null;
+  remediation_available: boolean;
+  remediation_type?: string | null;
+  remediation_meta?: Record<string, unknown> | null;
+  first_seen_at: string;
+  last_seen_at: string;
+  resolved_at?: string | null;
+  scanner_version?: string | null;
+  dedup_key?: string | null;
+  created_at: string;
+  updated_at: string;
+  server?: { id: number; name: string; ip_address: string } | null;
+  environment?: {
+    id: number;
+    type: string;
+    url: string;
+    project?: { id: number; name: string };
+  } | null;
+  transitions?: SecurityFindingTransition[];
+}
 
 export interface SecurityFinding {
   id: string;
@@ -11,6 +63,9 @@ export interface SecurityFinding {
   remediation?: string;
   resource?: string;
   metadata?: Record<string, unknown>;
+  remediation_available?: boolean;
+  remediation_type?: string;
+  remediation_meta?: Record<string, unknown>;
 }
 
 export interface ScanSummary {

@@ -47,11 +47,12 @@ export function makeFinding(
   category: SecurityFinding["category"],
   title: string,
   description: string,
-  opts: {
-    remediation?: string;
-    resource?: string;
-    metadata?: Record<string, unknown>;
-  } = {},
+  opts: Partial<
+    Omit<
+      SecurityFinding,
+      "id" | "severity" | "category" | "title" | "description"
+    >
+  > = {},
 ): SecurityFinding {
   return { id: randomUUID(), severity, category, title, description, ...opts };
 }

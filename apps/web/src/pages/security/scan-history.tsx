@@ -220,6 +220,13 @@ export function ServerScanHistory({
     queryKey: ["security", "server-history", serverId, limit],
     queryFn: () =>
       api.get(`/security/servers/${serverId}/scans?limit=${limit}`),
+    refetchInterval: (query) => {
+      const records = query.state.data?.data;
+      const hasActive = records?.some(
+        (s) => s.status === "running" || s.status === "pending",
+      );
+      return hasActive ? 3_000 : false;
+    },
   });
 
   if (!data?.data.length)
@@ -250,6 +257,13 @@ export function EnvironmentScanHistory({
     queryKey: ["security", "env-history", envId, limit],
     queryFn: () =>
       api.get(`/security/environments/${envId}/scans?limit=${limit}`),
+    refetchInterval: (query) => {
+      const records = query.state.data?.data;
+      const hasActive = records?.some(
+        (s) => s.status === "running" || s.status === "pending",
+      );
+      return hasActive ? 3_000 : false;
+    },
   });
 
   if (!data?.data.length)

@@ -33,6 +33,8 @@ model User {
   finding_acks        SecurityFindingAck[]
   resource_notes      ResourceNote[]
   maintenance_windows MaintenanceWindow[]
+  security_finding_transitions SecurityFindingTransition[]
+  security_baselines          SecurityBaseline[]
 
   @@map("users")
 }
@@ -196,6 +198,12 @@ model Server {
   security_alert_setting   ServerSecurityAlertSetting?
   finding_acks             SecurityFindingAck[]
   maintenance_windows      MaintenanceWindow[]
+  security_findings        SecurityFinding[]
+  security_baselines       SecurityBaseline[]
+  security_drift_events    SecurityDriftEvent[]
+  security_incidents       SecurityIncident[]
+  security_watcher         SecurityWatcher?
+  metrics                  ServerMetric[]
 
   @@map("servers")
 }
@@ -272,6 +280,9 @@ model Environment {
   finding_acks              SecurityFindingAck[]
   lighthouse_audits         LighthouseAudit[]
   maintenance_windows       MaintenanceWindow[]
+  security_findings         SecurityFinding[]
+  security_baselines        SecurityBaseline[]
+  security_drift_events     SecurityDriftEvent[]
 
   @@index([project_id])
   @@index([server_id])
@@ -876,6 +887,13 @@ enum SecurityScanType {
   PROJECT_MALWARE
   BACKDOOR_SEARCH
   PLUGIN_AUDIT
+  SYSTEM_AUDIT
+  PROCESS_AUDIT
+  NETWORK_AUDIT
+  FILESYSTEM_AUDIT
+  SERVICE_AUDIT
+  CYBERPANEL_AUDIT
+  PHP_AUDIT
 }
 
 enum SecurityScanStatus {
@@ -894,15 +912,16 @@ model SecurityScan {
   job_execution_id BigInt?
   score            Int?               // 0-100, null until scan completes
   summary          Json?              // { critical: N, high: N, medium: N, low: N, info: N }
-  findings         Json?              // SecurityFinding[]
+  findings         Json?              // SecurityFinding[] (JSON snapshot for backward compat)
   error            String?
   started_at       DateTime?          @db.Timestamptz()
   completed_at     DateTime?          @db.Timestamptz()
   created_at       DateTime           @default(now()) @db.Timestamptz()
   updated_at       DateTime           @updatedAt @db.Timestamptz()
 
-  server      Server?      @relation(fields: [server_id], references: [id], onDelete: Cascade)
-  environment Environment? @relation(fields: [environment_id], references: [id], onDelete: Cascade)
+  server           Server?            @relation(fields: [server_id], references: [id], onDelete: Cascade)
+  environment      Environment?       @relation(fields: [environment_id], references: [id], onDelete: Cascade)
+  findings_rel     SecurityFinding[]
 
   @@index([server_id])
   @@index([environment_id])
@@ -918,6 +937,73 @@ enum SecuritySeverity {
   medium
   low
   info
+}
+
+enum SecurityFindingStatus {
+  new
+  investigating
+  acknowledged
+  remediated
+  resolved
+  ignored
+  false_positive
+}
+
+model SecurityFinding {
+  id                    BigInt                @id @default(autoincrement())
+  scan_id               BigInt?
+  server_id             BigInt?
+  environment_id        BigInt?
+  incident_id           BigInt?
+  category              String                @db.VarChar(64)
+  severity              SecuritySeverity
+  status                SecurityFindingStatus @default(new)
+  title                 String                @db.VarChar(256)
+  description           String                @db.Text
+  evidence              Json?
+  resource              String?               @db.VarChar(512)
+  recommendation        String?               @db.Text
+  remediation_available Boolean               @default(false)
+  remediation_type      String?               @db.VarChar(64) // "command" | "manual" | "wp_action"
+  remediation_meta      Json?                 // { command, action, dry_run_command, requires_backup }
+  first_seen_at         DateTime              @default(now()) @db.Timestamptz()
+  last_seen_at          DateTime              @default(now()) @db.Timestamptz()
+  resolved_at           DateTime?             @db.Timestamptz()
+  scanner_version       String?               @db.VarChar(32)
+  dedup_key             String?               @db.VarChar(256)
+  created_at            DateTime              @default(now()) @db.Timestamptz()
+  updated_at            DateTime              @updatedAt @db.Timestamptz()
+
+  server      Server?                     @relation(fields: [server_id], references: [id], onDelete: Cascade)
+  environment Environment?                @relation(fields: [environment_id], references: [id], onDelete: Cascade)
+  scan        SecurityScan?               @relation(fields: [scan_id], references: [id], onDelete: SetNull)
+  incident    SecurityIncident?           @relation(fields: [incident_id], references: [id], onDelete: SetNull)
+  transitions SecurityFindingTransition[]
+  acks        SecurityFindingAck[]
+
+  @@index([server_id, status, severity])
+  @@index([environment_id, status, severity])
+  @@index([dedup_key])
+  @@index([status, severity, first_seen_at])
+  @@index([incident_id])
+  @@map("security_findings")
+}
+
+model SecurityFindingTransition {
+  id          BigInt                 @id @default(autoincrement())
+  finding_id  BigInt
+  from_status SecurityFindingStatus?
+  to_status   SecurityFindingStatus
+  actor_id    BigInt?
+  note        String?                @db.Text
+  created_at  DateTime               @default(now()) @db.Timestamptz()
+
+  finding SecurityFinding @relation(fields: [finding_id], references: [id], onDelete: Cascade)
+  actor   User?           @relation(fields: [actor_id], references: [id], onDelete: SetNull)
+
+  @@index([finding_id])
+  @@index([actor_id])
+  @@map("security_finding_transitions")
 }
 
 model SecurityScanSchedule {
@@ -964,6 +1050,27 @@ model ServerSecurityAlertSetting {
   @@map("server_security_alert_settings")
 }
 
+model ServerMetric {
+  id               BigInt    @id @default(autoincrement())
+  server_id        BigInt
+  cpu_usage        Float?
+  memory_used_mb   Int?
+  memory_total_mb  Int?
+  disk_used_gb     Float?
+  disk_total_gb    Float?
+  uptime_seconds   Int?
+  load_1m          Float?
+  load_5m          Float?
+  load_15m         Float?
+  ping_ms          Int?
+  recorded_at      DateTime  @default(now()) @db.Timestamptz()
+
+  server Server @relation(fields: [server_id], references: [id], onDelete: Cascade)
+
+  @@index([server_id, recorded_at])
+  @@map("server_metrics")
+}
+
 // Acknowledged (reviewed/accepted-risk) security findings.
 // Keyed by scope_key + category + title — persists across rescans.
 model SecurityFindingAck {
@@ -973,17 +1080,159 @@ model SecurityFindingAck {
   title            String   @db.VarChar(256)
   server_id        BigInt?
   environment_id   BigInt?
+  finding_id       BigInt?
   acknowledged_by  BigInt
   note             String?  @db.Text
   created_at       DateTime @default(now()) @db.Timestamptz()
 
-  user        User         @relation(fields: [acknowledged_by], references: [id], onDelete: Cascade)
-  server      Server?      @relation(fields: [server_id], references: [id], onDelete: Cascade)
-  environment Environment? @relation(fields: [environment_id], references: [id], onDelete: Cascade)
+  user        User             @relation(fields: [acknowledged_by], references: [id], onDelete: Cascade)
+  server      Server?          @relation(fields: [server_id], references: [id], onDelete: Cascade)
+  environment Environment?     @relation(fields: [environment_id], references: [id], onDelete: Cascade)
+  finding     SecurityFinding? @relation(fields: [finding_id], references: [id], onDelete: Cascade)
 
   @@unique([scope_key, category, title])
   @@index([scope_key])
+  @@index([finding_id])
   @@map("security_finding_acks")
+}
+
+model SecurityBaseline {
+  id            BigInt    @id @default(autoincrement())
+  server_id     BigInt?
+  environment_id BigInt?
+  label         String?
+  created_by_id BigInt?
+  created_at    DateTime  @default(now()) @db.Timestamptz()
+
+  server      Server?               @relation(fields: [server_id], references: [id], onDelete: Cascade)
+  environment Environment?          @relation(fields: [environment_id], references: [id], onDelete: Cascade)
+  created_by  User?                 @relation(fields: [created_by_id], references: [id], onDelete: SetNull)
+  items       SecurityBaselineItem[]
+
+  @@index([server_id])
+  @@index([environment_id])
+  @@map("security_baselines")
+}
+
+model SecurityBaselineItem {
+  id          BigInt   @id @default(autoincrement())
+  baseline_id BigInt
+  category    String   // "users" | "ports" | "services" | "cron" | "ssh_keys" | "file_integrity" | "wp_plugins" | "security_tools"
+  key         String   // e.g. file path, port number, username, service name
+  value       Json     // { hash, size, owner, perms, mtime } for files; { status, binary } for services; etc.
+  created_at  DateTime @default(now()) @db.Timestamptz()
+
+  baseline SecurityBaseline @relation(fields: [baseline_id], references: [id], onDelete: Cascade)
+
+  @@unique([baseline_id, category, key])
+  @@index([baseline_id])
+  @@map("security_baseline_items")
+}
+
+model SecurityDriftEvent {
+  id             BigInt   @id @default(autoincrement())
+  server_id      BigInt?
+  environment_id BigInt?
+  baseline_id    BigInt
+  category       String
+  key            String
+  change_type    String   // "added" | "removed" | "modified" | "permission_changed" | "owner_changed"
+  old_value      Json?
+  new_value      Json?
+  detected_at    DateTime @default(now()) @db.Timestamptz()
+  finding_id     BigInt?  // linked SecurityFinding created from this drift
+
+  server      Server?      @relation(fields: [server_id], references: [id], onDelete: Cascade)
+  environment Environment? @relation(fields: [environment_id], references: [id], onDelete: Cascade)
+
+  @@index([server_id, detected_at])
+  @@index([environment_id, detected_at])
+  @@map("security_drift_events")
+}
+
+enum SecurityIncidentStatus {
+  open
+  investigating
+  contained
+  resolved
+  false_positive
+}
+
+model SecurityIncident {
+  id          BigInt                 @id @default(autoincrement())
+  server_id   BigInt?
+  title       String
+  summary     String?                @db.Text
+  severity    SecuritySeverity
+  status      SecurityIncidentStatus @default(open)
+  confidence  String                 @default("high") // "low" | "medium" | "high"
+  detected_at DateTime               @default(now()) @db.Timestamptz()
+  resolved_at DateTime?              @db.Timestamptz()
+  created_at  DateTime               @default(now()) @db.Timestamptz()
+  updated_at  DateTime               @updatedAt @db.Timestamptz()
+
+  server   Server?           @relation(fields: [server_id], references: [id], onDelete: Cascade)
+  findings SecurityFinding[]
+
+  @@index([server_id, status])
+  @@map("security_incidents")
+}
+
+model SecurityAlertRule {
+  id               BigInt            @id @default(autoincrement())
+  name             String
+  enabled          Boolean           @default(true)
+  min_severity     SecuritySeverity?
+  categories       String[]          @default([])
+  server_ids       BigInt[]          @default([])
+  channel_ids      BigInt[]          @default([])
+  create_incident  Boolean           @default(false)
+  cooldown_minutes Int               @default(30)
+  last_fired_at    DateTime?         @db.Timestamptz()
+  created_at       DateTime          @default(now()) @db.Timestamptz()
+  updated_at       DateTime          @updatedAt @db.Timestamptz()
+
+  @@map("security_alert_rules")
+}
+
+enum SecurityWatcherMode {
+  agentless
+  agent
+}
+
+enum SecurityWatcherStatus {
+  online
+  degraded
+  offline
+  disabled
+}
+
+model SecurityWatcher {
+  id                BigInt                @id @default(autoincrement())
+  server_id         BigInt                @unique
+  enabled           Boolean               @default(false)
+  mode              SecurityWatcherMode   @default(agentless)
+  status            SecurityWatcherStatus @default(offline)
+  interval_minutes  Int                   @default(5)
+  last_heartbeat    DateTime?             @db.Timestamptz()
+  last_event_at     DateTime?             @db.Timestamptz()
+  collector_version String?
+  watcher_errors    String[]              @default([])
+  watch_processes   Boolean               @default(true)
+  watch_files       Boolean               @default(true)
+  watch_auth        Boolean               @default(true)
+  watch_services    Boolean               @default(true)
+  watch_cron        Boolean               @default(true)
+  watch_wordpress   Boolean               @default(true)
+  extra_watch_paths String[]              @default([])
+  excluded_paths    String[]              @default([])
+  created_at        DateTime              @default(now()) @db.Timestamptz()
+  updated_at        DateTime              @updatedAt @db.Timestamptz()
+
+  server Server @relation(fields: [server_id], references: [id], onDelete: Cascade)
+
+  @@index([enabled, status])
+  @@map("security_watchers")
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

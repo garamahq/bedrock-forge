@@ -3,6 +3,11 @@ import { SecurityScanService } from "./security-scan.service";
 import { SecurityFindingsService } from "./security-findings.service";
 import { SecuritySchedulesService } from "./security-schedules.service";
 import { SecurityAlertsService } from "./security-alerts.service";
+import { SecurityBaselineService } from "./security-baseline.service";
+import { SecurityIncidentsService } from "./security-incidents.service";
+import { SecurityAlertRulesService } from "./security-alert-rules.service";
+import { SecurityRemediationsService } from "./security-remediations.service";
+import { SecurityWatcherService } from "./security-watcher.service";
 import type {
   SecurityScanType,
   ServerHardeningActionType,
@@ -12,6 +17,9 @@ import type { UpsertSecurityScheduleDto } from "./dto/security-schedule.dto";
 import type { AckFindingDto, RemoveAckDto } from "./dto/ack-finding.dto";
 import type { GenerateSecurityReportDto } from "./dto/generate-security-report.dto";
 import type { UpsertServerAlertSettingDto } from "./dto/server-alert-setting.dto";
+import type { CreateAlertRuleDto, UpdateAlertRuleDto } from "./dto/alert-rule.dto";
+import type { PreviewRemediationDto, ApplyRemediationDto } from "./dto/safe-remediation.dto";
+import type { WatcherHeartbeatDto } from "./dto/watcher-heartbeat.dto";
 
 @Injectable()
 export class SecurityService {
@@ -20,13 +28,18 @@ export class SecurityService {
     private readonly findingsSvc: SecurityFindingsService,
     private readonly schedulesSvc: SecuritySchedulesService,
     private readonly alertsSvc: SecurityAlertsService,
+    private readonly baselineSvc: SecurityBaselineService,
+    private readonly incidentsSvc: SecurityIncidentsService,
+    private readonly alertRulesSvc: SecurityAlertRulesService,
+    private readonly remediationsSvc: SecurityRemediationsService,
+    private readonly watcherSvc: SecurityWatcherService,
   ) {}
 
   // ─── Trigger scans ──────────────────────────────────────────────────────────
 
   async triggerServerScan(
     serverId: number,
-    types: ("SSH_AUDIT" | "SERVER_HARDENING" | "MALWARE_SCAN")[],
+    types: SecurityScanType[],
   ) {
     return this.scanSvc.triggerServerScan(serverId, types);
   }
@@ -52,6 +65,36 @@ export class SecurityService {
     actions: EnvironmentHardeningActionType[],
   ) {
     return this.scanSvc.applyEnvironmentHardening(environmentId, actions);
+  }
+
+  // ─── Finding Lifecycle ───────────────────────────────────────────────────────
+
+  async getFindingById(id: number) {
+    return this.findingsSvc.getFindingById(id);
+  }
+
+  async listFindings(
+    filter: {
+      server_id?: number;
+      environment_id?: number;
+      severity?: string;
+      status?: string;
+      category?: string;
+      search?: string;
+    },
+    page: number = 1,
+    limit: number = 50,
+  ) {
+    return this.findingsSvc.listFindings(filter, page, limit);
+  }
+
+  async transitionFindingStatus(
+    id: number,
+    status: any,
+    note?: string,
+    actorId?: number,
+  ) {
+    return this.findingsSvc.transitionFindingStatus(id, status, note, actorId);
   }
 
   // ─── Read ────────────────────────────────────────────────────────────────────
@@ -201,5 +244,104 @@ export class SecurityService {
 
   async getSecurityReportHistory() {
     return this.findingsSvc.getSecurityReportHistory();
+  }
+
+  // ─── Baseline & Drift ──────────────────────────────────────────────────────
+
+  async triggerServerBaselineCapture(serverId: number, userId?: number, label?: string) {
+    return this.baselineSvc.triggerServerBaselineCapture(serverId, userId, label);
+  }
+
+  async triggerEnvironmentBaselineCapture(environmentId: number, userId?: number, label?: string) {
+    return this.baselineSvc.triggerEnvironmentBaselineCapture(environmentId, userId, label);
+  }
+
+  async triggerServerBaselineCompare(serverId: number) {
+    return this.baselineSvc.triggerServerBaselineCompare(serverId);
+  }
+
+  async triggerEnvironmentBaselineCompare(environmentId: number) {
+    return this.baselineSvc.triggerEnvironmentBaselineCompare(environmentId);
+  }
+
+  async getServerBaseline(serverId: number) {
+    return this.baselineSvc.getServerBaseline(serverId);
+  }
+
+  async getEnvironmentBaseline(environmentId: number) {
+    return this.baselineSvc.getEnvironmentBaseline(environmentId);
+  }
+
+  async listServerDriftEvents(serverId: number, page?: number, limit?: number) {
+    return this.baselineSvc.listServerDriftEvents(serverId, page, limit);
+  }
+
+  async listEnvironmentDriftEvents(environmentId: number, page?: number, limit?: number) {
+    return this.baselineSvc.listEnvironmentDriftEvents(environmentId, page, limit);
+  }
+
+  // ─── Incidents ─────────────────────────────────────────────────────────────
+
+  async listIncidents(params: {
+    status?: string;
+    serverId?: number;
+    page?: number;
+    limit?: number;
+  }) {
+    return this.incidentsSvc.listIncidents(params);
+  }
+
+  async getIncidentById(id: number) {
+    return this.incidentsSvc.getIncidentById(id);
+  }
+
+  async updateIncidentStatus(id: number, status: string) {
+    return this.incidentsSvc.updateIncidentStatus(id, status);
+  }
+
+  // ─── Alert Rules ───────────────────────────────────────────────────────────
+
+  async listAlertRules() {
+    return this.alertRulesSvc.listAlertRules();
+  }
+
+  async getAlertRuleById(id: number) {
+    return this.alertRulesSvc.getAlertRuleById(id);
+  }
+
+  async createAlertRule(dto: CreateAlertRuleDto) {
+    return this.alertRulesSvc.createAlertRule(dto);
+  }
+
+  async updateAlertRule(id: number, dto: UpdateAlertRuleDto) {
+    return this.alertRulesSvc.updateAlertRule(id, dto);
+  }
+
+  async deleteAlertRule(id: number) {
+    return this.alertRulesSvc.deleteAlertRule(id);
+  }
+
+  // ─── Safe Remediations ─────────────────────────────────────────────────────
+
+  async previewRemediation(dto: PreviewRemediationDto) {
+    return this.remediationsSvc.previewRemediation(dto);
+  }
+
+  async applyRemediation(dto: ApplyRemediationDto, userId?: number) {
+    return this.remediationsSvc.applyRemediation(dto, userId);
+  }
+
+  // ─── Continuous Security Watcher ───────────────────────────────────────────
+
+  async getWatcherOverview() {
+    return this.watcherSvc.getWatcherOverview();
+  }
+
+  async recordWatcherHeartbeat(dto: WatcherHeartbeatDto) {
+    return this.watcherSvc.recordHeartbeat(dto);
+  }
+
+  getWatcherInstallScript(serverId: number, hostUrl?: string) {
+    return this.watcherSvc.getInstallScript(serverId, hostUrl);
   }
 }

@@ -1,7 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
 import type { SecurityScanType } from "@bedrock-forge/shared";
-import type { SecurityScanStatus, SecuritySeverity } from "@prisma/client";
+import type { SecurityScanStatus, SecuritySeverity, SecurityFindingStatus } from "@prisma/client";
 
 @Injectable()
 export class SecurityRepository {
@@ -567,6 +567,18 @@ export class SecurityRepository {
     });
   }
 
+  listServers() {
+    return this.prisma.server.findMany({
+      where: { status: "online" },
+      select: {
+        id: true,
+        name: true,
+        ip_address: true,
+        status: true,
+      },
+    });
+  }
+
   findServerById(id: bigint) {
     return this.prisma.server.findUnique({ where: { id } });
   }
@@ -611,5 +623,360 @@ export class SecurityRepository {
         }),
       ),
     );
+  }
+
+  // ─── First-Class Security Findings Lifecycle ─────────────────────────────────
+
+  async findFindingById(id: bigint) {
+    return this.prisma.securityFinding.findUnique({
+      where: { id },
+      include: {
+        server: { select: { id: true, name: true, ip_address: true } },
+        environment: {
+          select: {
+            id: true,
+            type: true,
+            url: true,
+            project: { select: { id: true, name: true } },
+          },
+        },
+        scan: { select: { id: true, scan_type: true, completed_at: true } },
+        transitions: {
+          orderBy: { created_at: "desc" },
+          include: { actor: { select: { id: true, name: true, email: true } } },
+        },
+      },
+    });
+  }
+
+  async listSecurityFindings(
+    filter: {
+      server_id?: number;
+      environment_id?: number;
+      severity?: string;
+      status?: string;
+      category?: string;
+      search?: string;
+    },
+    page: number,
+    limit: number,
+  ) {
+    const where: any = {};
+
+    if (filter.server_id) {
+      where.server_id = BigInt(filter.server_id);
+    }
+    if (filter.environment_id) {
+      where.environment_id = BigInt(filter.environment_id);
+    }
+    if (filter.severity) {
+      const severities = filter.severity
+        .split(",")
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean);
+      if (severities.length === 1) {
+        where.severity = severities[0] as SecuritySeverity;
+      } else if (severities.length > 1) {
+        where.severity = { in: severities as SecuritySeverity[] };
+      }
+    }
+    if (filter.status) {
+      const statuses = filter.status
+        .split(",")
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean);
+      if (statuses.length === 1) {
+        where.status = statuses[0] as SecurityFindingStatus;
+      } else if (statuses.length > 1) {
+        where.status = { in: statuses as SecurityFindingStatus[] };
+      }
+    }
+    if (filter.category) {
+      where.category = filter.category;
+    }
+    if (filter.search) {
+      const q = filter.search.trim();
+      where.OR = [
+        { title: { contains: q, mode: "insensitive" } },
+        { description: { contains: q, mode: "insensitive" } },
+        { resource: { contains: q, mode: "insensitive" } },
+      ];
+    }
+
+    const [data, total] = await Promise.all([
+      this.prisma.securityFinding.findMany({
+        where,
+        orderBy: [{ severity: "asc" }, { last_seen_at: "desc" }],
+        skip: (page - 1) * limit,
+        take: limit,
+        include: {
+          server: { select: { id: true, name: true, ip_address: true } },
+          environment: {
+            select: {
+              id: true,
+              type: true,
+              url: true,
+              project: { select: { id: true, name: true } },
+            },
+          },
+          transitions: {
+            take: 3,
+            orderBy: { created_at: "desc" },
+            include: { actor: { select: { id: true, name: true, email: true } } },
+          },
+        },
+      }),
+      this.prisma.securityFinding.count({ where }),
+    ]);
+
+    return { data, total };
+  }
+
+  async updateFindingStatus(
+    id: bigint,
+    status: SecurityFindingStatus,
+    note?: string,
+    actorId?: bigint,
+  ) {
+    const existing = await this.prisma.securityFinding.findUnique({
+      where: { id },
+    });
+    if (!existing) return null;
+
+    const fromStatus = existing.status;
+    const isResolving =
+      status === "resolved" ||
+      status === "remediated" ||
+      status === "false_positive";
+
+    const [updated] = await this.prisma.$transaction([
+      this.prisma.securityFinding.update({
+        where: { id },
+        data: {
+          status,
+          resolved_at: isResolving ? new Date() : null,
+        },
+        include: {
+          server: { select: { id: true, name: true, ip_address: true } },
+          environment: {
+            select: {
+              id: true,
+              type: true,
+              url: true,
+              project: { select: { id: true, name: true } },
+            },
+          },
+          transitions: {
+            orderBy: { created_at: "desc" },
+            include: { actor: { select: { id: true, name: true, email: true } } },
+          },
+        },
+      }),
+      this.prisma.securityFindingTransition.create({
+        data: {
+          finding_id: id,
+          from_status: fromStatus,
+          to_status: status,
+          note: note ?? null,
+          actor_id: actorId ?? null,
+        },
+      }),
+    ]);
+
+    return updated;
+  }
+
+  // ─── Baseline & Drift ────────────────────────────────────────────────────────
+
+  getActiveBaseline(scope: { serverId?: bigint; environmentId?: bigint }) {
+    return this.prisma.securityBaseline.findFirst({
+      where:
+        scope.serverId !== undefined
+          ? { server_id: scope.serverId }
+          : { environment_id: scope.environmentId },
+      orderBy: { created_at: "desc" },
+      include: {
+        items: true,
+        created_by: { select: { id: true, name: true, email: true } },
+      },
+    });
+  }
+
+  async listDriftEvents(params: {
+    serverId?: bigint;
+    environmentId?: bigint;
+    page?: number;
+    limit?: number;
+  }) {
+    const page = Math.max(1, params.page ?? 1);
+    const limit = Math.min(100, Math.max(1, params.limit ?? 20));
+    const skip = (page - 1) * limit;
+
+    const where: any = {};
+    if (params.serverId !== undefined) where.server_id = params.serverId;
+    if (params.environmentId !== undefined) where.environment_id = params.environmentId;
+
+    const [total, data] = await Promise.all([
+      this.prisma.securityDriftEvent.count({ where }),
+      this.prisma.securityDriftEvent.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { detected_at: "desc" },
+        include: {
+          server: { select: { id: true, name: true } },
+          environment: {
+            select: {
+              id: true,
+              type: true,
+              project: { select: { id: true, name: true } },
+            },
+          },
+        },
+      }),
+    ]);
+
+    return {
+      data,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
+  }
+
+  // ─── Incidents ─────────────────────────────────────────────────────────────
+
+  async listIncidents(params: {
+    status?: any;
+    serverId?: bigint;
+    page?: number;
+    limit?: number;
+  }) {
+    const page = Math.max(1, params.page ?? 1);
+    const limit = Math.min(100, Math.max(1, params.limit ?? 20));
+    const skip = (page - 1) * limit;
+
+    const where: any = {};
+    if (params.status) where.status = params.status;
+    if (params.serverId !== undefined) where.server_id = params.serverId;
+
+    const [total, data] = await Promise.all([
+      this.prisma.securityIncident.count({ where }),
+      this.prisma.securityIncident.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { detected_at: "desc" },
+        include: {
+          server: { select: { id: true, name: true, ip_address: true } },
+          findings: {
+            select: {
+              id: true,
+              category: true,
+              severity: true,
+              status: true,
+              title: true,
+              resource: true,
+            },
+          },
+        },
+      }),
+    ]);
+
+    return {
+      data,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
+  }
+
+  findIncidentById(id: bigint) {
+    return this.prisma.securityIncident.findUnique({
+      where: { id },
+      include: {
+        server: { select: { id: true, name: true, ip_address: true } },
+        findings: true,
+      },
+    });
+  }
+
+  updateIncidentStatus(id: bigint, status: any) {
+    return this.prisma.securityIncident.update({
+      where: { id },
+      data: {
+        status,
+        resolved_at: status === "resolved" || status === "false_positive" ? new Date() : null,
+      },
+      include: {
+        server: { select: { id: true, name: true } },
+        findings: true,
+      },
+    });
+  }
+
+  // ─── Alert Rules ───────────────────────────────────────────────────────────
+
+  listAlertRules() {
+    return this.prisma.securityAlertRule.findMany({
+      orderBy: { created_at: "desc" },
+    });
+  }
+
+  findAlertRuleById(id: bigint) {
+    return this.prisma.securityAlertRule.findUnique({
+      where: { id },
+    });
+  }
+
+  createAlertRule(data: {
+    name: string;
+    enabled?: boolean;
+    min_severity?: any;
+    categories?: string[];
+    server_ids?: bigint[];
+    channel_ids?: bigint[];
+    create_incident?: boolean;
+    cooldown_minutes?: number;
+  }) {
+    return this.prisma.securityAlertRule.create({
+      data: {
+        name: data.name,
+        enabled: data.enabled ?? true,
+        min_severity: data.min_severity ?? null,
+        categories: data.categories ?? [],
+        server_ids: data.server_ids ?? [],
+        channel_ids: data.channel_ids ?? [],
+        create_incident: data.create_incident ?? false,
+        cooldown_minutes: data.cooldown_minutes ?? 30,
+      },
+    });
+  }
+
+  updateAlertRule(
+    id: bigint,
+    data: {
+      name?: string;
+      enabled?: boolean;
+      min_severity?: any;
+      categories?: string[];
+      server_ids?: bigint[];
+      channel_ids?: bigint[];
+      create_incident?: boolean;
+      cooldown_minutes?: number;
+    },
+  ) {
+    return this.prisma.securityAlertRule.update({
+      where: { id },
+      data,
+    });
+  }
+
+  deleteAlertRule(id: bigint) {
+    return this.prisma.securityAlertRule.delete({
+      where: { id },
+    });
   }
 }

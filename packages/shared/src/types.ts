@@ -399,6 +399,14 @@ export const NOTIFICATION_EVENTS = {
     "security.ssh_login",
     "security.ssh_failed_login_spike",
     "security.file_changes",
+    "security.incident_detected",
+    "security.watcher_offline",
+    "security.baseline_drift",
+    "security.process_anomaly",
+    "security.webshell_detected",
+    "security.new_ssh_key",
+    "security.new_privileged_user",
+    "security.finding_resolved",
   ],
 } as const;
 
@@ -429,7 +437,15 @@ export type NotificationEventType =
   | "security.attack_detected"
   | "security.ssh_login"
   | "security.ssh_failed_login_spike"
-  | "security.file_changes";
+  | "security.file_changes"
+  | "security.incident_detected"
+  | "security.watcher_offline"
+  | "security.baseline_drift"
+  | "security.process_anomaly"
+  | "security.webshell_detected"
+  | "security.new_ssh_key"
+  | "security.new_privileged_user"
+  | "security.finding_resolved";
 
 // ─── Pagination ───────────────────────────────────────────────────────────────
 

@@ -7,6 +7,7 @@ import type {
   SecurityScanSummary,
   SecurityFinding,
 } from "@bedrock-forge/shared";
+import type { SecurityFindingStatus } from "@prisma/client";
 import type { AckFindingDto, RemoveAckDto } from "./dto/ack-finding.dto";
 import type { GenerateSecurityReportDto } from "./dto/generate-security-report.dto";
 
@@ -24,6 +25,99 @@ export class SecurityFindingsService {
     private readonly repo: SecurityRepository,
     @InjectQueue(QUEUES.REPORTS) private readonly reportsQueue: Queue,
   ) {}
+
+  // ─── First-Class Finding Lifecycle ──────────────────────────────────────────
+
+  async getFindingById(id: number) {
+    const finding = await this.repo.findFindingById(BigInt(id));
+    if (!finding) {
+      throw new NotFoundException(`SecurityFinding ${id} not found`);
+    }
+    return this.serializeFinding(finding);
+  }
+
+  async listFindings(
+    filter: {
+      server_id?: number;
+      environment_id?: number;
+      severity?: string;
+      status?: string;
+      category?: string;
+      search?: string;
+    },
+    page: number = 1,
+    limit: number = 50,
+  ) {
+    const { data, total } = await this.repo.listSecurityFindings(
+      filter,
+      page,
+      limit,
+    );
+    return {
+      data: data.map((f) => this.serializeFinding(f)),
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
+  }
+
+  async transitionFindingStatus(
+    id: number,
+    status: SecurityFindingStatus,
+    note?: string,
+    actorId?: number,
+  ) {
+    const updated = await this.repo.updateFindingStatus(
+      BigInt(id),
+      status,
+      note,
+      actorId ? BigInt(actorId) : undefined,
+    );
+    if (!updated) {
+      throw new NotFoundException(`SecurityFinding ${id} not found`);
+    }
+    return this.serializeFinding(updated);
+  }
+
+  private serializeFinding(finding: any) {
+    if (!finding) return null;
+    return {
+      ...finding,
+      id: Number(finding.id),
+      scan_id: finding.scan_id ? Number(finding.scan_id) : null,
+      server_id: finding.server_id ? Number(finding.server_id) : null,
+      environment_id: finding.environment_id
+        ? Number(finding.environment_id)
+        : null,
+      incident_id: finding.incident_id ? Number(finding.incident_id) : null,
+      server: finding.server
+        ? { ...finding.server, id: Number(finding.server.id) }
+        : null,
+      environment: finding.environment
+        ? {
+            ...finding.environment,
+            id: Number(finding.environment.id),
+            project: finding.environment.project
+              ? {
+                  ...finding.environment.project,
+                  id: Number(finding.environment.project.id),
+                }
+              : null,
+          }
+        : null,
+      scan: finding.scan
+        ? { ...finding.scan, id: Number(finding.scan.id) }
+        : null,
+      transitions: (finding.transitions ?? []).map((t: any) => ({
+        ...t,
+        id: Number(t.id),
+        finding_id: Number(t.finding_id),
+        actor_id: t.actor_id ? Number(t.actor_id) : null,
+        actor: t.actor ? { ...t.actor, id: Number(t.actor.id) } : null,
+      })),
+    };
+  }
 
   async getScanById(id: number) {
     const scan = await this.repo.findScanById(BigInt(id));

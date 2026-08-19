@@ -14,7 +14,7 @@ export class TriggerServerScanDto {
   @IsArray()
   @ArrayMinSize(1)
   @IsEnum(SERVER_SCAN_TYPES, { each: true })
-  types!: ("SSH_AUDIT" | "SERVER_HARDENING" | "MALWARE_SCAN")[];
+  types!: SecurityScanType[];
 }
 
 export class TriggerEnvironmentScanDto {

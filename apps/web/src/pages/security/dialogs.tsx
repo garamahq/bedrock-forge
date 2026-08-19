@@ -418,6 +418,12 @@ export function ScanDialog({
   const allTypes = SCAN_TYPES_BY_KIND[targetType];
   const [selected, setSelected] = useState<string[]>([...allTypes]);
 
+  useEffect(() => {
+    if (open) {
+      setSelected([...allTypes]);
+    }
+  }, [open, targetType]);
+
   const mutation = useMutation({
     mutationFn: (types: string[]) => {
       const url =
@@ -451,25 +457,54 @@ export function ScanDialog({
       prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t],
     );
 
+  const selectAll = () => setSelected([...allTypes]);
+  const clearAll = () => setSelected([]);
+
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="max-w-lg max-h-[85vh] flex flex-col">
         <DialogHeader>
           <DialogTitle>Run Security Scan</DialogTitle>
         </DialogHeader>
-        <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm">
-          <p className="font-medium truncate">{targetName}</p>
-          <p className="text-xs text-muted-foreground">
-            {targetType === "server"
-              ? "SSH, hardening, and malware checks"
-              : "WordPress, malware, backdoor, and plugin checks"}
-          </p>
+        <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm flex items-center justify-between">
+          <div className="min-w-0 flex-1 mr-2">
+            <p className="font-medium truncate">{targetName}</p>
+            <p className="text-xs text-muted-foreground">
+              {targetType === "server"
+                ? "Host, network, process, and system audit suites"
+                : "WordPress core, malware, backdoor, and plugin audit suites"}
+            </p>
+          </div>
+          <div className="flex gap-1.5 shrink-0">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 px-2 text-xs"
+              onClick={selectAll}
+            >
+              Select all
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-xs"
+              onClick={clearAll}
+            >
+              Clear
+            </Button>
+          </div>
         </div>
-        <div className="grid gap-2 py-2">
+        <div className="flex-1 overflow-y-auto pr-1 grid gap-2 py-2 max-h-[45vh]">
           {allTypes.map((t) => (
             <label
               key={t}
-              className="flex items-start gap-3 cursor-pointer rounded-md border p-3 hover:bg-muted/40"
+              className={`flex items-start gap-3 cursor-pointer rounded-md border p-3 transition-colors ${
+                selected.includes(t)
+                  ? "border-primary/40 bg-primary/5"
+                  : "hover:bg-muted/40"
+              }`}
             >
               <input
                 type="checkbox"
@@ -477,11 +512,11 @@ export function ScanDialog({
                 onChange={() => toggle(t)}
                 className="rounded mt-0.5"
               />
-              <span className="min-w-0">
+              <span className="min-w-0 flex-1">
                 <span className="block text-sm font-medium">
                   {SCAN_TYPE_LABELS[t] ?? t.replace(/_/g, " ")}
                 </span>
-                <span className="block text-xs text-muted-foreground">
+                <span className="block text-xs text-muted-foreground mt-0.5">
                   {SCAN_TYPE_DESCRIPTIONS[t] ?? "Run this security check."}
                 </span>
               </span>
@@ -490,11 +525,11 @@ export function ScanDialog({
         </div>
         {selected.length === 0 && (
           <div className="flex items-center gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
-            <AlertCircle className="h-3.5 w-3.5" />
-            Select at least one scan type.
+            <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+            Select at least one scan type to proceed.
           </div>
         )}
-        <DialogFooter>
+        <DialogFooter className="pt-2 border-t mt-auto">
           <Button variant="outline" onClick={onClose}>
             Cancel
           </Button>
@@ -508,7 +543,7 @@ export function ScanDialog({
                 Queuing…
               </>
             ) : (
-              "Start Scan"
+              `Start Scan (${selected.length})`
             )}
           </Button>
         </DialogFooter>

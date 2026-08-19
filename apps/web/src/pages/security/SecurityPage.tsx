@@ -7,6 +7,10 @@ import {
   ListFilter,
   RefreshCw,
   Clock,
+  GitCompare,
+  Flame,
+  BellRing,
+  Radio,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -17,6 +21,10 @@ import { OverviewTab } from "./tabs/OverviewTab";
 import { ServerSecurityTab } from "./tabs/ServerSecurityTab";
 import { ProjectSecurityTab } from "./tabs/ProjectSecurityTab";
 import { FindingsTab } from "./tabs/FindingsTab";
+import { BaselineDriftTab } from "./tabs/BaselineDriftTab";
+import { IncidentsTab } from "./tabs/IncidentsTab";
+import { AlertRulesTab } from "./tabs/AlertRulesTab";
+import { WatcherTab } from "./tabs/WatcherTab";
 import { ServerSchedulesTab, ProjectSchedulesTab } from "./tabs/ScheduleTabs";
 import { SecurityScanProgress } from "./components/SecurityScanProgress";
 
@@ -57,6 +65,14 @@ export function SecurityPage() {
             <Shield className="h-3.5 w-3.5 mr-1.5" />
             Overview
           </TabsTrigger>
+          <TabsTrigger value="incidents">
+            <Flame className="h-3.5 w-3.5 mr-1.5 text-red-500" />
+            Incidents
+          </TabsTrigger>
+          <TabsTrigger value="watcher">
+            <Radio className="h-3.5 w-3.5 mr-1.5 text-emerald-500" />
+            Threat Watcher
+          </TabsTrigger>
           <TabsTrigger value="servers">
             <ServerIcon className="h-3.5 w-3.5 mr-1.5" />
             Servers
@@ -68,6 +84,14 @@ export function SecurityPage() {
           <TabsTrigger value="findings">
             <ListFilter className="h-3.5 w-3.5 mr-1.5" />
             Findings
+          </TabsTrigger>
+          <TabsTrigger value="baseline">
+            <GitCompare className="h-3.5 w-3.5 mr-1.5" />
+            Baseline & Drift
+          </TabsTrigger>
+          <TabsTrigger value="alert-rules">
+            <BellRing className="h-3.5 w-3.5 mr-1.5" />
+            Alert Rules
           </TabsTrigger>
           <TabsTrigger value="schedules">
             <Clock className="h-3.5 w-3.5 mr-1.5" />
@@ -87,6 +111,12 @@ export function SecurityPage() {
               <TabsContent value="overview">
                 <OverviewTab data={overview} />
               </TabsContent>
+              <TabsContent value="incidents">
+                <IncidentsTab servers={overview.servers} />
+              </TabsContent>
+              <TabsContent value="watcher">
+                <WatcherTab servers={overview.servers} />
+              </TabsContent>
               <TabsContent value="servers">
                 <ServerSecurityTab data={overview} />
               </TabsContent>
@@ -98,6 +128,15 @@ export function SecurityPage() {
                   servers={overview.servers}
                   environments={overview.environments}
                 />
+              </TabsContent>
+              <TabsContent value="baseline">
+                <BaselineDriftTab
+                  servers={overview.servers}
+                  environments={overview.environments}
+                />
+              </TabsContent>
+              <TabsContent value="alert-rules">
+                <AlertRulesTab servers={overview.servers} />
               </TabsContent>
               <TabsContent value="schedules">
                 <Tabs defaultValue="server-schedules">

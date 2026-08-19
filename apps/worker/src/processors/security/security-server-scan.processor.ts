@@ -7,6 +7,7 @@ import { SecurityScanRunnerService } from "./services/security-scan-runner.servi
 import { SecuritySchedulerService } from "./services/security-scheduler.service";
 import { SecurityHardeningService } from "./services/security-hardening.service";
 import { SecurityDataRetentionService } from "./services/security-data-retention.service";
+import { SecurityBaselineService } from "./services/security-baseline.service";
 import { QUEUES, JOB_TYPES } from "@bedrock-forge/shared";
 
 const TICK_JOB_ID = "security-schedule-tick";
@@ -31,6 +32,7 @@ export class SecurityScanProcessor
     private readonly scheduler: SecuritySchedulerService,
     private readonly hardening: SecurityHardeningService,
     private readonly retention: SecurityDataRetentionService,
+    private readonly baselineService: SecurityBaselineService,
     @InjectQueue(QUEUES.SECURITY) private readonly securityQueue: Queue,
   ) {
     super();
@@ -100,6 +102,22 @@ export class SecurityScanProcessor
         return this.alertPoller.processAlertPoll(job);
       case JOB_TYPES.SECURITY_DATA_RETENTION:
         return this.retention.runRetentionPurge();
+      case JOB_TYPES.SECURITY_BASELINE_CREATE: {
+        const { targetType, targetId, userId, label } = job.data as {
+          targetType: "server" | "environment";
+          targetId: number;
+          userId?: number;
+          label?: string;
+        };
+        return this.baselineService.createBaseline(targetType, targetId, userId, label);
+      }
+      case JOB_TYPES.SECURITY_BASELINE_COMPARE: {
+        const { targetType, targetId } = job.data as {
+          targetType: "server" | "environment";
+          targetId: number;
+        };
+        return this.baselineService.compareBaseline(targetType, targetId);
+      }
       default:
         this.logger.warn(`Unknown security job type: ${job.name}`);
     }

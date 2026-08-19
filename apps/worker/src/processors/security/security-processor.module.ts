@@ -8,6 +8,12 @@ import { SecurityScanRunnerService } from "./services/security-scan-runner.servi
 import { SecuritySchedulerService } from "./services/security-scheduler.service";
 import { SecurityHardeningService } from "./services/security-hardening.service";
 import { SecurityDataRetentionService } from "./services/security-data-retention.service";
+import { FindingDeduplicationService } from "./services/finding-deduplication.service";
+import { SecurityBaselineService } from "./services/security-baseline.service";
+import { SecurityIncidentCorrelationService } from "./services/security-incident-correlation.service";
+import { SecurityAlertRuleEngineService } from "./services/security-alert-rule-engine.service";
+import { SecurityRemediationSafetyService } from "./services/security-remediation-safety.service";
+import { SecurityAgentlessWatcherService } from "./services/security-agentless-watcher.service";
 
 @Module({
   imports: [
@@ -28,6 +34,12 @@ import { SecurityDataRetentionService } from "./services/security-data-retention
     SecuritySchedulerService,
     SecurityHardeningService,
     SecurityDataRetentionService,
+    FindingDeduplicationService,
+    SecurityBaselineService,
+    SecurityIncidentCorrelationService,
+    SecurityAlertRuleEngineService,
+    SecurityRemediationSafetyService,
+    SecurityAgentlessWatcherService,
   ],
 })
 export class SecurityProcessorModule {}

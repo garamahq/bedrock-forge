@@ -15,6 +15,19 @@ export class FindingsQueryDto {
   @IsString()
   severity?: string;
 
+  /** Comma-separated statuses: new,investigating,acknowledged,remediated,resolved,ignored,false_positive */
+  @IsOptional()
+  @IsString()
+  status?: string;
+
+  @IsOptional()
+  @IsString()
+  category?: string;
+
+  @IsOptional()
+  @IsString()
+  search?: string;
+
   @IsOptional()
   @Type(() => Number)
   @IsNumber()

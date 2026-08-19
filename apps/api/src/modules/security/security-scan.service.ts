@@ -22,7 +22,7 @@ export class SecurityScanService {
 
   async triggerServerScan(
     serverId: number,
-    types: ("SSH_AUDIT" | "SERVER_HARDENING" | "MALWARE_SCAN")[],
+    types: SecurityScanType[],
   ) {
     const server = await this.repo.findServerById(BigInt(serverId));
     if (!server) throw new NotFoundException(`Server ${serverId} not found`);

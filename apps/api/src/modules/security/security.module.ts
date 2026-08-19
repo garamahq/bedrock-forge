@@ -7,6 +7,11 @@ import { SecurityScanService } from "./security-scan.service";
 import { SecurityFindingsService } from "./security-findings.service";
 import { SecuritySchedulesService } from "./security-schedules.service";
 import { SecurityAlertsService } from "./security-alerts.service";
+import { SecurityBaselineService } from "./security-baseline.service";
+import { SecurityIncidentsService } from "./security-incidents.service";
+import { SecurityAlertRulesService } from "./security-alert-rules.service";
+import { SecurityRemediationsService } from "./security-remediations.service";
+import { SecurityWatcherService } from "./security-watcher.service";
 import { SecurityRepository } from "./security.repository";
 import { SettingsModule } from "../settings/settings.module";
 import { VulnerabilityDbService } from "./vulnerability-db.service";
@@ -27,6 +32,11 @@ import { JobExecutionsModule } from "../job-executions/job-executions.module";
     SecurityFindingsService,
     SecuritySchedulesService,
     SecurityAlertsService,
+    SecurityBaselineService,
+    SecurityIncidentsService,
+    SecurityAlertRulesService,
+    SecurityRemediationsService,
+    SecurityWatcherService,
     SecurityRepository,
     VulnerabilityDbService,
   ],
@@ -36,6 +46,11 @@ import { JobExecutionsModule } from "../job-executions/job-executions.module";
     SecurityFindingsService,
     SecuritySchedulesService,
     SecurityAlertsService,
+    SecurityBaselineService,
+    SecurityIncidentsService,
+    SecurityAlertRulesService,
+    SecurityRemediationsService,
+    SecurityWatcherService,
     VulnerabilityDbService,
   ],
 })
