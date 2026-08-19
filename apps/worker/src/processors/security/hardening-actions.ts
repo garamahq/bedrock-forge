@@ -375,58 +375,90 @@ async function restrictInternalPorts(
   const action = "RESTRICT_INTERNAL_PORTS";
   const changes: string[] = [];
 
-  // 1. Redis: Ensure bind 127.0.0.1
+  // 1. Redis: Ensure bind 127.0.0.1 across all possible config paths
   const redisCheck = await run(
     exec,
-    `if [ -f /etc/redis/redis.conf ]; then CONF=/etc/redis/redis.conf; elif [ -f /etc/redis.conf ]; then CONF=/etc/redis.conf; else CONF=""; fi; ` +
-    `if [ -n "$CONF" ]; then ` +
-    `  if grep -qE '^\\s*bind\\s+0\\.0\\.0\\.0' "$CONF"; then ` +
-    `    sed -i -E 's/^\\s*bind\\s+0\\.0\\.0\\.0/bind 127.0.0.1 ::1/' "$CONF"; echo "fixed_redis"; ` +
-    `  elif ! grep -qE '^\\s*bind\\s+127\\.0\\.0\\.1' "$CONF"; then ` +
-    `    echo "bind 127.0.0.1 ::1" >> "$CONF"; echo "fixed_redis"; ` +
-    `  fi; ` +
-    `fi`,
-  );
-  if (redisCheck.stdout.includes("fixed_redis")) {
-    await run(exec, "systemctl restart redis-server redis 2>/dev/null || true");
-    changes.push("Bound Redis (6379) to localhost");
-  }
-
-  // 2. MySQL / MariaDB: Ensure bind-address = 127.0.0.1
-  const mysqlCheck = await run(
-    exec,
-    `for conf in /etc/mysql/mariadb.conf.d/50-server.cnf /etc/mysql/mysql.conf.d/mysqld.cnf /etc/mysql/my.cnf /etc/my.cnf; do ` +
+    `REDIS_FIXED=0; ` +
+    `for conf in /etc/redis/redis.conf /etc/redis.conf /etc/redis/*.conf /etc/redis-server.conf; do ` +
     `  if [ -f "$conf" ]; then ` +
-    `    if grep -qE '^\\s*bind-address\\s*=\\s*0\\.0\\.0\\.0' "$conf"; then ` +
-    `      sed -i -E 's/^\\s*bind-address\\s*=\\s*0\\.0\\.0\\.0/bind-address = 127.0.0.1/' "$conf"; echo "fixed_mysql"; break; ` +
-    `    elif grep -qE '^\\[mysqld\\]' "$conf" && ! grep -qE '^\\s*bind-address' "$conf"; then ` +
-    `      sed -i '/^\\[mysqld\\]/a bind-address = 127.0.0.1' "$conf"; echo "fixed_mysql"; break; ` +
+    `    if grep -qE '^\\s*#?\\s*bind\\s+' "$conf"; then ` +
+    `      sed -i -E 's/^\\s*#?\\s*bind\\s+.*/bind 127.0.0.1 ::1/' "$conf"; REDIS_FIXED=1; ` +
+    `    else ` +
+    `      echo "bind 127.0.0.1 ::1" >> "$conf"; REDIS_FIXED=1; ` +
     `    fi; ` +
     `  fi; ` +
-    `done`,
+    `done; ` +
+    `if [ "$REDIS_FIXED" -eq 1 ]; then echo "fixed_redis"; fi`,
+  );
+  if (redisCheck.stdout.includes("fixed_redis")) {
+    await run(
+      exec,
+      "systemctl restart redis redis-server 2>/dev/null || service redis restart 2>/dev/null || service redis-server restart 2>/dev/null || true",
+    );
+    changes.push("Bound Redis (6379) to localhost (127.0.0.1)");
+  }
+
+  // 2. MySQL / MariaDB: Ensure bind-address = 127.0.0.1 via drop-in confs and direct conf files
+  const mysqlCheck = await run(
+    exec,
+    `MYSQL_FIXED=0; ` +
+    `for dir in /etc/mysql/mariadb.conf.d /etc/mysql/conf.d /etc/my.cnf.d; do ` +
+    `  if [ -d "$dir" ]; then ` +
+    `    printf '[mysqld]\\nbind-address = 127.0.0.1\\n[mariadb]\\nbind-address = 127.0.0.1\\n[server]\\nbind-address = 127.0.0.1\\n' > "$dir/99-forge-bind.cnf"; ` +
+    `    MYSQL_FIXED=1; ` +
+    `  fi; ` +
+    `done; ` +
+    `for conf in /etc/my.cnf /etc/mysql/my.cnf /etc/mysql/mariadb.conf.d/50-server.cnf /etc/mysql/mysql.conf.d/mysqld.cnf; do ` +
+    `  if [ -f "$conf" ]; then ` +
+    `    if grep -qE '^\\s*#?\\s*bind-address\\s*=' "$conf"; then ` +
+    `      sed -i -E 's/^\\s*#?\\s*bind-address\\s*=.*/bind-address = 127.0.0.1/' "$conf"; MYSQL_FIXED=1; ` +
+    `    elif grep -qE '^\\[(mysqld|mariadb|server)\\]' "$conf" && ! grep -qE '^\\s*bind-address' "$conf"; then ` +
+    `      sed -i '/^\\[\\(mysqld\\|mariadb\\|server\\)\\]/a bind-address = 127.0.0.1' "$conf"; MYSQL_FIXED=1; ` +
+    `    fi; ` +
+    `  fi; ` +
+    `done; ` +
+    `if [ "$MYSQL_FIXED" -eq 1 ]; then echo "fixed_mysql"; fi`,
   );
   if (mysqlCheck.stdout.includes("fixed_mysql")) {
-    await run(exec, "systemctl restart mariadb mysql mysqld 2>/dev/null || true");
-    changes.push("Bound MySQL/MariaDB (3306) to localhost");
+    await run(
+      exec,
+      "systemctl restart mariadb mysql mysqld 2>/dev/null || service mariadb restart 2>/dev/null || service mysql restart 2>/dev/null || true",
+    );
+    changes.push("Bound MySQL/MariaDB (3306) to localhost (127.0.0.1)");
   }
 
   // 3. Memcached: Ensure -l 127.0.0.1
   const memcachedCheck = await run(
     exec,
+    `MEM_FIXED=0; ` +
     `if [ -f /etc/memcached.conf ]; then ` +
-    `  if grep -qE '^\\s*-l\\s+0\\.0\\.0\\.0' /etc/memcached.conf; then ` +
-    `    sed -i -E 's/^\\s*-l\\s+0\\.0\\.0\\.0/-l 127.0.0.1/' /etc/memcached.conf; echo "fixed_memcached"; ` +
-    `  elif ! grep -qE '^\\s*-l\\s+127\\.0\\.0\\.1' /etc/memcached.conf; then ` +
-    `    echo "-l 127.0.0.1" >> /etc/memcached.conf; echo "fixed_memcached"; ` +
+    `  if grep -qE '^\\s*#?\\s*-l\\s+' /etc/memcached.conf; then ` +
+    `    sed -i -E 's/^\\s*#?\\s*-l\\s+.*/-l 127.0.0.1/' /etc/memcached.conf; MEM_FIXED=1; ` +
+    `  else ` +
+    `    echo "-l 127.0.0.1" >> /etc/memcached.conf; MEM_FIXED=1; ` +
     `  fi; ` +
-    `fi`,
+    `fi; ` +
+    `if [ -f /etc/sysconfig/memcached ]; then ` +
+    `  if grep -qE '^\\s*OPTIONS=' /etc/sysconfig/memcached; then ` +
+    `    sed -i -E 's/^\\s*OPTIONS=.*/OPTIONS="-l 127.0.0.1"/' /etc/sysconfig/memcached; MEM_FIXED=1; ` +
+    `  else ` +
+    `    echo 'OPTIONS="-l 127.0.0.1"' >> /etc/sysconfig/memcached; MEM_FIXED=1; ` +
+    `  fi; ` +
+    `fi; ` +
+    `if [ -f /etc/default/memcached ]; then ` +
+    `  sed -i -E 's/^\\s*LISTEN=.*/LISTEN="127.0.0.1"/' /etc/default/memcached; MEM_FIXED=1; ` +
+    `fi; ` +
+    `if [ "$MEM_FIXED" -eq 1 ]; then echo "fixed_memcached"; fi`,
   );
   if (memcachedCheck.stdout.includes("fixed_memcached")) {
-    await run(exec, "systemctl restart memcached 2>/dev/null || true");
-    changes.push("Bound Memcached (11211) to localhost");
+    await run(
+      exec,
+      "systemctl restart memcached 2>/dev/null || service memcached restart 2>/dev/null || true",
+    );
+    changes.push("Bound Memcached (11211) to localhost (127.0.0.1)");
   }
 
-  // 4. Firewall defense-in-depth (deny 3306, 6379, 11211 in ufw if active)
+  // 4. Firewall defense-in-depth (deny 3306, 6379, 11211 in UFW / iptables)
   const ufwStatus = await run(exec, "ufw status 2>/dev/null || true");
   if (ufwStatus.stdout.includes("Status: active")) {
     await run(
@@ -436,6 +468,15 @@ async function restrictInternalPorts(
       "ufw deny proto tcp to any port 11211 comment 'Forge secure Memcached' 2>/dev/null || true",
     );
     changes.push("Enforced UFW firewall rules blocking ports 3306, 6379, and 11211 from public interfaces");
+  } else {
+    // Enforce via iptables if UFW is inactive
+    await run(
+      exec,
+      "iptables -C INPUT -p tcp ! -i lo --dport 3306 -j DROP 2>/dev/null || iptables -I INPUT -p tcp ! -i lo --dport 3306 -j DROP 2>/dev/null; " +
+      "iptables -C INPUT -p tcp ! -i lo --dport 6379 -j DROP 2>/dev/null || iptables -I INPUT -p tcp ! -i lo --dport 6379 -j DROP 2>/dev/null; " +
+      "iptables -C INPUT -p tcp ! -i lo --dport 11211 -j DROP 2>/dev/null || iptables -I INPUT -p tcp ! -i lo --dport 11211 -j DROP 2>/dev/null || true",
+    );
+    changes.push("Enforced iptables firewall rules blocking ports 3306, 6379, and 11211 from public network interfaces");
   }
 
   if (changes.length === 0) {

@@ -1,11 +1,13 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useState, Fragment, useEffect } from "react";
+import { useState, Fragment, useEffect, useMemo } from "react";
 import {
   Trash2,
   Download,
   RotateCcw,
   AlertCircle,
   ExternalLink,
+  FolderKanban,
+  Globe,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api } from "@/lib/api-client";
@@ -87,6 +89,7 @@ const BACKUP_TYPES = [
 
 export function BackupsPage() {
   const qc = useQueryClient();
+  const [projectId, setProjectId] = useState<string>("all");
   const [envId, setEnvId] = useState<number | null>(null);
   const [backupType, setBackupType] = useState<string>("full");
   const [page, setPage] = useState(1);
@@ -108,6 +111,33 @@ export function BackupsPage() {
     queryKey: ["environments-all"],
     queryFn: () => api.get<Environment[]>("/environments"),
   });
+
+  const projects = useMemo(() => {
+    const map = new Map<number, { id: number; name: string; envCount: number }>();
+    for (const e of envs ?? []) {
+      if (e.project) {
+        const existing = map.get(e.project.id);
+        if (existing) {
+          existing.envCount++;
+        } else {
+          map.set(e.project.id, {
+            id: e.project.id,
+            name: e.project.name,
+            envCount: 1,
+          });
+        }
+      }
+    }
+    return Array.from(map.values()).sort((a, b) =>
+      a.name.localeCompare(b.name),
+    );
+  }, [envs]);
+
+  const filteredEnvs = useMemo(() => {
+    if (!envs) return [];
+    if (projectId === "all") return envs;
+    return envs.filter((e) => String(e.project.id) === projectId);
+  }, [envs, projectId]);
 
   const {
     data: backupsData,
@@ -273,14 +303,69 @@ export function BackupsPage() {
     <div className="space-y-4 pb-20">
       <h1 className="text-2xl font-bold">Backups</h1>
 
-      {/* Environment + type selector */}
-      <div className="flex flex-wrap items-end gap-4 bg-card border rounded-lg p-4 shadow-sm">
+      {/* Project + Environment + type selector */}
+      <div className="flex flex-wrap items-end gap-3 bg-card border rounded-lg p-4 shadow-sm">
         <div className="space-y-1">
-          <Label>Environment</Label>
+          <Label className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
+            <FolderKanban className="h-3.5 w-3.5 text-muted-foreground" />
+            Project
+          </Label>
+          <Select
+            value={projectId}
+            onValueChange={(v) => {
+              setProjectId(v);
+              if (v === "all") {
+                // keep or clear
+              } else {
+                const pEnvs = (envs ?? []).filter(
+                  (e) => String(e.project.id) === v,
+                );
+                if (pEnvs.length > 0) {
+                  setEnvId(pEnvs[0].id);
+                } else {
+                  setEnvId(null);
+                }
+              }
+              setPage(1);
+              setSelectedIds([]);
+            }}
+          >
+            <SelectTrigger className="w-56">
+              <SelectValue placeholder="All Projects" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">
+                All Projects ({projects.length})
+              </SelectItem>
+              {projects.map((p) => (
+                <SelectItem key={p.id} value={String(p.id)}>
+                  {p.name} ({p.envCount} {p.envCount === 1 ? "env" : "envs"})
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="space-y-1">
+          <Label className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
+            <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+            Environment
+          </Label>
           <Select
             value={envId?.toString() ?? ""}
             onValueChange={(v) => {
-              setEnvId(v ? Number(v) : null);
+              const newId = v ? Number(v) : null;
+              setEnvId(newId);
+              if (newId) {
+                const found = (envs ?? []).find((e) => e.id === newId);
+                if (
+                  found &&
+                  projectId !== "all" &&
+                  String(found.project.id) !== projectId
+                ) {
+                  setProjectId(String(found.project.id));
+                }
+              }
               setPage(1);
               setSelectedIds([]);
             }}
@@ -289,9 +374,10 @@ export function BackupsPage() {
               <SelectValue placeholder="Select environment…" />
             </SelectTrigger>
             <SelectContent>
-              {envs?.map((e) => (
+              {filteredEnvs.map((e) => (
                 <SelectItem key={e.id} value={e.id.toString()}>
-                  {e.project.name} — {e.type} ({e.server.name})
+                  <span className="font-medium">{e.project.name}</span> —{" "}
+                  <span className="capitalize">{e.type}</span> ({e.server.name})
                 </SelectItem>
               ))}
             </SelectContent>
@@ -299,9 +385,11 @@ export function BackupsPage() {
         </div>
 
         <div className="space-y-1">
-          <Label>Backup type</Label>
+          <Label className="text-xs font-medium text-muted-foreground">
+            Backup type
+          </Label>
           <Select value={backupType} onValueChange={setBackupType}>
-            <SelectTrigger className="w-44">
+            <SelectTrigger className="w-48">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>

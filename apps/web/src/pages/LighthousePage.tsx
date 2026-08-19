@@ -3,6 +3,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
   ExternalLink,
+  FolderKanban,
+  Globe,
   Loader2,
   MonitorSmartphone,
   RefreshCw,
@@ -78,6 +80,7 @@ const metric = (value: number | null, suffix: string) =>
 
 export function LighthousePage() {
   const queryClient = useQueryClient();
+  const [projectId, setProjectId] = useState<string>("all");
   const [environmentId, setEnvironmentId] = useState<string>("");
   const [strategy, setStrategy] = useState<"mobile" | "desktop">("mobile");
   const [urlOverride, setUrlOverride] = useState("");
@@ -87,6 +90,32 @@ export function LighthousePage() {
     queryKey: ["environments"],
     queryFn: () => api.get("/environments"),
   });
+
+  const projects = useMemo(() => {
+    const map = new Map<number, { id: number; name: string; envCount: number }>();
+    for (const env of environments) {
+      if (env.project) {
+        const existing = map.get(env.project.id);
+        if (existing) {
+          existing.envCount++;
+        } else {
+          map.set(env.project.id, {
+            id: env.project.id,
+            name: env.project.name,
+            envCount: 1,
+          });
+        }
+      }
+    }
+    return Array.from(map.values()).sort((a, b) =>
+      a.name.localeCompare(b.name),
+    );
+  }, [environments]);
+
+  const filteredEnvs = useMemo(() => {
+    if (projectId === "all") return environments;
+    return environments.filter((env) => String(env.project?.id) === projectId);
+  }, [environments, projectId]);
 
   const selectedEnv = useMemo(
     () => environments.find((env) => String(env.id) === environmentId),
@@ -99,7 +128,10 @@ export function LighthousePage() {
     refetchInterval: 30_000,
   });
 
-  const { data: historyData } = useQuery<{ items: LighthouseAudit[]; total: number }>({
+  const { data: historyData } = useQuery<{
+    items: LighthouseAudit[];
+    total: number;
+  }>({
     queryKey: ["lighthouse", "history", environmentId, page],
     queryFn: () =>
       api.get(
@@ -166,9 +198,50 @@ export function LighthousePage() {
         </Button>
       </PageHeader>
 
-      <section className="grid gap-3 lg:grid-cols-[1fr_220px_180px_auto] items-end border rounded-lg p-4">
+      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-[200px_220px_160px_1fr_auto] items-end border rounded-lg p-4 bg-card shadow-sm">
         <div className="space-y-1.5">
-          <label className="text-xs font-medium text-muted-foreground">
+          <label className="text-xs font-medium text-muted-foreground flex items-center gap-1">
+            <FolderKanban className="h-3.5 w-3.5 text-muted-foreground" />
+            Project
+          </label>
+          <Select
+            value={projectId}
+            onValueChange={(val) => {
+              setProjectId(val);
+              setPage(1);
+              if (val === "all") {
+                setEnvironmentId("");
+              } else {
+                const pEnvs = environments.filter(
+                  (e) => String(e.project?.id) === val,
+                );
+                if (pEnvs.length > 0) {
+                  setEnvironmentId(String(pEnvs[0].id));
+                } else {
+                  setEnvironmentId("");
+                }
+              }
+            }}
+          >
+            <SelectTrigger>
+              <SelectValue placeholder="All Projects" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">
+                All Projects ({projects.length})
+              </SelectItem>
+              {projects.map((p) => (
+                <SelectItem key={p.id} value={String(p.id)}>
+                  {p.name} ({p.envCount} {p.envCount === 1 ? "env" : "envs"})
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium text-muted-foreground flex items-center gap-1">
+            <Globe className="h-3.5 w-3.5 text-muted-foreground" />
             Environment
           </label>
           <Select
@@ -176,20 +249,32 @@ export function LighthousePage() {
             onValueChange={(val) => {
               setEnvironmentId(val);
               setPage(1);
+              if (val) {
+                const found = environments.find((e) => String(e.id) === val);
+                if (
+                  found?.project &&
+                  projectId !== "all" &&
+                  String(found.project.id) !== projectId
+                ) {
+                  setProjectId(String(found.project.id));
+                }
+              }
             }}
           >
             <SelectTrigger>
               <SelectValue placeholder="Select environment" />
             </SelectTrigger>
             <SelectContent>
-              {environments.map((env) => (
+              {filteredEnvs.map((env) => (
                 <SelectItem key={env.id} value={String(env.id)}>
-                  {env.project?.name ?? "Project"} · {env.type} · {env.url}
+                  <span className="font-medium">{env.project?.name}</span> ·{" "}
+                  <span className="capitalize">{env.type}</span>
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
         </div>
+
         <div className="space-y-1.5">
           <label className="text-xs font-medium text-muted-foreground">
             Strategy
@@ -207,6 +292,7 @@ export function LighthousePage() {
             </SelectContent>
           </Select>
         </div>
+
         <div className="space-y-1.5">
           <label className="text-xs font-medium text-muted-foreground">
             URL override
@@ -217,6 +303,7 @@ export function LighthousePage() {
             placeholder={selectedEnv?.url ?? "https://example.com"}
           />
         </div>
+
         <Button
           onClick={() => trigger.mutate()}
           disabled={!environmentId || trigger.isPending}

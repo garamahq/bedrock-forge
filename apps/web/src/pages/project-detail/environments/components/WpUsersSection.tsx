@@ -125,57 +125,64 @@ export function WpUsersSection({
             )}
             {!isLoading && !isError && users && users.length > 0 && (
               <div className="space-y-1">
-                {users.map((u) => (
-                  <div
-                    key={u.id}
-                    className="flex items-center justify-between gap-2 py-1 border-b last:border-0"
-                  >
-                    <div className="flex items-center gap-2 min-w-0">
-                      <div
-                        className="h-6 w-6 rounded-full flex items-center justify-center text-white text-xs font-semibold shrink-0"
-                        style={{
-                          backgroundColor: `hsl(${(u.user_login.charCodeAt(0) * 47) % 360}, 60%, 45%)`,
-                        }}
-                      >
-                        {u.user_login[0].toUpperCase()}
-                      </div>
-                      <div className="min-w-0">
-                        <p className="font-medium truncate leading-tight">
-                          {u.user_login}
-                        </p>
-                        <p className="text-muted-foreground truncate leading-tight">
-                          {u.user_email}
-                        </p>
-                      </div>
-                      <div className="flex flex-wrap gap-1 shrink-0">
-                        {u.roles.map((role) => (
-                          <span
-                            key={role}
-                            className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${ROLE_COLORS[role] ?? "bg-muted text-muted-foreground"}`}
-                          >
-                            {role}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-6 text-xs shrink-0"
-                      disabled={loadingUserId === u.id}
-                      onClick={() => handleQuickLogin(u.id)}
+                {users.map((u) => {
+                  const loginStr = u.user_login || u.user_email || "User";
+                  const initial = (loginStr[0] || "U").toUpperCase();
+                  const colorCode = (loginStr.charCodeAt(0) || 65) * 47;
+                  const roles = Array.isArray(u.roles) ? u.roles : [];
+
+                  return (
+                    <div
+                      key={u.id}
+                      className="flex items-center justify-between gap-2 py-1 border-b last:border-0"
                     >
-                      {loadingUserId === u.id ? (
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                      ) : (
-                        <>
-                          <LogIn className="h-3 w-3 mr-1" />
-                          Login
-                        </>
-                      )}
-                    </Button>
-                  </div>
-                ))}
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div
+                          className="h-6 w-6 rounded-full flex items-center justify-center text-white text-xs font-semibold shrink-0"
+                          style={{
+                            backgroundColor: `hsl(${colorCode % 360}, 60%, 45%)`,
+                          }}
+                        >
+                          {initial}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="font-medium truncate leading-tight">
+                            {u.user_login || "—"}
+                          </p>
+                          <p className="text-muted-foreground truncate leading-tight">
+                            {u.user_email || "—"}
+                          </p>
+                        </div>
+                        <div className="flex flex-wrap gap-1 shrink-0">
+                          {roles.map((role) => (
+                            <span
+                              key={role}
+                              className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${ROLE_COLORS[role] ?? "bg-muted text-muted-foreground"}`}
+                            >
+                              {role}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-6 text-xs shrink-0"
+                        disabled={loadingUserId === u.id}
+                        onClick={() => handleQuickLogin(u.id)}
+                      >
+                        {loadingUserId === u.id ? (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        ) : (
+                          <>
+                            <LogIn className="h-3 w-3 mr-1" />
+                            Login
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
