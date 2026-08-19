@@ -783,6 +783,20 @@ export function PluginsTab({
     };
   });
 
+  const handleResetAndRefresh = () => {
+    setLastJobError(null);
+    setLastJobStatus("idle");
+    setManagingJobId(null);
+    managingJobIdRef.current = null;
+    setCustomJobId(null);
+    customJobIdRef.current = null;
+    setScanning(false);
+    scanningEnvIdRef.current = null;
+    scanJobIdRef.current = null;
+    invalidatePluginState(selectedEnvId);
+    scanMutation.mutate();
+  };
+
   return (
     <div className="space-y-4">
       {/* Top action bar */}
@@ -814,8 +828,9 @@ export function PluginsTab({
         <Button
           size="sm"
           variant="outline"
-          onClick={() => scanMutation.mutate()}
+          onClick={handleResetAndRefresh}
           disabled={!selectedEnvId || isBusy}
+          title="Force refresh plugin cache and re-scan environment"
         >
           {isBusy ? (
             <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
@@ -826,7 +841,7 @@ export function PluginsTab({
             ? "Scanning…"
             : scanMutation.isPending
               ? "Queuing…"
-              : "Scan Now"}
+              : "Refresh Plugins"}
         </Button>
 
         {isBedrock && (
@@ -936,14 +951,25 @@ export function PluginsTab({
           </CardHeader>
           <CardContent className="p-4 max-h-[350px] overflow-y-auto font-mono text-sm">
             {lastJobStatus === "failed" && lastJobError && (
-              <div className="mb-3 p-3 rounded-lg border border-red-200 dark:border-red-900 bg-red-50/50 dark:bg-red-950/20 text-red-800 dark:text-red-300 flex items-start gap-2">
-                <XCircle className="h-4 w-4 text-red-600 dark:text-red-400 mt-0.5 flex-shrink-0" />
-                <div>
-                  <p className="font-semibold text-xs">Operation Failed</p>
-                  <p className="text-xs mt-0.5 font-mono break-all">
-                    {lastJobError}
-                  </p>
+              <div className="mb-3 p-3 rounded-lg border border-red-200 dark:border-red-900 bg-red-50/50 dark:bg-red-950/20 text-red-800 dark:text-red-300 flex items-center justify-between gap-3">
+                <div className="flex items-start gap-2">
+                  <XCircle className="h-4 w-4 text-red-600 dark:text-red-400 mt-0.5 flex-shrink-0" />
+                  <div>
+                    <p className="font-semibold text-xs">Operation Failed</p>
+                    <p className="text-xs mt-0.5 font-mono break-all">
+                      {lastJobError}
+                    </p>
+                  </div>
                 </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-xs border-red-300 dark:border-red-800 hover:bg-red-100 dark:hover:bg-red-900/40 flex-shrink-0"
+                  onClick={handleResetAndRefresh}
+                >
+                  <RotateCcw className="h-3 w-3 mr-1" />
+                  Reset & Refresh
+                </Button>
               </div>
             )}
             <ExecutionLogPanel

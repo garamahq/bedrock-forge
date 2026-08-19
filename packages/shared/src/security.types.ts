@@ -207,6 +207,7 @@ export type ServerHardeningActionType =
   | "BLOCK_BRUTE_FORCE_IPS" // detect IPs ≥50 failed logins → ufw deny each
   | "DELETE_PHP_UPLOAD_FILES" // rm PHP files in /home/*/public_html/*/uploads/
   | "CLEAN_HTACCESS_REDIRECTS" // remove hardcoded external-domain RewriteRule lines
+  | "RESTRICT_INTERNAL_PORTS" // bind Redis, MySQL, Memcached to localhost & deny in firewall
   | "QUARANTINE_MALWARE"; // move detected malware files to a quarantine directory
 
 /**
@@ -235,6 +236,7 @@ export const SERVER_HARDENING_ACTION_TYPES: ServerHardeningActionType[] = [
   "SET_MAX_AUTH_TRIES",
   "FIX_SSH_DIR_PERMS",
   "INSTALL_FAIL2BAN",
+  "RESTRICT_INTERNAL_PORTS",
   "CLEAN_HTACCESS_REDIRECTS",
   "QUARANTINE_MALWARE",
 ];

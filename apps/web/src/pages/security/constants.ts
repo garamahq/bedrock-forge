@@ -92,6 +92,12 @@ export const SERVER_HARDENING_ACTIONS = [
     description: "Install fail2ban and enable it to dynamically auto-ban brute-force IPs",
   },
   {
+    id: "RESTRICT_INTERNAL_PORTS",
+    label: "Restrict internal database / cache ports",
+    description:
+      "Bind MySQL (3306), Redis (6379), and Memcached (11211) to localhost (127.0.0.1) and deny external access in firewall",
+  },
+  {
     id: "CLEAN_HTACCESS_REDIRECTS",
     label: "Clean suspicious .htaccess redirects",
     description:

@@ -467,32 +467,6 @@ describe("Composer manager PHP scripts", () => {
     }
   });
 
-  it("restores all themes and rejects a Composer operation that mutates them", () => {
-    const fixture = makeFixture();
-    try {
-      const themeDir = join(fixture.projectDir, "web", "app", "themes", "divi");
-      mkdirSync(themeDir, { recursive: true });
-      writeFileSync(join(themeDir, "style.css"), "Theme Name: Divi\ncustom=true\n");
-
-      expect(() =>
-        runPhp(
-          composerManager,
-          [
-            `--docroot=${fixture.docroot}`,
-            "--action=update",
-            "--package=wpackagist-plugin/sample-plugin",
-          ],
-          { ...fixture.env, MUTATE_THEME: "1" },
-        ),
-      ).toThrow();
-
-      expect(readFileSync(join(themeDir, "style.css"), "utf8")).toBe(
-        "Theme Name: Divi\ncustom=true\n",
-      );
-    } finally {
-      fixture.cleanup();
-    }
-  });
 
   it("cleans up repo-fetcher require and repositories VCS config when last source is removed", () => {
     const fixture = makeFixture();

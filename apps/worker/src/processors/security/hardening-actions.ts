@@ -369,6 +369,82 @@ async function deletePhpUploadFilesServer(
   );
 }
 
+async function restrictInternalPorts(
+  exec: Executor,
+): Promise<HardeningActionResult> {
+  const action = "RESTRICT_INTERNAL_PORTS";
+  const changes: string[] = [];
+
+  // 1. Redis: Ensure bind 127.0.0.1
+  const redisCheck = await run(
+    exec,
+    `if [ -f /etc/redis/redis.conf ]; then CONF=/etc/redis/redis.conf; elif [ -f /etc/redis.conf ]; then CONF=/etc/redis.conf; else CONF=""; fi; ` +
+    `if [ -n "$CONF" ]; then ` +
+    `  if grep -qE '^\\s*bind\\s+0\\.0\\.0\\.0' "$CONF"; then ` +
+    `    sed -i -E 's/^\\s*bind\\s+0\\.0\\.0\\.0/bind 127.0.0.1 ::1/' "$CONF"; echo "fixed_redis"; ` +
+    `  elif ! grep -qE '^\\s*bind\\s+127\\.0\\.0\\.1' "$CONF"; then ` +
+    `    echo "bind 127.0.0.1 ::1" >> "$CONF"; echo "fixed_redis"; ` +
+    `  fi; ` +
+    `fi`,
+  );
+  if (redisCheck.stdout.includes("fixed_redis")) {
+    await run(exec, "systemctl restart redis-server redis 2>/dev/null || true");
+    changes.push("Bound Redis (6379) to localhost");
+  }
+
+  // 2. MySQL / MariaDB: Ensure bind-address = 127.0.0.1
+  const mysqlCheck = await run(
+    exec,
+    `for conf in /etc/mysql/mariadb.conf.d/50-server.cnf /etc/mysql/mysql.conf.d/mysqld.cnf /etc/mysql/my.cnf /etc/my.cnf; do ` +
+    `  if [ -f "$conf" ]; then ` +
+    `    if grep -qE '^\\s*bind-address\\s*=\\s*0\\.0\\.0\\.0' "$conf"; then ` +
+    `      sed -i -E 's/^\\s*bind-address\\s*=\\s*0\\.0\\.0\\.0/bind-address = 127.0.0.1/' "$conf"; echo "fixed_mysql"; break; ` +
+    `    elif grep -qE '^\\[mysqld\\]' "$conf" && ! grep -qE '^\\s*bind-address' "$conf"; then ` +
+    `      sed -i '/^\\[mysqld\\]/a bind-address = 127.0.0.1' "$conf"; echo "fixed_mysql"; break; ` +
+    `    fi; ` +
+    `  fi; ` +
+    `done`,
+  );
+  if (mysqlCheck.stdout.includes("fixed_mysql")) {
+    await run(exec, "systemctl restart mariadb mysql mysqld 2>/dev/null || true");
+    changes.push("Bound MySQL/MariaDB (3306) to localhost");
+  }
+
+  // 3. Memcached: Ensure -l 127.0.0.1
+  const memcachedCheck = await run(
+    exec,
+    `if [ -f /etc/memcached.conf ]; then ` +
+    `  if grep -qE '^\\s*-l\\s+0\\.0\\.0\\.0' /etc/memcached.conf; then ` +
+    `    sed -i -E 's/^\\s*-l\\s+0\\.0\\.0\\.0/-l 127.0.0.1/' /etc/memcached.conf; echo "fixed_memcached"; ` +
+    `  elif ! grep -qE '^\\s*-l\\s+127\\.0\\.0\\.1' /etc/memcached.conf; then ` +
+    `    echo "-l 127.0.0.1" >> /etc/memcached.conf; echo "fixed_memcached"; ` +
+    `  fi; ` +
+    `fi`,
+  );
+  if (memcachedCheck.stdout.includes("fixed_memcached")) {
+    await run(exec, "systemctl restart memcached 2>/dev/null || true");
+    changes.push("Bound Memcached (11211) to localhost");
+  }
+
+  // 4. Firewall defense-in-depth (deny 3306, 6379, 11211 in ufw if active)
+  const ufwStatus = await run(exec, "ufw status 2>/dev/null || true");
+  if (ufwStatus.stdout.includes("Status: active")) {
+    await run(
+      exec,
+      "ufw deny proto tcp to any port 3306 comment 'Forge secure MySQL' 2>/dev/null; " +
+      "ufw deny proto tcp to any port 6379 comment 'Forge secure Redis' 2>/dev/null; " +
+      "ufw deny proto tcp to any port 11211 comment 'Forge secure Memcached' 2>/dev/null || true",
+    );
+    changes.push("Enforced UFW firewall rules blocking ports 3306, 6379, and 11211 from public interfaces");
+  }
+
+  if (changes.length === 0) {
+    return skip(action, "Internal database and cache services (MySQL, Redis, Memcached) are already restricted to localhost");
+  }
+
+  return ok(action, changes.join("; "));
+}
+
 async function cleanHtaccessRedirectsServer(
   exec: Executor,
 ): Promise<HardeningActionResult> {
@@ -973,6 +1049,9 @@ export async function applyServerHardeningActions(
           break;
         case "CLEAN_HTACCESS_REDIRECTS":
           results.push(await cleanHtaccessRedirectsServer(exec));
+          break;
+        case "RESTRICT_INTERNAL_PORTS":
+          results.push(await restrictInternalPorts(exec));
           break;
         case "QUARANTINE_MALWARE":
           results.push(await quarantineMalwareServer(exec, malwareFiles));
