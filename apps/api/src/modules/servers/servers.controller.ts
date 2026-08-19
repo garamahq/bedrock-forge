@@ -80,4 +80,19 @@ export class ServersController {
   @Get(":id/ssh-health") getSshHealth(@Param("id", ParseIntPipe) id: number) {
     return this.svc.getSshPoolHealth(id);
   }
+
+  @Get(":id/stats") getStats(@Param("id", ParseIntPipe) id: number) {
+    return this.svc.getServerStats(id);
+  }
+
+  @Get(":id/metrics") getMetrics(
+    @Param("id", ParseIntPipe) id: number,
+    @Query("range") range?: "1h" | "24h" | "7d",
+  ) {
+    return this.svc.getServerMetricsHistory(id, range);
+  }
+
+  @Post(":id/test-ping") testPing(@Param("id", ParseIntPipe) id: number) {
+    return this.svc.testPing(id);
+  }
 }

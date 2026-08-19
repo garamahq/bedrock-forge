@@ -542,4 +542,348 @@ export class ServersService {
     else if (stats.active >= stats.maxConnections) status = "busy";
     return { ...stats, status };
   }
+
+  // ── Server Resource Monitoring & Live Stats ────────────────────────────────
+
+  async getServerStats(id: number): Promise<{
+    cpu_usage: number | null;
+    memory_used_mb: number | null;
+    memory_total_mb: number | null;
+    disk_used_gb: number | null;
+    disk_total_gb: number | null;
+    uptime_seconds: number | null;
+    load_average: [number, number, number] | null;
+    ping_ms: number | null;
+    top_processes: Array<{
+      pid: string;
+      user: string;
+      cpu: string;
+      mem: string;
+      command: string;
+    }>;
+    alerts: Array<{
+      type: "cpu" | "memory" | "disk" | "offline";
+      level: "warning" | "critical";
+      message: string;
+    }>;
+  }> {
+    const server = await this.repo.findByIdWithKey(BigInt(id));
+    if (!server) throw new NotFoundException(`Server ${id} not found`);
+
+    let pingMs: number | null = null;
+    const t0 = Date.now();
+
+    try {
+      const executor = createRemoteExecutor(await this.getServerSshConfig(id));
+
+      const probeCmd = [
+        "echo '===CPU==='",
+        "top -bn1 2>/dev/null | grep -E 'Cpu\\(s\\)|%Cpu' | head -n1 || grep 'cpu ' /proc/stat | head -n1",
+        "echo '===MEM==='",
+        "free -m 2>/dev/null | grep -E 'Mem:|buffers/cache' || cat /proc/meminfo | head -n 4",
+        "echo '===DISK==='",
+        "df -m / 2>/dev/null | awk 'NR==2{print $2,$3,$4,$5}'",
+        "echo '===UPTIME==='",
+        "cat /proc/uptime 2>/dev/null",
+        "echo '===LOAD==='",
+        "cat /proc/loadavg 2>/dev/null",
+        "echo '===PROCS==='",
+        "ps -eo pid,user,%cpu,%mem,comm --sort=-%cpu 2>/dev/null | head -n 6",
+      ].join("; ");
+
+      const result = await executor.execute(probeCmd, { timeout: 15_000 });
+      pingMs = Date.now() - t0;
+
+      if (result.code !== 0) {
+        throw new Error(`Probe exited with code ${result.code}`);
+      }
+
+      await this.repo.updateStatus(BigInt(id), "online").catch(() => {});
+
+      const raw = result.stdout;
+      const cpuSection = this.extractSection(raw, "CPU") || "";
+      const memSection = this.extractSection(raw, "MEM") || "";
+      const diskSection = this.extractSection(raw, "DISK") || "";
+      const uptimeSection = this.extractSection(raw, "UPTIME") || "";
+      const loadSection = this.extractSection(raw, "LOAD") || "";
+      const procsSection = this.extractSection(raw, "PROCS") || "";
+
+      // 1. CPU Usage %
+      let cpuUsage: number | null = null;
+      const cpuMatch = cpuSection.match(/([\d.]+)\s*id/i) || cpuSection.match(/,\s*([\d.]+)\s*id/i);
+      if (cpuMatch) {
+        const idle = parseFloat(cpuMatch[1]);
+        if (!isNaN(idle)) cpuUsage = Math.max(0, Math.min(100, Math.round((100 - idle) * 10) / 10));
+      } else {
+        const altCpuMatch = cpuSection.match(/([\d.]+)\s*us[,\s]+([\d.]+)\s*sy/i);
+        if (altCpuMatch) {
+          const us = parseFloat(altCpuMatch[1]);
+          const sy = parseFloat(altCpuMatch[2]);
+          if (!isNaN(us) && !isNaN(sy)) {
+            cpuUsage = Math.max(0, Math.min(100, Math.round((us + sy) * 10) / 10));
+          }
+        }
+      }
+
+      // 2. Memory (Used MB / Total MB)
+      let memUsedMb: number | null = null;
+      let memTotalMb: number | null = null;
+      const memLineMatch = memSection.match(/Mem:\s+(\d+)\s+(\d+)/);
+      if (memLineMatch) {
+        memTotalMb = parseInt(memLineMatch[1], 10);
+        memUsedMb = parseInt(memLineMatch[2], 10);
+      } else {
+        const totalKb = memSection.match(/MemTotal:\s+(\d+)/);
+        const freeKb = memSection.match(/MemAvailable:\s+(\d+)/) || memSection.match(/MemFree:\s+(\d+)/);
+        if (totalKb && freeKb) {
+          memTotalMb = Math.round(parseInt(totalKb[1], 10) / 1024);
+          const availMb = Math.round(parseInt(freeKb[1], 10) / 1024);
+          memUsedMb = Math.max(0, memTotalMb - availMb);
+        }
+      }
+
+      // 3. Disk (Used GB / Total GB)
+      let diskUsedGb: number | null = null;
+      let diskTotalGb: number | null = null;
+      const diskParts = diskSection.trim().split(/\s+/);
+      if (diskParts.length >= 2) {
+        const totalM = parseFloat(diskParts[0]);
+        const usedM = parseFloat(diskParts[1]);
+        if (!isNaN(totalM) && !isNaN(usedM)) {
+          diskTotalGb = Math.round((totalM / 1024) * 10) / 10;
+          diskUsedGb = Math.round((usedM / 1024) * 10) / 10;
+        }
+      }
+
+      // 4. Uptime Seconds
+      let uptimeSeconds: number | null = null;
+      const uptimeMatch = uptimeSection.match(/^([\d.]+)/);
+      if (uptimeMatch) {
+        uptimeSeconds = Math.floor(parseFloat(uptimeMatch[1]));
+      }
+
+      // 5. Load Average
+      let loadAvg: [number, number, number] | null = null;
+      const loadParts = loadSection.trim().split(/\s+/);
+      if (loadParts.length >= 3) {
+        const l1 = parseFloat(loadParts[0]);
+        const l5 = parseFloat(loadParts[1]);
+        const l15 = parseFloat(loadParts[2]);
+        if (!isNaN(l1) && !isNaN(l5) && !isNaN(l15)) {
+          loadAvg = [l1, l5, l15];
+        }
+      }
+
+      // 6. Top Processes
+      const topProcesses: Array<{
+        pid: string;
+        user: string;
+        cpu: string;
+        mem: string;
+        command: string;
+      }> = [];
+      const procLines = procsSection.trim().split("\n").slice(1);
+      for (const line of procLines) {
+        const parts = line.trim().split(/\s+/);
+        if (parts.length >= 5) {
+          topProcesses.push({
+            pid: parts[0],
+            user: parts[1],
+            cpu: parts[2] + "%",
+            mem: parts[3] + "%",
+            command: parts.slice(4).join(" "),
+          });
+        }
+      }
+
+      // 7. Alert checks
+      const alerts: Array<{
+        type: "cpu" | "memory" | "disk" | "offline";
+        level: "warning" | "critical";
+        message: string;
+      }> = [];
+
+      if (cpuUsage !== null) {
+        if (cpuUsage >= 90) {
+          alerts.push({
+            type: "cpu",
+            level: "critical",
+            message: `CPU usage is critically high at ${cpuUsage}%! Check running processes.`,
+          });
+        } else if (cpuUsage >= 75) {
+          alerts.push({
+            type: "cpu",
+            level: "warning",
+            message: `CPU usage is elevated at ${cpuUsage}%.`,
+          });
+        }
+      }
+
+      if (memUsedMb !== null && memTotalMb !== null && memTotalMb > 0) {
+        const memPct = Math.round((memUsedMb / memTotalMb) * 100);
+        if (memPct >= 90) {
+          alerts.push({
+            type: "memory",
+            level: "critical",
+            message: `Memory usage is critically high at ${memPct}% (${Math.round(memUsedMb / 1024)}GB / ${Math.round(memTotalMb / 1024)}GB).`,
+          });
+        } else if (memPct >= 80) {
+          alerts.push({
+            type: "memory",
+            level: "warning",
+            message: `Memory usage is high at ${memPct}%.`,
+          });
+        }
+      }
+
+      if (diskUsedGb !== null && diskTotalGb !== null && diskTotalGb > 0) {
+        const diskPct = Math.round((diskUsedGb / diskTotalGb) * 100);
+        if (diskPct >= 90) {
+          alerts.push({
+            type: "disk",
+            level: "critical",
+            message: `Root disk is ${diskPct}% full (${diskUsedGb}GB / ${diskTotalGb}GB)! Free space immediately.`,
+          });
+        } else if (diskPct >= 80) {
+          alerts.push({
+            type: "disk",
+            level: "warning",
+            message: `Root disk is ${diskPct}% full.`,
+          });
+        }
+      }
+
+      // Record snapshot to database asynchronously
+      this.repo
+        .recordMetric(BigInt(id), {
+          cpu_usage: cpuUsage,
+          memory_used_mb: memUsedMb,
+          memory_total_mb: memTotalMb,
+          disk_used_gb: diskUsedGb,
+          disk_total_gb: diskTotalGb,
+          uptime_seconds: uptimeSeconds,
+          load_1m: loadAvg ? loadAvg[0] : null,
+          load_5m: loadAvg ? loadAvg[1] : null,
+          load_15m: loadAvg ? loadAvg[2] : null,
+          ping_ms: pingMs,
+        })
+        .catch((err) => {
+          this.logger.warn(`Failed to record server metric: ${err.message}`);
+        });
+
+      return {
+        cpu_usage: cpuUsage,
+        memory_used_mb: memUsedMb,
+        memory_total_mb: memTotalMb,
+        disk_used_gb: diskUsedGb,
+        disk_total_gb: diskTotalGb,
+        uptime_seconds: uptimeSeconds,
+        load_average: loadAvg,
+        ping_ms: pingMs,
+        top_processes: topProcesses,
+        alerts,
+      };
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Failed to probe server stats for server ${id}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+
+      // Fallback: return last known metric from database if probe failed
+      const lastMetric = await this.repo.getLatestMetric(BigInt(id)).catch(() => null);
+
+      return {
+        cpu_usage: lastMetric?.cpu_usage ?? null,
+        memory_used_mb: lastMetric?.memory_used_mb ?? null,
+        memory_total_mb: lastMetric?.memory_total_mb ?? null,
+        disk_used_gb: lastMetric?.disk_used_gb ?? null,
+        disk_total_gb: lastMetric?.disk_total_gb ?? null,
+        uptime_seconds: lastMetric?.uptime_seconds ?? null,
+        load_average:
+          lastMetric?.load_1m !== null &&
+          lastMetric?.load_5m !== null &&
+          lastMetric?.load_15m !== null &&
+          lastMetric?.load_1m !== undefined &&
+          lastMetric?.load_5m !== undefined &&
+          lastMetric?.load_15m !== undefined
+            ? [lastMetric.load_1m, lastMetric.load_5m, lastMetric.load_15m]
+            : null,
+        ping_ms: null,
+        top_processes: [],
+        alerts: [
+          {
+            type: "offline",
+            level: "critical",
+            message: `Server probe failed: ${err instanceof Error ? err.message : "Connection unreachable"}`,
+          },
+        ],
+      };
+    }
+  }
+
+  async getServerMetricsHistory(
+    id: number,
+    range: "1h" | "24h" | "7d" = "24h",
+  ): Promise<
+    Array<{
+      timestamp: string;
+      cpu_usage: number | null;
+      memory_pct: number | null;
+      disk_pct: number | null;
+      load_1m: number | null;
+      ping_ms: number | null;
+    }>
+  > {
+    await this.findOne(id);
+
+    const now = Date.now();
+    let ms = 24 * 60 * 60 * 1000;
+    if (range === "1h") ms = 60 * 60 * 1000;
+    else if (range === "7d") ms = 7 * 24 * 60 * 60 * 1000;
+
+    const since = new Date(now - ms);
+    const metrics = await this.repo.getMetricsHistory(BigInt(id), since);
+
+    return metrics.map((m) => {
+      const memPct =
+        m.memory_used_mb && m.memory_total_mb
+          ? Math.round((m.memory_used_mb / m.memory_total_mb) * 100)
+          : null;
+      const diskPct =
+        m.disk_used_gb && m.disk_total_gb
+          ? Math.round((m.disk_used_gb / m.disk_total_gb) * 100)
+          : null;
+
+      return {
+        timestamp: m.recorded_at.toISOString(),
+        cpu_usage: m.cpu_usage,
+        memory_pct: memPct,
+        disk_pct: diskPct,
+        load_1m: m.load_1m,
+        ping_ms: m.ping_ms,
+      };
+    });
+  }
+
+  async testPing(id: number): Promise<{
+    latencyMs: number;
+    success: boolean;
+    message: string;
+  }> {
+    const t0 = Date.now();
+    try {
+      const conn = await this.testConnection(id);
+      const latencyMs = Date.now() - t0;
+      return {
+        latencyMs,
+        success: conn.success,
+        message: conn.success ? `Ping successful (${latencyMs}ms)` : conn.message,
+      };
+    } catch (err: unknown) {
+      return {
+        latencyMs: Date.now() - t0,
+        success: false,
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
 }

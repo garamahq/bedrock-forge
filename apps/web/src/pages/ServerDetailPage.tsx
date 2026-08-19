@@ -43,6 +43,16 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
 
+import {
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip as RechartsTooltip,
+  ResponsiveContainer,
+} from "recharts";
+
 interface Environment {
   id: number;
   type: string;
@@ -78,6 +88,20 @@ interface SshHealth {
   status: "healthy" | "busy" | "empty";
 }
 
+interface TopProcess {
+  pid: string;
+  user: string;
+  cpu: string;
+  mem: string;
+  command: string;
+}
+
+interface ServerAlert {
+  type: "cpu" | "memory" | "disk" | "offline";
+  level: "warning" | "critical";
+  message: string;
+}
+
 interface SystemStats {
   cpu_usage: number | null;
   memory_used_mb: number | null;
@@ -86,6 +110,18 @@ interface SystemStats {
   disk_total_gb: number | null;
   uptime_seconds: number | null;
   load_average: [number, number, number] | null;
+  ping_ms: number | null;
+  top_processes?: TopProcess[];
+  alerts?: ServerAlert[];
+}
+
+interface MetricPoint {
+  timestamp: string;
+  cpu_usage: number | null;
+  memory_pct: number | null;
+  disk_pct: number | null;
+  load_1m: number | null;
+  ping_ms: number | null;
 }
 
 const STATUS_VARIANT: Record<string, "success" | "destructive" | "secondary"> =
@@ -136,44 +172,69 @@ function StatCard({
   unit,
   icon: Icon,
   percent,
+  subtext,
 }: {
   label: string;
   value: string | number;
   unit?: string;
   icon: React.ElementType;
   percent?: number;
+  subtext?: string;
 }) {
   return (
     <div className="bg-card border rounded-lg p-4 space-y-2">
-      <div className="flex items-center gap-2 text-muted-foreground text-xs font-medium uppercase tracking-wide">
-        <Icon className="h-3.5 w-3.5" />
-        {label}
+      <div className="flex items-center justify-between text-muted-foreground text-xs font-medium uppercase tracking-wide">
+        <span className="flex items-center gap-1.5">
+          <Icon className="h-3.5 w-3.5" />
+          {label}
+        </span>
+        {percent !== undefined && (
+          <Badge
+            variant={
+              percent > 90
+                ? "destructive"
+                : percent > 75
+                  ? "warning"
+                  : "secondary"
+            }
+            className="text-[10px] h-4 px-1.5"
+          >
+            {percent}%
+          </Badge>
+        )}
       </div>
       <div className="flex items-end gap-1">
         <span className="text-2xl font-bold tabular-nums">{value}</span>
         {unit && (
-          <span className="text-sm text-muted-foreground mb-0.5">{unit}</span>
+          <span className="text-xs text-muted-foreground mb-0.5">{unit}</span>
         )}
       </div>
       {percent !== undefined && (
-        <div className="w-full bg-muted rounded-full h-1.5">
+        <div className="w-full bg-muted rounded-full h-1.5 overflow-hidden">
           <div
-            className={`h-1.5 rounded-full transition-all ${
+            className={`h-1.5 rounded-full transition-all duration-500 ${
               percent > 90
                 ? "bg-destructive"
-                : percent > 70
-                  ? "bg-yellow-500"
+                : percent > 75
+                  ? "bg-amber-500"
                   : "bg-primary"
             }`}
             style={{ width: `${Math.min(percent, 100)}%` }}
           />
         </div>
       )}
+      {subtext && (
+        <p className="text-[11px] text-muted-foreground truncate">{subtext}</p>
+      )}
     </div>
   );
 }
 
 function OverviewTab({ server }: { server: ServerDetail }) {
+  const qc = useQueryClient();
+  const [metricRange, setMetricRange] = useState<"1h" | "24h" | "7d">("24h");
+  const [showProcsModal, setShowProcsModal] = useState(false);
+
   const { data: sshHealth } = useQuery<SshHealth>({
     queryKey: ["ssh-health", server.id],
     queryFn: () => api.get(`/servers/${server.id}/ssh-health`),
@@ -181,14 +242,55 @@ function OverviewTab({ server }: { server: ServerDetail }) {
     retry: false,
   });
 
-  const { data: stats, isLoading: statsLoading } = useQuery<SystemStats>({
+  const {
+    data: stats,
+    isLoading: statsLoading,
+    refetch: refetchStats,
+    isRefetching: statsRefetching,
+  } = useQuery<SystemStats>({
     queryKey: ["server-stats", server.id],
     queryFn: () => api.get(`/servers/${server.id}/stats`),
-    staleTime: 60_000,
+    staleTime: 30_000,
     retry: false,
   });
 
-  const cpuPct = stats?.cpu_usage ?? null;
+  const { data: metricsHistory } = useQuery<MetricPoint[]>({
+    queryKey: ["server-metrics", server.id, metricRange],
+    queryFn: () => api.get(`/servers/${server.id}/metrics?range=${metricRange}`),
+    staleTime: 60_000,
+  });
+
+  const testPingMutation = useMutation({
+    mutationFn: () =>
+      api.post<{ latencyMs: number; success: boolean; message: string }>(
+        `/servers/${server.id}/test-ping`,
+        {},
+      ),
+    onSuccess: (res) => {
+      if (res.success) {
+        toast({
+          title: `Ping Response: ${res.latencyMs}ms`,
+          description: `Server ${server.name} responded promptly.`,
+        });
+      } else {
+        toast({
+          title: "Ping Failed",
+          description: res.message,
+          variant: "destructive",
+        });
+      }
+      qc.invalidateQueries({ queryKey: ["server-stats", server.id] });
+    },
+    onError: (err) => {
+      toast({
+        title: "Ping Error",
+        description: err instanceof Error ? err.message : "Unreachable",
+        variant: "destructive",
+      });
+    },
+  });
+
+  const cpuPct = stats?.cpu_usage !== null && stats?.cpu_usage !== undefined ? Math.round(stats.cpu_usage) : null;
   const memPct =
     stats?.memory_used_mb && stats?.memory_total_mb
       ? Math.round((stats.memory_used_mb / stats.memory_total_mb) * 100)
@@ -200,130 +302,408 @@ function OverviewTab({ server }: { server: ServerDetail }) {
 
   return (
     <div className="space-y-6">
-      {/* Connection info */}
+      {/* Alert Banners for Runaway Resources / Server Issues */}
+      {stats?.alerts && stats.alerts.length > 0 && (
+        <div className="space-y-2">
+          {stats.alerts.map((alert, i) => (
+            <div
+              key={i}
+              className={`flex items-center gap-3 p-3 rounded-lg border text-sm font-medium ${
+                alert.level === "critical"
+                  ? "bg-destructive/10 border-destructive/30 text-destructive dark:text-red-400"
+                  : "bg-amber-500/10 border-amber-500/30 text-amber-700 dark:text-amber-400"
+              }`}
+            >
+              <Activity className="h-4 w-4 shrink-0 animate-pulse" />
+              <span className="flex-1">{alert.message}</span>
+              {stats.top_processes && stats.top_processes.length > 0 && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-xs"
+                  onClick={() => setShowProcsModal(true)}
+                >
+                  View Processes
+                </Button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Connection & Diagnostics Action Bar */}
       <div className="bg-card border rounded-lg divide-y">
-        <div className="px-4 py-3">
-          <p className="text-xs text-muted-foreground uppercase tracking-wide font-semibold mb-2">
-            Connection
-          </p>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
-            <div>
-              <p className="text-muted-foreground text-xs">IP Address</p>
-              <p className="font-mono font-medium mt-0.5">
-                {server.ip_address}
-              </p>
+        <div className="px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div>
+            <p className="text-xs text-muted-foreground uppercase tracking-wide font-semibold mb-1">
+              Connection & Credentials
+            </p>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
+              <div>
+                <p className="text-muted-foreground text-xs">IP Address</p>
+                <p className="font-mono font-medium mt-0.5">
+                  {server.ip_address}
+                </p>
+              </div>
+              <div>
+                <p className="text-muted-foreground text-xs">SSH Port</p>
+                <p className="font-mono font-medium mt-0.5">{server.ssh_port}</p>
+              </div>
+              <div>
+                <p className="text-muted-foreground text-xs">SSH User</p>
+                <p className="font-mono font-medium mt-0.5">{server.ssh_user}</p>
+              </div>
+              <div>
+                <p className="text-muted-foreground text-xs">Provider</p>
+                <p className="font-medium mt-0.5">{server.provider ?? "—"}</p>
+              </div>
             </div>
-            <div>
-              <p className="text-muted-foreground text-xs">SSH Port</p>
-              <p className="font-mono font-medium mt-0.5">{server.ssh_port}</p>
-            </div>
-            <div>
-              <p className="text-muted-foreground text-xs">SSH User</p>
-              <p className="font-mono font-medium mt-0.5">{server.ssh_user}</p>
-            </div>
-            <div>
-              <p className="text-muted-foreground text-xs">Provider</p>
-              <p className="font-medium mt-0.5">{server.provider ?? "—"}</p>
-            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0 self-start sm:self-center">
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 text-xs"
+              onClick={() => testPingMutation.mutate()}
+              disabled={testPingMutation.isPending}
+            >
+              {testPingMutation.isPending ? (
+                <RefreshCw className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+              ) : (
+                <Activity className="h-3.5 w-3.5 mr-1.5 text-primary" />
+              )}
+              {stats?.ping_ms ? `Ping: ${stats.ping_ms}ms` : "Test Ping"}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 text-xs"
+              onClick={() => refetchStats()}
+              disabled={statsRefetching}
+            >
+              <RefreshCw
+                className={`h-3.5 w-3.5 mr-1.5 ${statsRefetching ? "animate-spin" : ""}`}
+              />
+              Refresh
+            </Button>
           </div>
         </div>
 
         {sshHealth && (
-          <div className="px-4 py-3">
-            <p className="text-xs text-muted-foreground uppercase tracking-wide font-semibold mb-2">
-              SSH Connection Pool
-            </p>
-            <div className="flex items-center gap-6 text-sm">
+          <div className="px-4 py-3 flex items-center justify-between flex-wrap gap-2 text-sm">
+            <div className="flex items-center gap-4 flex-wrap">
+              <span className="text-xs text-muted-foreground uppercase tracking-wide font-semibold">
+                SSH Pool:
+              </span>
               <div>
-                <span className="text-muted-foreground">Active </span>
+                <span className="text-muted-foreground text-xs">Active </span>
                 <span className="font-mono font-medium">
                   {sshHealth.active}
                 </span>
               </div>
               <div>
-                <span className="text-muted-foreground">Idle </span>
+                <span className="text-muted-foreground text-xs">Idle </span>
                 <span className="font-mono font-medium">{sshHealth.idle}</span>
               </div>
               <div>
-                <span className="text-muted-foreground">Max </span>
+                <span className="text-muted-foreground text-xs">Max </span>
                 <span className="font-mono font-medium">
                   {sshHealth.maxConnections}
                 </span>
               </div>
-              <Badge
-                variant={
-                  sshHealth.status === "healthy"
-                    ? "success"
-                    : sshHealth.status === "busy"
-                      ? "warning"
-                      : "secondary"
-                }
-              >
-                {sshHealth.status}
-              </Badge>
             </div>
+            <Badge
+              variant={
+                sshHealth.status === "healthy"
+                  ? "success"
+                  : sshHealth.status === "busy"
+                    ? "warning"
+                    : "secondary"
+              }
+              className="text-xs"
+            >
+              {sshHealth.status}
+            </Badge>
           </div>
         )}
 
         {server.cyberpanel_version && (
-          <div className="px-4 py-3">
-            <p className="text-xs text-muted-foreground uppercase tracking-wide font-semibold mb-2">
-              Control Panel
-            </p>
-            <div className="flex items-center gap-2">
-              <Badge variant="info">
-                CyberPanel {parseCyberPanelVersion(server.cyberpanel_version)}
-              </Badge>
-            </div>
+          <div className="px-4 py-3 flex items-center gap-2">
+            <span className="text-xs text-muted-foreground uppercase tracking-wide font-semibold">
+              Control Panel:
+            </span>
+            <Badge variant="info">
+              CyberPanel {parseCyberPanelVersion(server.cyberpanel_version)}
+            </Badge>
           </div>
         )}
       </div>
 
-      {/* System stats */}
+      {/* Live System Stats Grid */}
       {statsLoading ? (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           {[1, 2, 3, 4].map((i) => (
-            <Skeleton key={i} className="h-24 rounded-lg" />
+            <Skeleton key={i} className="h-28 rounded-lg" />
           ))}
         </div>
       ) : stats ? (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-          {cpuPct !== null && (
-            <StatCard
-              label="CPU"
-              value={cpuPct}
-              unit="%"
-              icon={Cpu}
-              percent={cpuPct}
-            />
-          )}
-          {memPct !== null && stats.memory_used_mb && stats.memory_total_mb && (
-            <StatCard
-              label="Memory"
-              value={Math.round(stats.memory_used_mb / 1024)}
-              unit={`/ ${Math.round(stats.memory_total_mb / 1024)} GB`}
-              icon={MemoryStick}
-              percent={memPct}
-            />
-          )}
-          {diskPct !== null && stats.disk_used_gb && stats.disk_total_gb && (
-            <StatCard
-              label="Disk"
-              value={Math.round(stats.disk_used_gb)}
-              unit={`/ ${Math.round(stats.disk_total_gb)} GB`}
-              icon={HardDrive}
-              percent={diskPct}
-            />
-          )}
-          {stats.uptime_seconds !== null && (
-            <StatCard
-              label="Uptime"
-              value={fmtUptime(stats.uptime_seconds)}
-              icon={Activity}
-            />
-          )}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <StatCard
+            label="CPU Usage"
+            value={cpuPct !== null ? `${cpuPct}%` : "—"}
+            icon={Cpu}
+            percent={cpuPct ?? undefined}
+            subtext={
+              stats.load_average
+                ? `Load avg: ${stats.load_average.map((v) => v.toFixed(2)).join(", ")}`
+                : undefined
+            }
+          />
+          <StatCard
+            label="Memory"
+            value={
+              stats.memory_used_mb && stats.memory_total_mb
+                ? `${(stats.memory_used_mb / 1024).toFixed(1)} GB`
+                : "—"
+            }
+            unit={
+              stats.memory_total_mb
+                ? `/ ${(stats.memory_total_mb / 1024).toFixed(1)} GB`
+                : undefined
+            }
+            icon={MemoryStick}
+            percent={memPct ?? undefined}
+            subtext={memPct !== null ? `${memPct}% allocated` : undefined}
+          />
+          <StatCard
+            label="Root Disk"
+            value={
+              stats.disk_used_gb !== null && stats.disk_used_gb !== undefined
+                ? `${stats.disk_used_gb.toFixed(1)} GB`
+                : "—"
+            }
+            unit={
+              stats.disk_total_gb
+                ? `/ ${stats.disk_total_gb.toFixed(1)} GB`
+                : undefined
+            }
+            icon={HardDrive}
+            percent={diskPct ?? undefined}
+            subtext={diskPct !== null ? `${diskPct}% capacity used` : undefined}
+          />
+          <StatCard
+            label="Server Uptime"
+            value={
+              stats.uptime_seconds !== null
+                ? fmtUptime(stats.uptime_seconds)
+                : "—"
+            }
+            icon={Activity}
+            subtext={
+              stats.ping_ms !== null
+                ? `Ping response: ${stats.ping_ms}ms`
+                : "Operational"
+            }
+          />
         </div>
       ) : null}
+
+      {/* Historical Resource Graphs & Top Processes */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Resource Graphs Card */}
+        <div className="lg:col-span-2 bg-card border rounded-lg p-4 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-semibold text-foreground">
+                Resource Usage History
+              </h3>
+              <p className="text-xs text-muted-foreground">
+                CPU, Memory, and Disk trends recorded over time
+              </p>
+            </div>
+            <div className="flex items-center gap-1 bg-muted p-0.5 rounded-md self-start sm:self-auto">
+              {(["1h", "24h", "7d"] as const).map((r) => (
+                <button
+                  key={r}
+                  type="button"
+                  onClick={() => setMetricRange(r)}
+                  className={`px-2.5 py-1 text-xs font-medium rounded transition-colors ${
+                    metricRange === r
+                      ? "bg-background text-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  {r}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="h-64 w-full">
+            {metricsHistory && metricsHistory.length > 0 ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={metricsHistory}>
+                  <defs>
+                    <linearGradient id="cpuGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.4} />
+                      <stop offset="95%" stopColor="#3b82f6" stopOpacity={0.0} />
+                    </linearGradient>
+                    <linearGradient id="memGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#10b981" stopOpacity={0.4} />
+                      <stop offset="95%" stopColor="#10b981" stopOpacity={0.0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" opacity={0.15} />
+                  <XAxis
+                    dataKey="timestamp"
+                    tickFormatter={(val) => {
+                      try {
+                        const d = new Date(val);
+                        return metricRange === "7d"
+                          ? d.toLocaleDateString([], { month: "short", day: "numeric" })
+                          : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+                      } catch {
+                        return "";
+                      }
+                    }}
+                    tick={{ fontSize: 11 }}
+                  />
+                  <YAxis unit="%" domain={[0, 100]} tick={{ fontSize: 11 }} />
+                  <RechartsTooltip
+                    contentStyle={{
+                      backgroundColor: "hsl(var(--card))",
+                      borderColor: "hsl(var(--border))",
+                      borderRadius: "8px",
+                      fontSize: "12px",
+                    }}
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="cpu_usage"
+                    name="CPU %"
+                    stroke="#3b82f6"
+                    strokeWidth={2}
+                    fill="url(#cpuGrad)"
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="memory_pct"
+                    name="Memory %"
+                    stroke="#10b981"
+                    strokeWidth={2}
+                    fill="url(#memGrad)"
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="h-full flex flex-col items-center justify-center text-center text-muted-foreground text-xs p-6 border border-dashed rounded-lg">
+                <Activity className="h-8 w-8 mb-2 opacity-40 text-primary" />
+                <p className="font-medium">Metrics recording in progress</p>
+                <p className="text-[11px] max-w-sm mt-1">
+                  Resource snapshots are recorded during health probes and scans. Click &ldquo;Refresh&rdquo; or run a diagnostic to log data points.
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Top Processes Card */}
+        <div className="bg-card border rounded-lg p-4 space-y-3 flex flex-col">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-foreground">
+              Top Running Processes
+            </h3>
+            {stats?.top_processes && stats.top_processes.length > 0 && (
+              <Badge variant="outline" className="text-[10px]">
+                {stats.top_processes.length} Active
+              </Badge>
+            )}
+          </div>
+
+          {stats?.top_processes && stats.top_processes.length > 0 ? (
+            <div className="space-y-2 flex-1 overflow-y-auto max-h-64 text-xs font-mono">
+              {stats.top_processes.map((p, idx) => (
+                <div
+                  key={idx}
+                  className="flex items-center justify-between p-2 rounded bg-muted/40 hover:bg-muted/70 transition-colors"
+                >
+                  <div className="min-w-0 flex-1 pr-2">
+                    <p className="font-semibold text-foreground truncate">
+                      {p.command}
+                    </p>
+                    <p className="text-[10px] text-muted-foreground">
+                      PID {p.pid} · {p.user}
+                    </p>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <span className="font-semibold text-primary">{p.cpu}</span>
+                    <span className="text-[10px] text-muted-foreground ml-1.5">
+                      {p.mem}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="flex-1 flex flex-col items-center justify-center text-center text-muted-foreground text-xs p-4 border border-dashed rounded-lg">
+              <Cpu className="h-6 w-6 mb-2 opacity-40" />
+              <p>No runaway processes detected</p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Full Running Processes Dialog */}
+      <Dialog open={showProcsModal} onOpenChange={setShowProcsModal}>
+        <DialogContent className="sm:max-w-2xl max-h-[85vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Cpu className="h-5 w-5 text-primary" />
+              Active Server Processes ({server.name})
+            </DialogTitle>
+            <DialogDescription>
+              Processes sorted by CPU utilization. Inspect for high memory or runaway CPU spikes.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex-1 overflow-y-auto space-y-2 py-2">
+            {stats?.top_processes && stats.top_processes.length > 0 ? (
+              <div className="border rounded-md divide-y font-mono text-xs">
+                <div className="grid grid-cols-12 gap-2 px-3 py-2 bg-muted/60 font-semibold text-muted-foreground text-[11px]">
+                  <span className="col-span-2">PID</span>
+                  <span className="col-span-2">USER</span>
+                  <span className="col-span-2 text-right">CPU</span>
+                  <span className="col-span-2 text-right">MEM</span>
+                  <span className="col-span-4">COMMAND</span>
+                </div>
+                {stats.top_processes.map((p, idx) => (
+                  <div
+                    key={idx}
+                    className="grid grid-cols-12 gap-2 px-3 py-2 hover:bg-muted/30 items-center"
+                  >
+                    <span className="col-span-2 text-muted-foreground">{p.pid}</span>
+                    <span className="col-span-2 truncate">{p.user}</span>
+                    <span className="col-span-2 text-right font-semibold text-primary">{p.cpu}</span>
+                    <span className="col-span-2 text-right text-muted-foreground">{p.mem}</span>
+                    <span className="col-span-4 truncate font-medium text-foreground" title={p.command}>
+                      {p.command}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground text-center py-6">No processes reported.</p>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" size="sm" onClick={() => setShowProcsModal(false)}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -616,8 +996,8 @@ export function ServerDetailPage() {
 
       {/* Tabs */}
       <Tabs defaultValue="overview">
-        <TabsList className="flex-wrap h-auto gap-1">
-          <TabsTrigger value="overview">Overview</TabsTrigger>
+        <TabsList className="w-full sm:w-auto overflow-x-auto no-scrollbar flex-nowrap justify-start h-auto gap-1 p-1 border">
+          <TabsTrigger value="overview">Overview & Metrics</TabsTrigger>
           <TabsTrigger value="environments">
             Environments
             {server.environments?.length > 0 && (

@@ -141,4 +141,54 @@ export class ServersRepository {
       data: { host_key_fingerprint: fingerprint },
     });
   }
+
+  async recordMetric(
+    serverId: bigint,
+    data: {
+      cpu_usage?: number | null;
+      memory_used_mb?: number | null;
+      memory_total_mb?: number | null;
+      disk_used_gb?: number | null;
+      disk_total_gb?: number | null;
+      uptime_seconds?: number | null;
+      load_1m?: number | null;
+      load_5m?: number | null;
+      load_15m?: number | null;
+      ping_ms?: number | null;
+    },
+  ) {
+    return this.prisma.serverMetric.create({
+      data: {
+        server_id: serverId,
+        cpu_usage: data.cpu_usage,
+        memory_used_mb: data.memory_used_mb,
+        memory_total_mb: data.memory_total_mb,
+        disk_used_gb: data.disk_used_gb,
+        disk_total_gb: data.disk_total_gb,
+        uptime_seconds: data.uptime_seconds,
+        load_1m: data.load_1m,
+        load_5m: data.load_5m,
+        load_15m: data.load_15m,
+        ping_ms: data.ping_ms,
+      },
+    });
+  }
+
+  async getMetricsHistory(serverId: bigint, since: Date) {
+    return this.prisma.serverMetric.findMany({
+      where: {
+        server_id: serverId,
+        recorded_at: { gte: since },
+      },
+      orderBy: { recorded_at: "asc" },
+      take: 200,
+    });
+  }
+
+  async getLatestMetric(serverId: bigint) {
+    return this.prisma.serverMetric.findFirst({
+      where: { server_id: serverId },
+      orderBy: { recorded_at: "desc" },
+    });
+  }
 }
