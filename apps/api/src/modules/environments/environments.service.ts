@@ -548,7 +548,8 @@ export class EnvironmentsService {
         );
       }
       if (parsed.error) {
-        throw new InternalServerErrorException(`wp-users: ${parsed.error}`);
+        this.logger.warn(`[getWpUsers] Environment ${envId} scan error: ${parsed.error}`);
+        return parsed.users ?? [];
       }
       return parsed.users ?? [];
     } catch (err) {

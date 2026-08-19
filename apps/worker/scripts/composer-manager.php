@@ -118,6 +118,11 @@ if (!chdir($composerDir)) {
     bail("Cannot chdir to {$composerDir}");
 }
 
+// Ensure git safe.directory is configured to prevent "fatal: detected dubious ownership in repository"
+exec('git config --global --add safe.directory ' . escapeshellarg($composerDir) . ' 2>/dev/null');
+exec('git config --global --add safe.directory ' . escapeshellarg($docroot) . ' 2>/dev/null');
+exec('git config --global --add safe.directory "*" 2>/dev/null');
+
 $themeGuard = createThemeGuard($composerDir);
 
 // Verify composer is available
@@ -209,7 +214,7 @@ function restoreComposerState(array $backup): void
 
 function composerCommand(string $args): string
 {
-    return 'COMPOSER_ALLOW_SUPERUSER=1 COMPOSER_NO_INTERACTION=1 ' . composerExecutable() . ' ' . $args . ' 2>&1';
+    return 'COMPOSER_ALLOW_SUPERUSER=1 COMPOSER_NO_INTERACTION=1 GIT_CONFIG_PARAMETERS="\'safe.directory=*\'" GIT_DISCOVERY_ACROSS_FILESYSTEM=1 ' . composerExecutable() . ' ' . $args . ' 2>&1';
 }
 
 function composerExecutable(): string
@@ -235,6 +240,12 @@ function composerExecutable(): string
     return escapeshellarg($composerPath);
 }
 
+function checkHostResolvable(string $host): bool
+{
+    $ip = @gethostbyname($host);
+    return !empty($ip) && $ip !== $host;
+}
+
 function runComposer(string $args, ?array $backup = null): void
 {
     $cmd         = composerCommand($args);
@@ -243,6 +254,64 @@ function runComposer(string $args, ?array $backup = null): void
 
     exec($cmd, $outputLines, $exitCode);
     $output = implode("\n", $outputLines);
+
+    // If composer failed due to an unreachable custom repository host or DNS failure (curl error 6, 7, 28, Could not resolve host)
+    if ($exitCode !== 0) {
+        $failedHost = null;
+        if (preg_match('/(?:curl error (?:6|7|28)|Could not resolve host:?\s*([a-zA-Z0-9.-]+)|while downloading https?:\/\/([a-zA-Z0-9.-]+))/i', $output, $m)) {
+            $failedHost = !empty($m[1]) ? $m[1] : (!empty($m[2]) ? $m[2] : null);
+        }
+
+        $composerJsonFile = locateComposerJson(getcwd());
+        if ($composerJsonFile && is_file($composerJsonFile)) {
+            $rawJson = @file_get_contents($composerJsonFile);
+            $parsed = @json_decode($rawJson, true);
+            if (is_array($parsed) && !empty($parsed['repositories'])) {
+                $origRepos = $parsed['repositories'];
+                $filteredRepos = [];
+                $removedCount = 0;
+
+                foreach ($origRepos as $repoKey => $repoVal) {
+                    $repoUrl = is_array($repoVal) ? ($repoVal['url'] ?? '') : '';
+                    if ($failedHost && strpos($repoUrl, $failedHost) !== false) {
+                        $removedCount++;
+                        continue;
+                    }
+                    if (!$failedHost && $repoUrl) {
+                        $host = parse_url($repoUrl, PHP_URL_HOST);
+                        if ($host && $host !== 'wpackagist.org' && $host !== 'packagist.org' && $host !== 'github.com') {
+                            if (!checkHostResolvable($host)) {
+                                $failedHost = $host;
+                                $removedCount++;
+                                continue;
+                            }
+                        }
+                    }
+                    $filteredRepos[$repoKey] = $repoVal;
+                }
+
+                if ($removedCount > 0) {
+                    $parsed['repositories'] = array_values($filteredRepos);
+                    file_put_contents($composerJsonFile, json_encode($parsed, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n");
+
+                    $retryLines = [];
+                    $retryCode = 0;
+                    exec($cmd, $retryLines, $retryCode);
+                    $retryOutput = implode("\n", $retryLines);
+
+                    // Restore original repositories array in composer.json so configuration isn't permanently lost
+                    $currJson = @json_decode(@file_get_contents($composerJsonFile), true) ?: [];
+                    $currJson['repositories'] = $origRepos;
+                    file_put_contents($composerJsonFile, json_encode($currJson, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n");
+
+                    if ($retryCode === 0) {
+                        $output = $retryOutput . "\n[Bedrock Forge Notice] Unreachable repository ({$failedHost}) was temporarily bypassed during update.\n";
+                        $exitCode = 0;
+                    }
+                }
+            }
+        }
+    }
 
     if ($exitCode !== 0) {
         restoreThemeGuard($GLOBALS['themeGuard'] ?? null);

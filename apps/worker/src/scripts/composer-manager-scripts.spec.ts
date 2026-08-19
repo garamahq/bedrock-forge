@@ -590,4 +590,55 @@ describe("Composer manager PHP scripts", () => {
       fixture.cleanup();
     }
   });
+
+  it("bypasses unreachable custom composer repositories during plugin updates", () => {
+    const fixture = makeFixture();
+    try {
+      const composerPath = join(fixture.projectDir, "composer.json");
+      const current = JSON.parse(readFileSync(composerPath, "utf8"));
+      current.repositories = [
+        { type: "composer", url: "https://wpackagist.org" },
+        { type: "composer", url: "https://packeton.lamah.ly" },
+      ];
+      writeFileSync(composerPath, JSON.stringify(current, null, 2) + "\n");
+
+      // Replace fake composer with one that fails on packeton.lamah.ly on first try
+      const fakeComposer = join(fixture.root, "bin", "composer");
+      writeFileSync(
+        fakeComposer,
+        [
+          "#!/usr/bin/env bash",
+          'if [ "$1" = "--version" ]; then echo "Composer version fake"; exit 0; fi',
+          'if grep -q "packeton.lamah.ly" composer.json; then',
+          '  echo "In CurlDownloader.php line 398:"',
+          '  echo "curl error 6 while downloading https://packeton.lamah.ly/packages.json: Could not resolve host: packeton.lamah.ly"',
+          "  exit 100",
+          "fi",
+          'echo "composer ok"',
+          "exit 0",
+        ].join("\n"),
+      );
+      chmodSync(fakeComposer, 0o755);
+
+      const output = runPhp(
+        composerManager,
+        [`--docroot=${fixture.docroot}`, "--action=update-all"],
+        fixture.env,
+      );
+
+      const parsed = JSON.parse(output);
+      expect(parsed.success).toBe(true);
+      expect(parsed.output).toContain("packeton.lamah.ly");
+      expect(parsed.output).toContain("bypassed");
+
+      // Original repositories must be preserved in composer.json
+      const restored = JSON.parse(readFileSync(composerPath, "utf8"));
+      expect(restored.repositories).toEqual([
+        { type: "composer", url: "https://wpackagist.org" },
+        { type: "composer", url: "https://packeton.lamah.ly" },
+      ]);
+    } finally {
+      fixture.cleanup();
+    }
+  });
 });

@@ -469,6 +469,34 @@ describe("EnvironmentsService", () => {
       );
     });
 
+    it("returns empty users array gracefully when script reports error", async () => {
+      mockExecutor(async (command) => {
+        if (
+          command.includes("grep -oE") ||
+          command.includes("ls /usr/local/lsws")
+        ) {
+          return { code: 0, stdout: "", stderr: "" };
+        }
+        if (command.includes("base64 -d")) {
+          return { code: 0, stdout: "", stderr: "" };
+        }
+        if (command.includes("bf-wp-users")) {
+          return {
+            code: 0,
+            stdout: JSON.stringify({
+              users: [],
+              error: "DB connection failed: Access denied",
+            }),
+            stderr: "",
+          };
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      });
+
+      const result = await svc.getWpUsers(1);
+      expect(result).toEqual([]);
+    });
+
     it("throws a clear error when the scanner returns invalid JSON", async () => {
       mockExecutor(async (command) => {
         if (

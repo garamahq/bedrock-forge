@@ -33,6 +33,11 @@ PHP Deprecated: Automatically populating $HTTP_RAW_POST_DATA
     expect(parseWpVersion(stdout)).toBe("6.5-RC1");
   });
 
+  it("parses $wp_version = '6.4.3'; from version.php format", () => {
+    const stdout = "$wp_version = '6.4.3';";
+    expect(parseWpVersion(stdout)).toBe("6.4.3");
+  });
+
   it("falls back to the last line if no line matches standard version pattern", () => {
     expect(parseWpVersion("some random stdout line")).toBe("some random stdout line");
     expect(parseWpVersion("")).toBe("");

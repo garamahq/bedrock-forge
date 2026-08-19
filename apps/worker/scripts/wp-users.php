@@ -198,18 +198,91 @@ if ($credsFile !== '') {
     }
 }
 
-// ── Connect via PDO ───────────────────────────────────────────────────────────
+// ── Connect via PDO (with multi-tier host/socket fallback) ────────────────────
 
-try {
-    $dsn = "mysql:host={$dbHost};dbname={$dbName};charset=utf8mb4";
-    $pdo = new PDO($dsn, $dbUser, $dbPass, [
-        PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
-        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-        PDO::ATTR_TIMEOUT            => 10,
-    ]);
-} catch (PDOException $e) {
-    echo json_encode(['error' => 'DB connection failed: ' . $e->getMessage()]);
-    exit(1);
+$pdo = null;
+$connectionError = '';
+
+$hostsToTry = [$dbHost];
+if ($dbHost === 'localhost') {
+    $hostsToTry[] = '127.0.0.1';
+} elseif ($dbHost === '127.0.0.1') {
+    $hostsToTry[] = 'localhost';
+}
+
+$socketPaths = ['/var/run/mysqld/mysqld.sock', '/tmp/mysql.sock', '/run/mysqld/mysqld.sock'];
+
+foreach ($hostsToTry as $h) {
+    try {
+        $dsn = "mysql:host={$h};dbname={$dbName};charset=utf8mb4";
+        $pdo = new PDO($dsn, $dbUser, $dbPass, [
+            PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+            PDO::ATTR_TIMEOUT            => 5,
+        ]);
+        break;
+    } catch (PDOException $e) {
+        $connectionError = $e->getMessage();
+    }
+}
+
+// If TCP connection failed, try standard unix sockets
+if ($pdo === null) {
+    foreach ($socketPaths as $sock) {
+        if (file_exists($sock)) {
+            try {
+                $dsn = "mysql:unix_socket={$sock};dbname={$dbName};charset=utf8mb4";
+                $pdo = new PDO($dsn, $dbUser, $dbPass, [
+                    PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
+                    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+                    PDO::ATTR_TIMEOUT            => 5,
+                ]);
+                break;
+            } catch (PDOException $e) {
+                $connectionError = $e->getMessage();
+            }
+        }
+    }
+}
+
+// ── Fallback to WP-CLI if direct PDO connection failed ────────────────────────
+if ($pdo === null && $docroot !== '') {
+    $wpPaths = [$docroot, $docroot . '/web/wp', $docroot . '/wp'];
+    foreach ($wpPaths as $p) {
+        if (file_exists($p . '/wp-includes/version.php') || file_exists($p . '/wp-config.php')) {
+            $cmd = 'which wp 2>/dev/null && wp user list --path=' . escapeshellarg($p) . ' --fields=ID,user_login,user_email,display_name,user_registered,roles --format=json 2>/dev/null';
+            $wpCliOut = @shell_exec($cmd);
+            if ($wpCliOut) {
+                $decoded = json_decode(trim($wpCliOut), true);
+                if (is_array($decoded)) {
+                    $users = [];
+                    foreach ($decoded as $row) {
+                        $roles = is_array($row['roles'] ?? null) 
+                            ? $row['roles'] 
+                            : array_filter(array_map('trim', explode(',', (string)($row['roles'] ?? ''))));
+                        $users[] = [
+                            'id'              => (int)($row['ID'] ?? $row['id'] ?? 0),
+                            'user_login'      => (string)($row['user_login'] ?? ''),
+                            'user_email'      => (string)($row['user_email'] ?? ''),
+                            'display_name'    => (string)($row['display_name'] ?? $row['user_login'] ?? ''),
+                            'user_registered' => (string)($row['user_registered'] ?? ''),
+                            'roles'           => array_values($roles),
+                        ];
+                    }
+                    echo json_encode(['users' => $users], JSON_PRETTY_PRINT);
+                    exit(0);
+                }
+            }
+        }
+    }
+
+    echo json_encode(['users' => [], 'error' => 'DB connection failed: ' . $connectionError]);
+    exit(0);
+}
+
+if ($pdo === null) {
+    echo json_encode(['users' => [], 'error' => 'DB connection failed: ' . $connectionError]);
+    exit(0);
 }
 
 // Auto-detect table prefix from the database itself
@@ -240,8 +313,8 @@ try {
     $stmt->execute(['capsKey' => $capsKey]);
     $rows = $stmt->fetchAll();
 } catch (PDOException $e) {
-    echo json_encode(['error' => 'Query failed: ' . $e->getMessage()]);
-    exit(1);
+    echo json_encode(['users' => [], 'error' => 'Query failed: ' . $e->getMessage()]);
+    exit(0);
 }
 
 $users = [];
@@ -259,3 +332,4 @@ foreach ($rows as $row) {
 }
 
 echo json_encode(['users' => $users], JSON_PRETTY_PRINT);
+

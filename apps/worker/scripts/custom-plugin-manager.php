@@ -98,6 +98,11 @@ if (!chdir($composerDir)) {
     bail("Cannot chdir to {$composerDir}");
 }
 
+// Ensure git safe.directory is configured to prevent "fatal: detected dubious ownership in repository"
+exec('git config --global --add safe.directory ' . escapeshellarg($composerDir) . ' 2>/dev/null');
+exec('git config --global --add safe.directory ' . escapeshellarg($docroot) . ' 2>/dev/null');
+exec('git config --global --add safe.directory "*" 2>/dev/null');
+
 // ─── Detect Bedrock and determine target dir ──────────────────────────────────
 
 $content = file_get_contents($composerJsonPath);
@@ -421,7 +426,7 @@ function restoreComposerState(array $backup): void
 function composerCommand(string $args): string
 {
     global $ghToken;
-    $prefix = 'COMPOSER_ALLOW_SUPERUSER=1 COMPOSER_NO_INTERACTION=1';
+    $prefix = 'COMPOSER_ALLOW_SUPERUSER=1 COMPOSER_NO_INTERACTION=1 GIT_CONFIG_PARAMETERS="\'safe.directory=*\'" GIT_DISCOVERY_ACROSS_FILESYSTEM=1';
     if ($ghToken) {
         $prefix .= ' REPO_FETCHER_TOKEN=' . escapeshellarg($ghToken);
     }

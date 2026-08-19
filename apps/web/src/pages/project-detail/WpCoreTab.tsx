@@ -428,7 +428,7 @@ export function WpCoreTab({ environments }: { environments: Environment[] }) {
               WordPress Core
             </CardTitle>
             <CardDescription>
-              Current installed version detected via WP-CLI
+              Installed version and update availability across Bedrock & standard environments
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
@@ -437,21 +437,21 @@ export function WpCoreTab({ environments }: { environments: Environment[] }) {
                 Installed version
               </span>
               <Badge variant="secondary" className="font-mono text-sm">
-                {coreStatus.current_version}
+                {coreStatus.current_version || "Detection in progress"}
               </Badge>
             </div>
 
             {hasUpdate ? (
-              <div className="flex items-center gap-2 text-amber-600">
+              <div className="flex items-center gap-2 text-amber-600 dark:text-amber-400">
                 <AlertTriangle className="h-4 w-4 shrink-0" />
                 <span className="text-sm font-medium">
                   Update available: {latestVersion}
                 </span>
               </div>
             ) : (
-              <div className="flex items-center gap-2 text-green-600">
+              <div className="flex items-center gap-2 text-green-600 dark:text-green-400">
                 <CheckCircle2 className="h-4 w-4 shrink-0" />
-                <span className="text-sm font-medium">Up to date</span>
+                <span className="text-sm font-medium">Core is up to date</span>
               </div>
             )}
           </CardContent>

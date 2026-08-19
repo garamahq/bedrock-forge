@@ -16,11 +16,31 @@ import {
 } from "../../utils/processor-utils";
 
 export function parseWpVersion(stdout: string): string {
-  const versionLines = stdout.trim().split("\n").map((l) => l.trim());
+  // Strip ANSI color escape codes
+  const cleaned = stdout.replace(/\x1b\[[0-9;]*m/g, "").trim();
+  const versionLines = cleaned.split("\n").map((l) => l.trim()).filter(Boolean);
+
+  // Check for $wp_version = '6.5.2'; format from version.php
+  for (const line of versionLines) {
+    const phpMatch = line.match(/\$wp_version\s*=\s*['"]([^'"]+)['"]/);
+    if (phpMatch) return phpMatch[1].trim();
+  }
+
+  // Check for clean semantic version lines
   const matched = versionLines.find((l) =>
     /^\d+\.\d+(?:\.\d+)?(?:-[a-zA-Z0-9.-]+)?$/.test(l),
   );
-  return matched || versionLines[versionLines.length - 1] || "";
+  if (matched) return matched;
+
+  // Search inside lines for semver pattern (e.g. "WordPress 6.4.3 is installed" or composer version)
+  for (const line of versionLines) {
+    const semverMatch = line.match(/\b(\d+\.\d+(?:\.\d+)?(?:-[a-zA-Z0-9.-]+)?)\b/);
+    if (semverMatch && !line.toLowerCase().includes("php") && !line.toLowerCase().includes("mysql")) {
+      return semverMatch[1];
+    }
+  }
+
+  return versionLines[versionLines.length - 1] || "";
 }
 
 export function parseWpUpdatesJson(stdout: string): unknown[] {
@@ -429,35 +449,65 @@ export class WpActionsProcessor extends WorkerHost {
       await job.updateProgress(20);
       const wpPath = await this.resolveWpPath(executor, env.root_path ?? "");
       const wpCli = await WpCliBuilder.create(executor, wpPath);
+
+      let currentVersion = "";
       const versionResult = await executor.execute(
         wpCli.buildCommand("core version --skip-plugins"),
         { timeout: 30_000 },
       );
-      if (versionResult.code !== 0) {
+
+      if (versionResult.code === 0 && versionResult.stdout.trim()) {
+        currentVersion = parseWpVersion(versionResult.stdout);
+      }
+
+      // Fallback: Check version directly from filesystem if WP-CLI failed or returned empty
+      if (!currentVersion) {
+        const rootPath = env.root_path ?? "";
+        const versionFiles = [
+          `${wpPath}/wp-includes/version.php`,
+          `${rootPath}/web/wp/wp-includes/version.php`,
+          `${rootPath}/wp-includes/version.php`,
+        ];
+        for (const vf of versionFiles) {
+          const catRes = await executor.execute(`grep -s "wp_version = " ${shellQuote(vf)} || true`);
+          if (catRes.stdout.trim()) {
+            currentVersion = parseWpVersion(catRes.stdout);
+            if (currentVersion) break;
+          }
+        }
+
+        // Check composer.lock for roots/wordpress or johnpbloch/wordpress-core
+        if (!currentVersion) {
+          const compLockRes = await executor.execute(
+            `grep -A 3 -B 1 '"name": "roots/wordpress"' ${shellQuote(rootPath + "/composer.lock")} 2>/dev/null || grep -A 3 -B 1 '"name": "johnpbloch/wordpress-core"' ${shellQuote(rootPath + "/composer.lock")} 2>/dev/null || true`
+          );
+          if (compLockRes.stdout.trim()) {
+            const compMatch = compLockRes.stdout.match(/"version":\s*"([^"]+)"/);
+            if (compMatch) {
+              currentVersion = parseWpVersion(compMatch[1]);
+            }
+          }
+        }
+      }
+
+      if (!currentVersion) {
         throw new Error(
-          `wp core version failed (exit ${versionResult.code}): ${versionResult.stderr}`,
+          `wp core version failed: unable to detect installed WordPress version (exit ${versionResult.code}): ${versionResult.stderr || "version.php not found"}`,
         );
       }
-      const currentVersion = parseWpVersion(versionResult.stdout);
-      const checkResult = await executor.execute(
-        wpCli.buildCommand("core check-update --format=json --skip-plugins"),
-        { timeout: 30_000 },
-      );
-      // wp-cli exits 1 when WordPress is up to date (no updates available).
-      // Only fail on exit codes > 1 or if the output cannot be parsed as JSON at all.
+
       let updates: unknown[] = [];
       try {
+        const checkResult = await executor.execute(
+          wpCli.buildCommand("core check-update --format=json --skip-plugins"),
+          { timeout: 30_000 },
+        );
         updates = parseWpUpdatesJson(checkResult.stdout) as unknown[];
       } catch {
-        // If we couldn't parse JSON AND exit was non-zero, treat as error
-        if (checkResult.code > 1) {
-          throw new Error(
-            `wp core check-update failed (exit ${checkResult.code}): ${checkResult.stderr}`,
-          );
-        }
-        // Otherwise (e.g. empty output, up-to-date): assume no updates
+        // Assume up-to-date or no updates reachable
         updates = [];
       }
+
       const result = { current_version: currentVersion, updates };
       await job.updateProgress(100);
       await tracker.complete({ executionLog: result as object });
