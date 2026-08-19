@@ -379,12 +379,12 @@ async function restrictInternalPorts(
   const redisCheck = await run(
     exec,
     `REDIS_FIXED=0; ` +
-    `for conf in /etc/redis/redis.conf /etc/redis.conf /etc/redis/*.conf /etc/redis-server.conf; do ` +
+    `for conf in $(find /etc/redis /etc -maxdepth 2 -name "*redis*.conf" -o -name "redis.conf" 2>/dev/null); do ` +
     `  if [ -f "$conf" ]; then ` +
     `    if grep -qE '^\\s*#?\\s*bind\\s+' "$conf"; then ` +
-    `      sed -i -E 's/^\\s*#?\\s*bind\\s+.*/bind 127.0.0.1 ::1/' "$conf"; REDIS_FIXED=1; ` +
+    `      sed -i -E 's/^\\s*#?\\s*bind\\s+.*/bind 127.0.0.1/' "$conf"; REDIS_FIXED=1; ` +
     `    else ` +
-    `      echo "bind 127.0.0.1 ::1" >> "$conf"; REDIS_FIXED=1; ` +
+    `      echo "bind 127.0.0.1" >> "$conf"; REDIS_FIXED=1; ` +
     `    fi; ` +
     `  fi; ` +
     `done; ` +
@@ -393,7 +393,7 @@ async function restrictInternalPorts(
   if (redisCheck.stdout.includes("fixed_redis")) {
     await run(
       exec,
-      "systemctl restart redis redis-server 2>/dev/null || service redis restart 2>/dev/null || service redis-server restart 2>/dev/null || true",
+      "systemctl restart redis redis-server lsphp-redis 2>/dev/null || service redis restart 2>/dev/null || service redis-server restart 2>/dev/null || true",
     );
     changes.push("Bound Redis (6379) to localhost (127.0.0.1)");
   }
@@ -408,11 +408,11 @@ async function restrictInternalPorts(
     `    MYSQL_FIXED=1; ` +
     `  fi; ` +
     `done; ` +
-    `for conf in /etc/my.cnf /etc/mysql/my.cnf /etc/mysql/mariadb.conf.d/50-server.cnf /etc/mysql/mysql.conf.d/mysqld.cnf; do ` +
+    `for conf in $(find /etc/mysql /etc -maxdepth 3 -name "*.cnf" -o -name "my.cnf" 2>/dev/null); do ` +
     `  if [ -f "$conf" ]; then ` +
-    `    if grep -qE '^\\s*#?\\s*bind-address\\s*=' "$conf"; then ` +
-    `      sed -i -E 's/^\\s*#?\\s*bind-address\\s*=.*/bind-address = 127.0.0.1/' "$conf"; MYSQL_FIXED=1; ` +
-    `    elif grep -qE '^\\[(mysqld|mariadb|server)\\]' "$conf" && ! grep -qE '^\\s*bind-address' "$conf"; then ` +
+    `    if grep -qE '^\\s*#?\\s*bind[-_]address\\s*=' "$conf"; then ` +
+    `      sed -i -E 's/^\\s*#?\\s*bind[-_]address\\s*=.*/bind-address = 127.0.0.1/' "$conf"; MYSQL_FIXED=1; ` +
+    `    elif grep -qE '^\\[(mysqld|mariadb|server)\\]' "$conf" && ! grep -qE '^\\s*bind[-_]address' "$conf"; then ` +
     `      sed -i '/^\\[\\(mysqld\\|mariadb\\|server\\)\\]/a bind-address = 127.0.0.1' "$conf"; MYSQL_FIXED=1; ` +
     `    fi; ` +
     `  fi; ` +

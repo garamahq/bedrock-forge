@@ -63,6 +63,12 @@ export function getFixAction(
     if (category === "SSH_CONFIG" && t.includes("x11forwarding"))
       return "DISABLE_X11_FORWARDING";
     if (category === "WORLD_WRITABLE") return "FIX_WORLD_WRITABLE";
+    if (
+      category === "SSH_CONFIG" &&
+      (t.includes(".ssh") || t.includes("directory permissions"))
+    )
+      return "FIX_SSH_DIR_PERMS";
+    if (category === "LISTENING_PORTS") return "RESTRICT_INTERNAL_PORTS";
     if (category === "SUSPICIOUS_FILES" && t.includes("upload"))
       return "DELETE_PHP_UPLOAD_FILES";
     if (
