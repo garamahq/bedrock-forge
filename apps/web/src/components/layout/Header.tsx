@@ -99,22 +99,22 @@ function Breadcrumb() {
   const segments = location.pathname.split("/").filter(Boolean);
   const crumbs = segments.map((s) => ROUTE_LABELS[s] ?? s);
   return (
-    <nav aria-label="Breadcrumb">
-      <ol className="flex items-center gap-1.5 text-sm list-none m-0 p-0">
+    <nav aria-label="Breadcrumb" className="min-w-0">
+      <ol className="flex items-center gap-1.5 text-sm list-none m-0 p-0 min-w-0">
         {crumbs.map((crumb, i) => (
-          <li key={i} className="flex items-center gap-1.5">
+          <li key={i} className="flex items-center gap-1.5 min-w-0">
             {i > 0 && (
-              <span className="text-muted-foreground/60" aria-hidden="true">
+              <span className="text-muted-foreground/60 shrink-0" aria-hidden="true">
                 /
               </span>
             )}
             <span
               aria-current={i === crumbs.length - 1 ? "page" : undefined}
-              className={
+              className={`truncate max-w-[100px] sm:max-w-[180px] md:max-w-none ${
                 i === crumbs.length - 1
                   ? "font-semibold text-foreground"
                   : "text-muted-foreground"
-              }
+              }`}
             >
               {crumb}
             </span>

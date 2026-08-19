@@ -33,7 +33,7 @@ export function AppLayout() {
         <main
           id="main-content"
           role="main"
-          className="flex-1 overflow-y-auto p-6"
+          className="flex-1 overflow-y-auto p-3 sm:p-4 md:p-6"
         >
           <Outlet />
         </main>

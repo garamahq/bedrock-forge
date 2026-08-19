@@ -76,13 +76,39 @@ function SheetTitle({
   return <h2 className={cn("text-lg font-semibold", className)} {...props} />;
 }
 
+function SheetDescription({
+  className,
+  ...props
+}: React.HTMLAttributes<HTMLParagraphElement>) {
+  return (
+    <p className={cn("text-sm text-muted-foreground", className)} {...props} />
+  );
+}
+
+function SheetFooter({
+  className,
+  ...props
+}: React.HTMLAttributes<HTMLDivElement>) {
+  return (
+    <div
+      className={cn(
+        "flex flex-col-reverse sm:flex-row sm:justify-end sm:space-x-2",
+        className,
+      )}
+      {...props}
+    />
+  );
+}
+
 export {
   Sheet,
   SheetContent,
   SheetHeader,
+  SheetFooter,
+  SheetTitle,
+  SheetDescription,
   SheetOverlay,
   SheetPortal,
-  SheetTitle,
   SheetTrigger,
   SheetClose,
 };
