@@ -548,8 +548,13 @@ export class EnvironmentsService {
         );
       }
       if (parsed.error) {
-        this.logger.warn(`[getWpUsers] Environment ${envId} scan error: ${parsed.error}`);
-        return parsed.users ?? [];
+        this.logger.warn(
+          `[getWpUsers] Environment ${envId} scan error: ${parsed.error}`,
+        );
+        if (!parsed.users || parsed.users.length === 0) {
+          throw new BadRequestException(`WordPress scan error: ${parsed.error}`);
+        }
+        return parsed.users;
       }
       return parsed.users ?? [];
     } catch (err) {

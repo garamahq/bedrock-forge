@@ -469,7 +469,7 @@ describe("EnvironmentsService", () => {
       );
     });
 
-    it("returns empty users array gracefully when script reports error", async () => {
+    it("throws a clear error when script reports error with no users", async () => {
       mockExecutor(async (command) => {
         if (
           command.includes("grep -oE") ||
@@ -493,8 +493,9 @@ describe("EnvironmentsService", () => {
         return { code: 0, stdout: "", stderr: "" };
       });
 
-      const result = await svc.getWpUsers(1);
-      expect(result).toEqual([]);
+      await expect(svc.getWpUsers(1)).rejects.toThrow(
+        "WordPress scan error: DB connection failed: Access denied",
+      );
     });
 
     it("throws a clear error when the scanner returns invalid JSON", async () => {

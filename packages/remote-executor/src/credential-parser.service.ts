@@ -162,11 +162,20 @@ export class CredentialParserService {
       return this.unescape(doubleMatch[1]);
     }
 
-    // 3. Unquoted value (ends at whitespace or # comment)
-    const unquotedPattern = new RegExp(`^${prefix}([^\\s#'"]+)`, "im");
+    // 3. Unquoted value — match line content, strip trailing whitespace and comments preceded by whitespace
+    const unquotedPattern = new RegExp(`^${prefix}([^\\r\\n]+)`, "im");
     const unquotedMatch = content.match(unquotedPattern);
     if (unquotedMatch?.[1] !== undefined) {
-      return unquotedMatch[1].trim();
+      let rawVal = unquotedMatch[1].trim();
+      // Comments in dotenv are # preceded by whitespace (e.g., `value # comment`)
+      rawVal = rawVal.replace(/\s+#.*$/, "").trim();
+      if (
+        (rawVal.startsWith('"') && rawVal.endsWith('"')) ||
+        (rawVal.startsWith("'") && rawVal.endsWith("'"))
+      ) {
+        rawVal = rawVal.slice(1, -1);
+      }
+      return rawVal ? this.unescape(rawVal) : null;
     }
 
     return null;

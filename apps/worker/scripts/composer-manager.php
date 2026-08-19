@@ -145,11 +145,27 @@ if ($action === 'add') {
 
 } elseif ($action === 'update-all') {
     $content = @json_decode(file_get_contents($composerJson), true) ?: [];
-    $pluginPackages = array_keys(array_filter(
-        $content['require'] ?? [],
-        static fn($constraint, $name): bool => strpos((string) $name, 'wpackagist-plugin/') === 0,
-        ARRAY_FILTER_USE_BOTH
-    ));
+    $require = $content['require'] ?? [];
+    $pluginPackages = [];
+    $hasModifiedConstraints = false;
+
+    foreach ($require as $pkg => $constraint) {
+        if (strpos((string)$pkg, 'wpackagist-plugin/') === 0) {
+            $pluginPackages[] = (string)$pkg;
+            // If constraint is an exact version pin (e.g., 6.5.0.2 or 1.0 or v1.2.3), widen to caret constraint
+            if (preg_match('/^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:\.(\d+))?$/', trim((string)$constraint), $m)) {
+                $major = $m[1] ?? '0';
+                $minor = $m[2] ?? '0';
+                $widen = "^" . $major . "." . $minor;
+                $content['require'][$pkg] = $widen;
+                $hasModifiedConstraints = true;
+            }
+        }
+    }
+    if ($hasModifiedConstraints) {
+        file_put_contents($composerJson, json_encode($content, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n");
+    }
+
     if ($pluginPackages === []) bail('No Composer-managed plugins found');
     runComposer('update ' . implode(' ', array_map('escapeshellarg', $pluginPackages)) . ' --no-interaction --with-dependencies --minimal-changes');
 
@@ -306,6 +322,63 @@ function runComposer(string $args, ?array $backup = null): void
 
                     if ($retryCode === 0) {
                         $output = $retryOutput . "\n[Bedrock Forge Notice] Unreachable repository ({$failedHost}) was temporarily bypassed during update.\n";
+                        $exitCode = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    // If composer failed due to root dependency requirement (e.g. composer/installers requiring -W / --with-all-dependencies)
+    if ($exitCode !== 0 && (
+        strpos($output, 'with-all-dependencies') !== false ||
+        strpos($output, 'is also a root requirement') !== false ||
+        strpos($output, 'Use -W') !== false
+    )) {
+        if (strpos($args, '--with-dependencies') !== false) {
+            $argsWithW = str_replace('--with-dependencies', '--with-all-dependencies', $args);
+            $retryLines = [];
+            $retryCode = 0;
+            exec(composerCommand($argsWithW), $retryLines, $retryCode);
+            if ($retryCode === 0) {
+                $output = implode("\n", $retryLines);
+                $exitCode = 0;
+            }
+        }
+    }
+
+    // If composer failed due to exact version constraint conflict for a wpackagist-plugin
+    if ($exitCode !== 0 && preg_match_all('/Root composer\.json requires (wpackagist-plugin\/[^\s]+) ([^\s,]+) \(exact version match/i', $output, $matches, PREG_SET_ORDER)) {
+        $composerJsonFile = locateComposerJson(getcwd());
+        if ($composerJsonFile && is_file($composerJsonFile)) {
+            $currJson = @json_decode(@file_get_contents($composerJsonFile), true);
+            if (is_array($currJson) && isset($currJson['require'])) {
+                $modified = false;
+                foreach ($matches as $match) {
+                    $pkgName = $match[1];
+                    $exactVer = $match[2];
+                    if (isset($currJson['require'][$pkgName])) {
+                        if (preg_match('/^v?(\d+)(?:\.(\d+))?/', $exactVer, $vm)) {
+                            $currJson['require'][$pkgName] = '^' . ($vm[1] ?? '0') . '.' . ($vm[2] ?? '0');
+                        } else {
+                            $currJson['require'][$pkgName] = '*';
+                        }
+                        $modified = true;
+                    }
+                }
+                if ($modified) {
+                    file_put_contents($composerJsonFile, json_encode($currJson, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n");
+                    $retryLines = [];
+                    $retryCode = 0;
+                    exec($cmd, $retryLines, $retryCode);
+                    $retryOut = implode("\n", $retryLines);
+                    if ($retryCode !== 0 && (strpos($retryOut, 'with-all-dependencies') !== false || strpos($retryOut, 'is also a root requirement') !== false) && strpos($args, '--with-dependencies') !== false) {
+                        $argsWithW = str_replace('--with-dependencies', '--with-all-dependencies', $args);
+                        $retryLines = [];
+                        exec(composerCommand($argsWithW), $retryLines, $retryCode);
+                    }
+                    if ($retryCode === 0) {
+                        $output = implode("\n", $retryLines);
                         $exitCode = 0;
                     }
                 }

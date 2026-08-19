@@ -163,6 +163,17 @@ DB_HOST=localhost
     expect(result?.dbName).toBe("mydb");
   });
 
+  it("handles unquoted passwords containing # without whitespace", () => {
+    const content = `
+DB_NAME=mydb
+DB_USER=myuser
+DB_PASSWORD=secret#123!pass
+DB_HOST=localhost
+    `;
+    const result = parser.parseEnvFile(content);
+    expect(result?.dbPassword).toBe("secret#123!pass");
+  });
+
   // ─── .env format: DB_HOST commented out ─────────────────────────────────
 
   it("defaults DB_HOST to localhost when DB_HOST is commented out", () => {

@@ -641,4 +641,67 @@ describe("Composer manager PHP scripts", () => {
       fixture.cleanup();
     }
   });
+
+  it("widens exact plugin version pins during update-all", () => {
+    const fixture = makeFixture();
+    try {
+      const composerPath = join(fixture.projectDir, "composer.json");
+      const current = JSON.parse(readFileSync(composerPath, "utf8"));
+      current.require["wpackagist-plugin/litespeed-cache"] = "6.5.0.2";
+      current.require["wpackagist-plugin/yoast-seo"] = "20.1";
+      writeFileSync(composerPath, JSON.stringify(current, null, 2) + "\n");
+
+      const output = runPhp(
+        composerManager,
+        [`--docroot=${fixture.docroot}`, "--action=update-all"],
+        fixture.env,
+      );
+
+      const parsed = JSON.parse(output);
+      expect(parsed.success).toBe(true);
+
+      const updated = JSON.parse(readFileSync(composerPath, "utf8"));
+      expect(updated.require["wpackagist-plugin/litespeed-cache"]).toBe("^6.5");
+      expect(updated.require["wpackagist-plugin/yoast-seo"]).toBe("^20.1");
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("automatically retries with -W when root dependency conflict occurs", () => {
+    const fixture = makeFixture();
+    try {
+      const fakeComposer = join(fixture.root, "bin", "composer");
+      writeFileSync(
+        fakeComposer,
+        [
+          "#!/usr/bin/env bash",
+          'if [ "$1" = "--version" ]; then echo "Composer version fake"; exit 0; fi',
+          'if [[ " $* " != *" -W "* && " $* " != *"--with-all-dependencies"* ]]; then',
+          '  echo "Dependency composer/installers is also a root requirement. Use --with-all-dependencies (-W) to include root dependencies."',
+          "  exit 2",
+          "fi",
+          'echo "composer updated with all dependencies"',
+          "exit 0",
+        ].join("\n"),
+      );
+      chmodSync(fakeComposer, 0o755);
+
+      const output = runPhp(
+        composerManager,
+        [
+          `--docroot=${fixture.docroot}`,
+          "--action=update",
+          "--package=wpackagist-plugin/sample-plugin",
+        ],
+        fixture.env,
+      );
+
+      const parsed = JSON.parse(output);
+      expect(parsed.success).toBe(true);
+      expect(parsed.output).toContain("composer updated with all dependencies");
+    } finally {
+      fixture.cleanup();
+    }
+  });
 });
