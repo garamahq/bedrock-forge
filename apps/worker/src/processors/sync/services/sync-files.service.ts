@@ -136,6 +136,7 @@ export class SyncFilesService {
   ): Promise<void> {
     // Upload worker's private key to source as a temp file
     const keyPath = `/tmp/forge_push_key_${job.id}`;
+    const excludeFilePath = `/tmp/forge_rsync_exclude_${job.id}.txt`;
     const rawKey = await this.sshKey.resolvePrivateKey(targetEnv.server);
     await sourceExecutor.pushFile({
       remotePath: keyPath,
@@ -146,9 +147,11 @@ export class SyncFilesService {
     // Prepend '/' to anchor each pattern to the transfer root, so rsync won't
     // strip nested directories with the same name inside plugins or themes.
     const allExcludes = this.buildFileSyncExcludes(protectedFileExcludes);
-    const excludeFlags = allExcludes
-      .map((e) => `--exclude=${shellQuote("/" + e)}`)
-      .join(" ");
+    const excludeFileContent = allExcludes.map((e) => `/${e}`).join("\n") + "\n";
+    await sourceExecutor.pushFile({
+      remotePath: excludeFilePath,
+      content: Buffer.from(excludeFileContent, "utf8"),
+    });
 
     const rsyncCmd = [
       "rsync",
@@ -159,30 +162,38 @@ export class SyncFilesService {
       "--no-perms",
       "--ignore-errors",
       "--timeout=300",
-      excludeFlags,
+      `--exclude-from=${shellQuote(excludeFilePath)}`,
       "-e",
       shellQuote(`ssh -i ${keyPath} -p ${targetEnv.server.ssh_port} -o StrictHostKeyChecking=no -o ConnectTimeout=30`),
       `${shellQuote(sourceRoot)}/`,
       `${shellQuote(targetEnv.server.ssh_user)}@${targetEnv.server.ip_address}:${shellQuote(targetRoot)}/`,
     ].join(" ");
 
-    const loggedExcludes = allExcludes.join(", ");
+    const baseExcludes = this.RSYNC_EXCLUDES.join(", ");
+    const customCount = protectedFileExcludes.length;
+    const loggedExcludes =
+      customCount > 0
+        ? `${baseExcludes} (+ ${customCount} protected uploads/files)`
+        : baseExcludes;
+
     await tracker.track({
       step: "Syncing site files via rsync",
       level: "info",
       detail: `${sourceRoot} → ${targetEnv.server.ip_address}:${targetRoot} (excluding: ${loggedExcludes})`,
-      command: "rsync -az --delete --no-perms [excludes] (key redacted)",
+      command: "rsync -az --delete --no-perms --exclude-from=[excludes] (key redacted)",
     });
 
     const rsyncStart = Date.now();
     const rsyncResult = await sourceExecutor.execute(rsyncCmd);
 
-    // Cleanup key regardless of outcome
-    await sourceExecutor.execute(`rm -f ${shellQuote(keyPath)}`).catch(() => {});
+    // Cleanup key and exclude file regardless of outcome
+    await sourceExecutor.execute(
+      `rm -f ${shellQuote(keyPath)} ${shellQuote(excludeFilePath)}`,
+    ).catch(() => {});
 
     await tracker.trackCommand(
       "rsync site files",
-      "rsync -az --delete --no-perms [excludes] (key redacted)",
+      "rsync -az --delete --no-perms --exclude-from=[excludes] (key redacted)",
       rsyncResult,
       Date.now() - rsyncStart,
     );
@@ -270,23 +281,27 @@ export class SyncFilesService {
     protectedFileExcludes: string[] = [],
   ): Promise<void> {
     const remoteTar = `/tmp/forge_push_content_${job.id}.tar.gz`;
+    const tarExcludeFile = `/tmp/forge_tar_exclude_${job.id}.txt`;
 
     const allExcludes = this.buildFileSyncExcludes(protectedFileExcludes);
-    const tarExcludes = allExcludes
-      .map((e) => `--exclude=${shellQuote("./" + e)}`)
-      .join(" ");
+    const tarExcludeContent = allExcludes.map((e) => `./${e}`).join("\n") + "\n";
+    await sourceExecutor.pushFile({
+      remotePath: tarExcludeFile,
+      content: Buffer.from(tarExcludeContent, "utf8"),
+    });
 
-    const tarCmd = `tar -czf ${shellQuote(remoteTar)} ${tarExcludes} -C ${shellQuote(sourceContent)} .`;
+    const tarCmd = `tar -czf ${shellQuote(remoteTar)} --exclude-from=${shellQuote(tarExcludeFile)} -C ${shellQuote(sourceContent)} .`;
     await tracker.track({
       step: "Archiving site files on source",
       level: "info",
-      command: tarCmd,
+      command: `tar -czf [tar] --exclude-from=[excludes] -C ${sourceContent} .`,
     });
     const tarStart = Date.now();
     const tarResult = await sourceExecutor.execute(tarCmd);
+    await sourceExecutor.execute(`rm -f ${shellQuote(tarExcludeFile)}`).catch(() => {});
     await tracker.trackCommand(
       "tar site files",
-      tarCmd,
+      `tar -czf [tar] --exclude-from=[excludes] -C ${sourceContent} .`,
       tarResult,
       Date.now() - tarStart,
     );
