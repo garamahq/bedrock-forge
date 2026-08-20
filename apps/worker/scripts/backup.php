@@ -83,10 +83,9 @@ if ($restore) {
     // --no-same-owner: do not try to chown to archived UID/GID (prevents exit 2 on non-root or differing server UIDs)
     // --no-same-permissions: do not copy restrictive file modes from archive
     // --touch: do not fail on timestamp updates (prevents utime: Operation not permitted)
-    // --overwrite: cleanly overwrite any existing files
-    // --unlink-first: remove each existing file before writing to prevent EPERM/EACCES on 0440 files
+    // --unlink-first: remove each existing file before writing to prevent EPERM/EACCES on 0440 files (mutually exclusive with --overwrite in tar)
     // --warning=no-timestamp: suppress timestamp warnings
-    $tarFlags = '--no-same-owner --no-same-permissions --touch --overwrite --unlink-first --warning=no-timestamp';
+    $tarFlags = '--no-same-owner --no-same-permissions --touch --unlink-first --warning=no-timestamp';
     $cmd = "tar -xzf " . escapeshellarg($file) . " -C " . escapeshellarg($extractTo) . " " . $tarFlags . " 2>&1";
     exec($cmd, $out, $code);
     if ($code > 0) {

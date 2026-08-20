@@ -368,7 +368,7 @@ export class SyncFilesService {
     }
 
     await targetExecutor.execute(`mkdir -p ${shellQuote(targetContent)}`);
-    const extractCmd = `tar -xzf ${shellQuote(remoteTar)} -C ${shellQuote(targetContent)} --no-same-owner --no-same-permissions --touch --overwrite --unlink-first --warning=no-timestamp`;
+    const extractCmd = `tar -xzf ${shellQuote(remoteTar)} -C ${shellQuote(targetContent)} --no-same-owner --no-same-permissions --touch --unlink-first --warning=no-timestamp`;
     await tracker.track({
       step: "Extracting site files on target",
       level: "info",

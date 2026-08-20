@@ -281,7 +281,7 @@ export class CreateBedrockProcessor extends WorkerHost {
               `chattr -R -i -a ${shellQuote(tgtPath)} 2>/dev/null || true; chmod -R u+w ${shellQuote(tgtPath)} 2>/dev/null || true; mkdir -p ${shellQuote(tgtPath)}`,
             );
             const pullResult = await executor.execute(
-              `ssh -o StrictHostKeyChecking=no -i ${shellQuote(keyTmp)} ${shellQuote(srcEnv.server.ssh_user)}@${shellQuote(srcEnv.server.ip_address)} "tar -cz -C ${shellQuote(srcPath)} ." | tar -xz -C ${shellQuote(tgtPath)} --no-same-owner --no-same-permissions --touch --overwrite --unlink-first --warning=no-timestamp`,
+              `ssh -o StrictHostKeyChecking=no -i ${shellQuote(keyTmp)} ${shellQuote(srcEnv.server.ssh_user)}@${shellQuote(srcEnv.server.ip_address)} "tar -cz -C ${shellQuote(srcPath)} ." | tar -xz -C ${shellQuote(tgtPath)} --no-same-owner --no-same-permissions --touch --unlink-first --warning=no-timestamp`,
             );
             if (pullResult.code !== 0) {
               throw new Error(`Failed to transfer files from source server: ${pullResult.stderr}`);
