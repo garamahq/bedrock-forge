@@ -28,7 +28,9 @@ function formatTimestamp(d: Date): string {
  */
 @Processor(QUEUES.SYSTEM_BACKUPS, {
   concurrency: 1,
-  lockDuration: 30 * 60 * 1_000,
+  lockDuration: 60_000,
+  stalledInterval: 15_000,
+  maxStalledCount: 1,
 })
 export class SystemBackupProcessor extends WorkerHost {
   private readonly logger = new Logger(SystemBackupProcessor.name);

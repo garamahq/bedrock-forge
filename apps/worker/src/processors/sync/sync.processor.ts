@@ -35,7 +35,12 @@ type Executor = Awaited<ReturnType<typeof createRemoteExecutor>>;
 
 // concurrency=1: sync jobs do SSH+mysqldump+rsync — serialised to avoid
 // saturating CPU/network on concurrent large file transfers.
-@Processor(QUEUES.SYNC, { concurrency: 1, lockDuration: 90 * 60 * 1_000 })
+@Processor(QUEUES.SYNC, {
+  concurrency: 1,
+  lockDuration: 60_000,
+  stalledInterval: 15_000,
+  maxStalledCount: 1,
+})
 export class SyncProcessor extends WorkerHost {
   private readonly logger = new Logger(SyncProcessor.name);
 

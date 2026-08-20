@@ -18,7 +18,12 @@ const ALERT_TICK_EVERY_MS = 60 * 1_000;
 const RETENTION_TICK_JOB_ID = "security-data-retention-tick";
 const RETENTION_TICK_EVERY_MS = 24 * 60 * 60 * 1_000;
 
-@Processor(QUEUES.SECURITY, { concurrency: 4, lockDuration: 20 * 60 * 1_000 })
+@Processor(QUEUES.SECURITY, {
+  concurrency: 4,
+  lockDuration: 60_000,
+  stalledInterval: 15_000,
+  maxStalledCount: 1,
+})
 export class SecurityScanProcessor
   extends WorkerHost
   implements OnApplicationBootstrap

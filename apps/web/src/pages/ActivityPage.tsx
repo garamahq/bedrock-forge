@@ -10,6 +10,8 @@ import {
   ChevronDown,
   ChevronUp,
   AlertTriangle,
+  Wrench,
+  RotateCw,
 } from "lucide-react";
 import { api } from "@/lib/api-client";
 import {
@@ -241,7 +243,30 @@ export function ActivityPage() {
   const [page, setPage] = useState(1);
   const [queueFilter, setQueueFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [isRecovering, setIsRecovering] = useState(false);
+  const [recoveryMessage, setRecoveryMessage] = useState<string | null>(null);
   const LIMIT = 10;
+
+  async function handleRecoverQueues() {
+    setIsRecovering(true);
+    try {
+      const res = await api.post<{ success: boolean; message: string; dbCleaned: number }>(
+        "/job-executions/recover-stalled",
+        {},
+      );
+      setRecoveryMessage(
+        res.dbCleaned > 0
+          ? `Recovered ${res.dbCleaned} stalled jobs`
+          : "Queues inspected & recovered",
+      );
+      setTimeout(() => setRecoveryMessage(null), 4000);
+      queryClient.invalidateQueries({ queryKey: ["job-executions"] });
+    } catch (err) {
+      console.error("Failed to recover queues:", err);
+    } finally {
+      setIsRecovering(false);
+    }
+  }
 
   const queryKey = ["job-executions", page, queueFilter, statusFilter];
 
@@ -288,8 +313,20 @@ export function ActivityPage() {
           )}
         </div>
 
-        {/* Filters */}
+        {/* Filters and Actions */}
         <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 gap-1.5 text-xs text-amber-500 border-amber-500/30 hover:bg-amber-500/10 hover:text-amber-400"
+            onClick={handleRecoverQueues}
+            disabled={isRecovering}
+            title="Unstick and recover all queues and stalled jobs"
+          >
+            <Wrench className={`h-3.5 w-3.5 ${isRecovering ? "animate-spin" : ""}`} />
+            <span>Recover Queues</span>
+          </Button>
+
           <Select
             value={queueFilter}
             onValueChange={(v) => {
@@ -331,6 +368,13 @@ export function ActivityPage() {
           </Select>
         </div>
       </div>
+
+      {recoveryMessage && (
+        <div className="rounded-md bg-emerald-500/10 border border-emerald-500/30 px-3 py-2 text-xs text-emerald-400 flex items-center gap-2">
+          <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+          <span>{recoveryMessage}</span>
+        </div>
+      )}
 
       {/* Table */}
       <div className="border rounded-lg overflow-x-auto">

@@ -59,6 +59,12 @@ export class JobExecutionsController {
     return this.svc.retry(id);
   }
 
+  /** POST /job-executions/recover-stalled — Clean and unstick any stalled queues and jobs */
+  @Post("recover-stalled")
+  recoverStalled(@Query("queue_name") queueName?: string) {
+    return this.svc.recoverStalled(queueName);
+  }
+
   /** POST /job-executions/:id/discard — Mark job as discarded */
   @Post(":id/discard")
   discard(@Param("id", ParseIntPipe) id: number) {

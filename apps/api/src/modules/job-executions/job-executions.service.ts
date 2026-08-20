@@ -1,8 +1,9 @@
-import { Injectable, NotFoundException, BadRequestException } from "@nestjs/common";
+import { Injectable, NotFoundException, BadRequestException, Logger } from "@nestjs/common";
 import { JobExecutionStatus } from "@prisma/client";
 import { ModuleRef } from "@nestjs/core";
 import { getQueueToken } from "@nestjs/bullmq";
 import { Queue } from "bullmq";
+import { QUEUES } from "@bedrock-forge/shared";
 import {
   JobExecutionsRepository,
   JobExecutionFilter,
@@ -11,6 +12,8 @@ import { JobOrchestratorService } from "./job-orchestrator.service";
 
 @Injectable()
 export class JobExecutionsService {
+  private readonly logger = new Logger(JobExecutionsService.name);
+
   constructor(
     private readonly repo: JobExecutionsRepository,
     private readonly orchestrator: JobOrchestratorService,
@@ -92,10 +95,84 @@ export class JobExecutionsService {
       throw new NotFoundException(`Job execution ${id} not found`);
     }
 
+    // Attempt to remove / fail the active or waiting job in BullMQ Redis
+    try {
+      const token = getQueueToken(jobExec.queue_name);
+      const queue = this.moduleRef.get<Queue>(token, { strict: false });
+      if (queue && jobExec.bull_job_id) {
+        const bullJob = await queue.getJob(jobExec.bull_job_id);
+        if (bullJob) {
+          await bullJob.moveToFailed(new Error("Discarded by operator"), "0", true).catch(async () => {
+            await bullJob.remove().catch(() => {});
+          });
+        }
+      }
+    } catch (err) {
+      this.logger.debug(`Could not remove bull job ${jobExec.bull_job_id} from queue: ${err}`);
+    }
+
     return this.repo.updateStatus(
       BigInt(id),
       "failed",
       "Discarded by operator",
     );
+  }
+
+  async recoverStalled(queueName?: string) {
+    const targetQueues = queueName ? [queueName] : Object.values(QUEUES);
+    const summary: Record<string, { reclaimed: number; cleaned: number }> = {};
+
+    for (const qName of targetQueues) {
+      try {
+        const token = getQueueToken(qName);
+        const queue = this.moduleRef.get<Queue>(token, { strict: false });
+        if (!queue) continue;
+
+        let reclaimed = 0;
+        const activeJobs = await queue.getActive();
+        const client = await queue.client;
+
+        for (const job of activeJobs) {
+          try {
+            const lockKey = `bull:${qName}:${job.id}:lock`;
+            const hasLock = await client.exists(lockKey);
+            if (!hasLock) {
+              await job.moveToFailed(
+                new Error("Stalled active job recovered by operator"),
+                "0",
+                true,
+              ).catch(async () => {
+                await job.remove().catch(() => {});
+              });
+              reclaimed++;
+            }
+          } catch (jobErr) {
+            this.logger.debug(`Error checking active job ${job.id} on ${qName}: ${jobErr}`);
+          }
+        }
+
+        const cleaned = await queue.clean(0, 0, "active");
+        summary[qName] = {
+          reclaimed,
+          cleaned: Array.isArray(cleaned) ? cleaned.length : 0,
+        };
+      } catch (err) {
+        this.logger.warn(`Failed to recover queue ${qName}: ${err}`);
+      }
+    }
+
+    // Also update any database records in 'active' or 'queued' older than 5 minutes
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+    const dbCleaned = await this.repo.markStalledAsFailed(
+      fiveMinutesAgo,
+      "Recovered / marked failed by operator",
+    );
+
+    return {
+      success: true,
+      message: "Queues inspected and recovered successfully",
+      dbCleaned,
+      summary,
+    };
   }
 }

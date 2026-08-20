@@ -19,6 +19,7 @@ import { SystemBackupProcessorModule } from "./processors/system-backup/system-b
 import { ThemeScanProcessorModule } from "./processors/theme-scan/theme-scan-processor.module";
 import { SecurityProcessorModule } from "./processors/security/security-processor.module";
 import { SshKeyModule } from "./services/ssh-key.module";
+import { QueueRecoveryService } from "./services/queue-recovery.service";
 import workerConfig from "./config/worker.config";
 
 @Module({
@@ -78,5 +79,6 @@ import workerConfig from "./config/worker.config";
     ThemeScanProcessorModule,
     SecurityProcessorModule,
   ],
+  providers: [QueueRecoveryService],
 })
 export class WorkerModule {}

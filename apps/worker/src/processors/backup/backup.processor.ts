@@ -56,11 +56,16 @@ function formatTimestamp(d: Date): string {
  *   - backup:restore     — GDrive download → SFTP push → remote restore → cleanup
  *   - backup:delete-file — delete orphaned file from GDrive (fire-and-forget)
  */
-// 90-min lock: PHP execution (up to 20 min) + large SFTP pull (up to 60 min) + GDrive upload (up to 10 min).
-// BullMQ auto-renews at lockDuration/2 intervals, so this safely covers multi-GB backups.
 // concurrency=1: backup jobs do SSH+SFTP+tar+rclone — one at a time prevents
-// concurrent disk/network saturation on the CX23 VPS.
-@Processor(QUEUES.BACKUPS, { concurrency: 1, lockDuration: 90 * 60 * 1_000 })
+// concurrent disk/network saturation on the VPS.
+// lockDuration: 60s with 15s stalled check interval. BullMQ auto-renews at lockDuration/2
+// while worker is alive. If worker crashes or restarts, stalled check frees the lock in <= 60s.
+@Processor(QUEUES.BACKUPS, {
+  concurrency: 1,
+  lockDuration: 60_000,
+  stalledInterval: 15_000,
+  maxStalledCount: 1,
+})
 export class BackupProcessor extends WorkerHost {
   private readonly logger = new Logger(BackupProcessor.name);
 

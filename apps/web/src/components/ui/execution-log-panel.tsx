@@ -323,18 +323,23 @@ export function ExecutionLogPanel({
           {data.last_error}
         </p>
       )}
-      {(data?.status === "failed" || data?.status === "dead_letter") && (
+      {(data?.status === "failed" ||
+        data?.status === "dead_letter" ||
+        data?.status === "queued" ||
+        data?.status === "active") && (
         <div className="mt-3 flex items-center gap-2 border-t border-border/40 pt-3">
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={handleRetry}
-            disabled={isActionPending}
-            className="h-7 px-2.5 text-xs gap-1 border-emerald-800 text-emerald-400 hover:bg-emerald-950/20 hover:text-emerald-300"
-          >
-            <RefreshCw className="h-3 w-3" />
-            Retry Job
-          </Button>
+          {(data?.status === "failed" || data?.status === "dead_letter") && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={handleRetry}
+              disabled={isActionPending}
+              className="h-7 px-2.5 text-xs gap-1 border-emerald-800 text-emerald-400 hover:bg-emerald-950/20 hover:text-emerald-300"
+            >
+              <RefreshCw className="h-3 w-3" />
+              Retry Job
+            </Button>
+          )}
           <Button
             size="sm"
             variant="outline"
@@ -343,7 +348,7 @@ export function ExecutionLogPanel({
             className="h-7 px-2.5 text-xs gap-1 border-rose-800 text-rose-400 hover:bg-rose-950/20 hover:text-rose-300"
           >
             <Trash2 className="h-3 w-3" />
-            Discard Job
+            {active ? "Cancel Job" : "Discard Job"}
           </Button>
         </div>
       )}

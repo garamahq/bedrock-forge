@@ -248,4 +248,19 @@ export class JobExecutionsRepository {
       },
     });
   }
+
+  async markStalledAsFailed(cutoff: Date, reason: string): Promise<number> {
+    const res = await this.prisma.jobExecution.updateMany({
+      where: {
+        status: { in: ["active", "queued"] },
+        created_at: { lt: cutoff },
+      },
+      data: {
+        status: "failed",
+        last_error: reason,
+        completed_at: new Date(),
+      },
+    });
+    return res.count;
+  }
 }

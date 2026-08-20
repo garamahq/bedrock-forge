@@ -317,23 +317,10 @@ set_env_value() {
   local key="\$1"
   local value="\$2"
   local file="\${3:-.env}"
-  local temp_file="\${file}.tmp"
-
-  local found=false
-  if [[ -f "\$file" ]]; then
-    while IFS= read -r line || [[ -n "\$line" ]]; do
-      if [[ "\$line" == "\${key}"=* ]]; then
-        printf '%s\n' "\${key}=\${value}"
-        found=true
-      else
-        printf '%s\n' "\$line"
-      fi
-    done < "\$file" > "\$temp_file"
-    mv "\$temp_file" "\$file"
-  fi
-
-  if [[ "\$found" = false ]]; then
-    printf '%s\n' "\${key}=\${value}" >> "\$file"
+  if grep -q "^\${key}=" "\$file" 2>/dev/null; then
+    sed -i "s|^\${key}=.*|\${key}=\${value}|" "\$file"
+  else
+    echo "\${key}=\${value}" >> "\$file"
   fi
 }
 
@@ -384,7 +371,7 @@ else
 
   PREV_TAG=""
   if [[ -f .env ]]; then
-    PREV_TAG=$(grep "^IMAGE_TAG=" .env | cut -d= -f2 || echo "")
+    PREV_TAG=\$(grep "^IMAGE_TAG=" .env | cut -d= -f2- | tr -d '"' | tr -d "'" || echo "")
   fi
 
   # Auto backup database before migration
@@ -419,10 +406,10 @@ else
   # Ensure infra services are running (no-op if already healthy)
   docker compose up -d postgres redis
 
-  # Restart forge with the new image (no build — image is already loaded)
-  if ! docker compose up -d --force-recreate --no-deps forge; then
-    echo "ERROR: forge failed to start. Logs:"
-    docker compose logs --tail=100 forge
+  # Restart forge and web with the new image (no build — images are already loaded)
+  if ! docker compose up -d --force-recreate --no-deps forge web; then
+    echo "ERROR: services failed to start. Logs:"
+    docker compose logs --tail=100 forge web
     echo "Restoring previous configuration..."
     mv .env.bak .env
     exit 1
