@@ -168,16 +168,28 @@ foreach ($colRows as $line) {
 // ── Serialization-aware replacement ─────────────────────────────────────
 
 /**
- * Recursively walk a PHP value, replacing $search with $replace in all strings.
+ * Recursively walk a PHP value, replacing $search with $replace across raw,
+ * JSON-escaped slashes (\/), and URL-encoded variants.
  */
 function sr_deep_replace($data, string $search, string $replace) {
     if (is_string($data)) {
-        return str_replace($search, $replace, $data);
+        $val = str_replace($search, $replace, $data);
+        $jsonSearch = str_replace('/', '\/', $search);
+        if ($jsonSearch !== $search) {
+            $jsonReplace = str_replace('/', '\/', $replace);
+            $val = str_replace($jsonSearch, $jsonReplace, $val);
+        }
+        $urlEncSearch = rawurlencode($search);
+        if ($urlEncSearch !== $search) {
+            $urlEncReplace = rawurlencode($replace);
+            $val = str_replace($urlEncSearch, $urlEncReplace, $val);
+        }
+        return $val;
     }
     if (is_array($data)) {
         $out = [];
         foreach ($data as $key => $value) {
-            $newKey = is_string($key) ? str_replace($search, $replace, $key) : $key;
+            $newKey = is_string($key) ? sr_deep_replace($key, $search, $replace) : $key;
             $out[$newKey] = sr_deep_replace($value, $search, $replace);
         }
         return $out;
@@ -193,16 +205,25 @@ function sr_deep_replace($data, string $search, string $replace) {
  * Returns [new_value, changed].
  */
 function sr_replace_value(string $value, string $search, string $replace): array {
-    if (strpos($value, $search) === false) {
+    $jsonSearch = str_replace('/', '\/', $search);
+    $urlEncSearch = rawurlencode($search);
+
+    $hasMatch = (strpos($value, $search) !== false) ||
+                ($jsonSearch !== $search && strpos($value, $jsonSearch) !== false) ||
+                ($urlEncSearch !== $search && strpos($value, $urlEncSearch) !== false);
+
+    if (!$hasMatch) {
         return [$value, false];
     }
+
     $unserialized = @unserialize($value);
     if ($unserialized !== false || $value === 'b:0;') {
         $replaced = sr_deep_replace($unserialized, $search, $replace);
         $newValue = serialize($replaced);
         return [$newValue, $newValue !== $value];
     }
-    $newValue = str_replace($search, $replace, $value);
+
+    $newValue = sr_deep_replace($value, $search, $replace);
     return [$newValue, $newValue !== $value];
 }
 
@@ -211,8 +232,18 @@ function sr_replace_value(string $value, string $search, string $replace): array
 $totalAffected = 0;
 $tablesScanned = 0;
 $errors        = [];
-$searchHex     = bin2hex($search);    // safe for use in UNHEX() / LOCATE()
-$replaceHex    = bin2hex($replace);
+
+$searchVariants = array_values(array_unique(array_filter([
+    $search,
+    str_replace('/', '\/', $search),
+    rawurlencode($search),
+])));
+$replaceVariants = [
+    $replace,
+    str_replace('/', '\/', $replace),
+    rawurlencode($replace),
+];
+$searchHexes = array_map('bin2hex', $searchVariants);
 
 foreach ($tableColumns as $table => $columns) {
     $tablesScanned++;
@@ -238,9 +269,14 @@ foreach ($tableColumns as $table => $columns) {
         // No primary key — fall back to plain SQL REPLACE (no serialization fix)
         foreach ($columns as $col) {
             if (!$dryRun) {
-                $sql = "UPDATE `$table` SET `$col` = REPLACE(`$col`, UNHEX('$searchHex'), UNHEX('$replaceHex'))"
-                     . " WHERE LOCATE(UNHEX('$searchHex'), `$col`) > 0";
-                db_query($mycnf, $dbName, $sql);
+                foreach ($searchVariants as $idx => $sVar) {
+                    $rVar = $replaceVariants[$idx] ?? $replace;
+                    $sHex = bin2hex($sVar);
+                    $rHex = bin2hex($rVar);
+                    $sql = "UPDATE `$table` SET `$col` = REPLACE(`$col`, UNHEX('$sHex'), UNHEX('$rHex'))"
+                         . " WHERE LOCATE(UNHEX('$sHex'), `$col`) > 0";
+                    db_query($mycnf, $dbName, $sql);
+                }
             }
         }
         continue;
@@ -253,10 +289,12 @@ foreach ($tableColumns as $table => $columns) {
     $allSelects = array_merge($pkSelects, $hexSelects);
 
     // LOCATE() avoids LIKE wildcard issues for search strings that contain % or _
-    $locateClauses = array_map(
-        fn($c) => "LOCATE(UNHEX('$searchHex'), `$c`) > 0",
-        $columns
-    );
+    $locateClauses = [];
+    foreach ($columns as $c) {
+        foreach ($searchHexes as $sHex) {
+            $locateClauses[] = "LOCATE(UNHEX('$sHex'), `$c`) > 0";
+        }
+    }
 
     $query = "SELECT " . implode(', ', $allSelects) . " FROM `$table`"
            . " WHERE " . implode(' OR ', $locateClauses);

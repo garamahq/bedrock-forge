@@ -1014,72 +1014,6 @@ export class SyncDbService {
         level: "info",
       });
 
-      const strategy1CacheDirs = [
-        shellQuote(`${contentPath}/cache`),
-        shellQuote(`${contentPath}/et-cache`),
-        shellQuote(`${contentPath}/litespeed`),
-        ...(isBedrock ? [shellQuote(`${contentPath}/uploads/cache`)] : []),
-      ];
-      await executor
-        .execute(`rm -rf ${strategy1CacheDirs.join(" ")} 2>/dev/null; true`)
-        .catch(() => {});
-      await tracker.track({
-        step: `${label}: disk caches cleared (et-cache, cache, litespeed)`,
-        level: "info",
-        detail: strategy1CacheDirs.join(", "),
-      });
-
-      if (!skipElementorCssFlush) {
-        let diviMycnf: string | null = null;
-        try {
-          diviMycnf = await createRemoteMyCnf(
-            executor,
-            creds,
-            `divi_flush_${Date.now()}`,
-          );
-          const pfxRes = await executor.execute(
-            `mysql --defaults-extra-file=${diviMycnf} ${creds.dbName} -sN -e ${shellQuote(
-              `SELECT REPLACE(table_name,'options','') FROM information_schema.tables WHERE table_schema='${escapeMysql(creds.dbName)}' AND table_name LIKE '%options' LIMIT 1`,
-            )}`,
-          );
-          const diviPrefix =
-            pfxRes.code === 0 && pfxRes.stdout.trim()
-              ? pfxRes.stdout.trim()
-              : "wp_";
-          const diviDeleteSql =
-            `DELETE FROM \`${diviPrefix}options\` WHERE ` +
-            `option_name LIKE 'et\\_dynamic\\_css%' OR ` +
-            `option_name LIKE 'et\\_pb\\_dynamic\\_css%' OR ` +
-            `option_name LIKE 'et\\_core\\_bb\\_layout\\_css%' OR ` +
-            `option_name LIKE 'et\\_dynamic\\_css\\_cache\\_%'`;
-          const diviResult = await executor.execute(
-            `mysql --defaults-extra-file=${diviMycnf} ${creds.dbName} -e ${shellQuote(diviDeleteSql)}`,
-          );
-          if (diviResult.code === 0) {
-            await tracker.track({
-              step: `${label}: Divi compiled CSS cache cleared (et_dynamic_css)`,
-              level: "info",
-              detail: `Divi will regenerate CSS from theme settings on next page visit`,
-            });
-          } else {
-            await tracker.track({
-              step: `${label}: Divi CSS cache clear skipped — table not found or no Divi options`,
-              level: "info",
-            });
-          }
-        } catch (e) {
-          await tracker.track({
-            step: `${label}: Divi CSS cache clear non-fatal error`,
-            level: "warn",
-            detail: e instanceof Error ? e.message : String(e),
-          });
-        } finally {
-          if (diviMycnf) {
-            await cleanupRemoteMyCnf(executor, diviMycnf);
-          }
-        }
-      }
-
       await executor
         .execute(
           wpCli.buildCommand(
@@ -1087,39 +1021,32 @@ export class SyncDbService {
           ),
         )
         .catch(() => {});
-
-      if (siteUrl) {
-        await executor
-          .execute(
-            `curl -s -o /dev/null --max-time 5 -X PURGE ${shellQuote(siteUrl)}/ 2>/dev/null; true`,
-          )
-          .catch(() => {});
-        await executor
-          .execute(
-            `curl -s -o /dev/null --max-time 5 -H ${shellQuote("X-LiteSpeed-Purge: *")} ${shellQuote(siteUrl)}/ 2>/dev/null; true`,
-          )
-          .catch(() => {});
-        await tracker.track({
-          step: `${label}: LiteSpeed HTTP PURGE sent`,
-          level: "info",
-        });
-      }
-      return;
+    } else {
+      await tracker.track({
+        step: `${label}: WP-CLI unavailable — flushing via SQL + disk`,
+        level: "warn",
+      });
+      await executor
+        .execute(
+          `rm -f ${shellQuote(contentPath + "/object-cache.php")} 2>/dev/null; true`,
+        )
+        .catch(() => {});
+      await tracker.track({
+        step: `${label}: WordPress object cache drop-in removed — WP will re-query from DB until plugin restores it`,
+        level: "info",
+      });
     }
 
-    await tracker.track({
-      step: `${label}: WP-CLI unavailable — flushing via SQL + disk`,
-      level: "warn",
-    });
-    let flushMycnf: string | null = null;
+    // ── Universal Database Purge for Divi, Elementor, and Builders ─────────
+    let dbFlushMycnf: string | null = null;
     try {
-      flushMycnf = await createRemoteMyCnf(
+      dbFlushMycnf = await createRemoteMyCnf(
         executor,
         creds,
-        `flush_${Date.now()}`,
+        `builder_flush_${Date.now()}`,
       );
       const pfxRes = await executor.execute(
-        `mysql --defaults-extra-file=${flushMycnf} ${creds.dbName} -sN -e ${shellQuote(
+        `mysql --defaults-extra-file=${dbFlushMycnf} ${creds.dbName} -sN -e ${shellQuote(
           `SELECT REPLACE(table_name,'options','') FROM information_schema.tables WHERE table_schema='${escapeMysql(creds.dbName)}' AND table_name LIKE '%options' LIMIT 1`,
         )}`,
       );
@@ -1127,58 +1054,96 @@ export class SyncDbService {
         pfxRes.code === 0 && pfxRes.stdout.trim()
           ? pfxRes.stdout.trim()
           : "wp_";
-      await executor
-        .execute(
-          `mysql --defaults-extra-file=${flushMycnf} ${creds.dbName} -e "DELETE FROM \`${p}options\` WHERE option_name LIKE '_transient_%' OR option_name LIKE '_site_transient_%' OR option_name = 'elementor_log';"`,
-        )
-        .catch(() => {});
+
+      // Purge Divi, Elementor, and builder caches from postmeta
+      const postmetaCleanSql =
+        `DELETE FROM \`${p}postmeta\` WHERE ` +
+        `meta_key LIKE '_et_pb_static_css%' OR ` +
+        `meta_key LIKE '_et_pb_dynamic_css%' OR ` +
+        `meta_key LIKE '_et_pb_inline_style%' OR ` +
+        `meta_key LIKE '_et_builder_custom_css%' OR ` +
+        `meta_key LIKE '_elementor_css%' OR ` +
+        `meta_key LIKE '_elementor_element_cache%' OR ` +
+        `meta_key LIKE '_fl_builder_%' OR ` +
+        `meta_key LIKE 'bricks_css_%'`;
+
+      // Purge Divi, Elementor, builder, and transients from options
+      const optionsCleanSql =
+        `DELETE FROM \`${p}options\` WHERE ` +
+        `option_name LIKE '_transient_%' OR ` +
+        `option_name LIKE '_site_transient_%' OR ` +
+        `option_name LIKE 'et_dynamic_css%' OR ` +
+        `option_name LIKE 'et_pb_dynamic_css%' OR ` +
+        `option_name LIKE 'et_core_bb_layout_css%' OR ` +
+        `option_name LIKE 'et_dynamic_css_cache_%' OR ` +
+        `option_name LIKE 'et_pb_static_css_%' OR ` +
+        `option_name LIKE 'et_pb_custom_css_%' OR ` +
+        `option_name LIKE 'et_dynamic_assets%' OR ` +
+        `option_name LIKE '_transient_et_pb_%' OR ` +
+        `option_name LIKE '_transient_timeout_et_pb_%' OR ` +
+        `option_name LIKE '_transient_et_core_%' OR ` +
+        `option_name LIKE '_transient_timeout_et_core_%' OR ` +
+        `option_name LIKE '_elementor_css%' OR ` +
+        `option_name LIKE 'elementor_css_%' OR ` +
+        `option_name LIKE '_elementor_general_css%' OR ` +
+        `option_name = 'elementor_log' OR ` +
+        `option_name LIKE 'fusion_dynamic_css_%'`;
+
+      await executor.execute(
+        `mysql --defaults-extra-file=${dbFlushMycnf} ${creds.dbName} -e ${shellQuote(postmetaCleanSql)}; mysql --defaults-extra-file=${dbFlushMycnf} ${creds.dbName} -e ${shellQuote(optionsCleanSql)}`,
+      );
+
       await tracker.track({
-        step: `${label}: transients and stale logs cleared (SQL, prefix=${p})`,
+        step: `${label}: Divi & page builder caches cleared (postmeta, options, prefix=${p})`,
         level: "info",
+        detail: `Divi, Elementor, and builder caches purged — clean CSS will regenerate on next request`,
       });
     } catch (e) {
       await tracker.track({
-        step: `${label}: SQL cache flush failed`,
+        step: `${label}: Builder DB cache clear non-fatal warning`,
         level: "warn",
         detail: e instanceof Error ? e.message : String(e),
       });
     } finally {
-      if (flushMycnf) {
-        await cleanupRemoteMyCnf(executor, flushMycnf);
+      if (dbFlushMycnf) {
+        await cleanupRemoteMyCnf(executor, dbFlushMycnf);
       }
     }
-    await executor
-      .execute(
-        `rm -f ${shellQuote(contentPath + "/object-cache.php")} 2>/dev/null; true`,
-      )
-      .catch(() => {});
-    await tracker.track({
-      step: `${label}: WordPress object cache drop-in removed — WP will re-query from DB until plugin restores it`,
-      level: "info",
-    });
-    const cacheRmParts = [
+
+    // ── Universal Disk Purge for Divi, Elementor, and Builder Caches ───────
+    const allCacheDirs = [
       shellQuote(`${contentPath}/cache`),
       shellQuote(`${contentPath}/et-cache`),
       shellQuote(`${contentPath}/litespeed`),
-      ...(!skipElementorCssFlush
-        ? [shellQuote(`${contentPath}/uploads/elementor/css`)]
-        : []),
+      shellQuote(`${contentPath}/uploads/et-cache`),
+      shellQuote(`${contentPath}/uploads/et_temp`),
+      shellQuote(`${contentPath}/uploads/elementor/css`),
+      shellQuote(`${contentPath}/uploads/bb-plugin/cache`),
+      shellQuote(`${contentPath}/uploads/oxygen/css`),
+      shellQuote(`${contentPath}/uploads/bricks/css`),
+      shellQuote(`${contentPath}/uploads/fusion-styles`),
+      shellQuote(`${contentPath}/uploads/cache`),
+      shellQuote(`${contentPath}/uploads/astra-addon`),
     ];
-    if (isBedrock) {
-      cacheRmParts.push(shellQuote(`${contentPath}/uploads/cache`));
-    }
     await executor
-      .execute(`rm -rf ${cacheRmParts.join(" ")} 2>/dev/null; true`)
+      .execute(`rm -rf ${allCacheDirs.join(" ")} 2>/dev/null; true`)
       .catch(() => {});
+
     await tracker.track({
       step: `${label}: disk cache directories removed`,
       level: "info",
-      detail: cacheRmParts.join(", "),
+      detail: allCacheDirs.join(", "),
     });
+
     if (siteUrl) {
       await executor
         .execute(
           `curl -s -o /dev/null --max-time 5 -X PURGE ${shellQuote(siteUrl)}/ 2>/dev/null; true`,
+        )
+        .catch(() => {});
+      await executor
+        .execute(
+          `curl -s -o /dev/null --max-time 5 -H ${shellQuote("X-LiteSpeed-Purge: *")} ${shellQuote(siteUrl)}/ 2>/dev/null; true`,
         )
         .catch(() => {});
       await tracker.track({

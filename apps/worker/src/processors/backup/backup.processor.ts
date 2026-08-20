@@ -829,10 +829,20 @@ export class BackupProcessor extends WorkerHost {
               await executor.execute(`rm -f ${srScript}`).catch(() => {});
             }
 
-            // Replace hardcoded URLs in wp-content files (CSS, JS, PHP, etc.)
+            // Determine content path (Standard wp-content vs Bedrock web/app)
+            const isBedrock = await executor
+              .execute(
+                `test -d ${shellQuote(env.root_path + "/web/app")} && echo ok || echo missing`,
+              )
+              .then((r) => r.stdout.trim() === "ok")
+              .catch(() => false);
+            const contentPath = isBedrock
+              ? `${env.root_path}/web/app`
+              : `${env.root_path}/wp-content`;
+
+            // Replace hardcoded URLs in content files (CSS, JS, PHP, etc.)
             const sedEscape = (s: string) =>
               s.replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
-            const wpContent = `${env.root_path}/wp-content`;
             const filePairs: Array<[string, string]> = [[srcUrl, tgtUrl]];
             const altSrc = flipProtocol(srcUrl);
             const altTgt = flipProtocol(tgtUrl);
@@ -843,7 +853,7 @@ export class BackupProcessor extends WorkerHost {
               await executor
                 .execute(
                   [
-                    `find ${shellQuote(wpContent)} -type f`,
+                    `find ${shellQuote(contentPath)} -type f`,
                     `\\( -name '*.css' -o -name '*.js' -o -name '*.json' -o -name '*.html'`,
                     `-o -name '*.htm' -o -name '*.svg' -o -name '*.xml' -o -name '*.txt'`,
                     `-o -name '*.php' \\)`,
@@ -862,9 +872,25 @@ export class BackupProcessor extends WorkerHost {
               .execute(wpCli.buildCommand("rewrite flush"))
               .catch(() => {});
             await executor
-              .execute(
-                `rm -rf ${shellQuote(env.root_path)}/wp-content/cache ${shellQuote(env.root_path)}/wp-content/et-cache 2>/dev/null; true`,
-              )
+              .execute(wpCli.buildCommand("elementor flush-css"))
+              .catch(() => {});
+
+            // Purge all builder and performance disk caches
+            const restoreCacheDirs = [
+              shellQuote(`${contentPath}/cache`),
+              shellQuote(`${contentPath}/et-cache`),
+              shellQuote(`${contentPath}/litespeed`),
+              shellQuote(`${contentPath}/uploads/et-cache`),
+              shellQuote(`${contentPath}/uploads/et_temp`),
+              shellQuote(`${contentPath}/uploads/elementor/css`),
+              shellQuote(`${contentPath}/uploads/bb-plugin/cache`),
+              shellQuote(`${contentPath}/uploads/oxygen/css`),
+              shellQuote(`${contentPath}/uploads/bricks/css`),
+              shellQuote(`${contentPath}/uploads/fusion-styles`),
+              shellQuote(`${contentPath}/uploads/cache`),
+            ];
+            await executor
+              .execute(`rm -rf ${restoreCacheDirs.join(" ")} 2>/dev/null; true`)
               .catch(() => {});
           }
         }

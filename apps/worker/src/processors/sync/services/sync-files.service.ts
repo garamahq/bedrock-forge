@@ -26,6 +26,29 @@ export class SyncFilesService {
     ".htaccess",
     "storage/",
     "node_modules/",
+    // Builder and performance disk caches (regenerated cleanly on target)
+    "wp-content/cache/",
+    "wp-content/et-cache/",
+    "wp-content/litespeed/",
+    "wp-content/uploads/et-cache/",
+    "wp-content/uploads/et_temp/",
+    "wp-content/uploads/elementor/css/",
+    "wp-content/uploads/bb-plugin/cache/",
+    "wp-content/uploads/oxygen/css/",
+    "wp-content/uploads/bricks/css/",
+    "wp-content/uploads/fusion-styles/",
+    "wp-content/uploads/cache/",
+    "web/app/cache/",
+    "web/app/et-cache/",
+    "web/app/litespeed/",
+    "web/app/uploads/et-cache/",
+    "web/app/uploads/et_temp/",
+    "web/app/uploads/elementor/css/",
+    "web/app/uploads/bb-plugin/cache/",
+    "web/app/uploads/oxygen/css/",
+    "web/app/uploads/bricks/css/",
+    "web/app/uploads/fusion-styles/",
+    "web/app/uploads/cache/",
   ];
 
   constructor(private readonly sshKey: SshKeyService) {}
@@ -169,12 +192,11 @@ export class SyncFilesService {
       `${shellQuote(targetEnv.server.ssh_user)}@${targetEnv.server.ip_address}:${shellQuote(targetRoot)}/`,
     ].join(" ");
 
-    const baseExcludes = this.RSYNC_EXCLUDES.join(", ");
     const customCount = protectedFileExcludes.length;
     const loggedExcludes =
       customCount > 0
-        ? `${baseExcludes} (+ ${customCount} protected uploads/files)`
-        : baseExcludes;
+        ? `.env, wp-config.php, .htaccess, storage/, node_modules/, builder & disk caches (+ ${customCount} protected uploads/files)`
+        : `.env, wp-config.php, .htaccess, storage/, node_modules/, builder & disk caches`;
 
     await tracker.track({
       step: "Syncing site files via rsync",
