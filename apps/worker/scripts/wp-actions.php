@@ -105,48 +105,118 @@ function clearCache(string $docroot, string $wpPath): void {
 }
 
 function fixPermissions(string $docroot): void {
-    $parentForOwner = dirname($docroot);
+    $root = rtrim($docroot, '/');
+    $parentForOwner = dirname($root);
+
+    // 1. Detect Owner (parentDir -> docroot -> path user -> inner files -> fallback)
+    $ownerDetected = null;
     exec('stat -c %U ' . escapeshellarg($parentForOwner) . ' 2>/dev/null', $parentOwnerOut, $parentOwnerCode);
-    $ownerDetected = ($parentOwnerCode === 0 && !empty($parentOwnerOut[0]) && trim($parentOwnerOut[0]) !== 'root')
-        ? trim($parentOwnerOut[0])
-        : null;
+    if ($parentOwnerCode === 0 && !empty($parentOwnerOut[0]) && trim($parentOwnerOut[0]) !== 'root' && preg_match('/^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/', trim($parentOwnerOut[0]))) {
+        $ownerDetected = trim($parentOwnerOut[0]);
+    }
 
     if (!$ownerDetected) {
-        exec('stat -c %U ' . escapeshellarg($docroot) . ' 2>/dev/null', $selfOwnerOut, $selfOwnerCode);
-        if ($selfOwnerCode === 0 && !empty($selfOwnerOut[0]) && trim($selfOwnerOut[0]) !== 'root') {
+        exec('stat -c %U ' . escapeshellarg($root) . ' 2>/dev/null', $selfOwnerOut, $selfOwnerCode);
+        if ($selfOwnerCode === 0 && !empty($selfOwnerOut[0]) && trim($selfOwnerOut[0]) !== 'root' && preg_match('/^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/', trim($selfOwnerOut[0]))) {
             $ownerDetected = trim($selfOwnerOut[0]);
         }
     }
 
-    $ownerName = $ownerDetected ?: 'www-data';
+    if (!$ownerDetected && preg_match('#/home/([^/]+)#', $root, $m)) {
+        $cand = $m[1];
+        if (preg_match('/^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/', $cand)) {
+            exec('id -u ' . escapeshellarg($cand) . ' 2>/dev/null', $uOut, $uCode);
+            if ($uCode === 0) {
+                $ownerDetected = $cand;
+            }
+        }
+    }
 
-    $cmds = [
-        "find " . escapeshellarg($docroot) . " -type d -exec chmod 755 {} + 2>/dev/null",
-        "find " . escapeshellarg($docroot) . " -type f -exec chmod 644 {} + 2>/dev/null",
-        "chmod 750 " . escapeshellarg($docroot) . " 2>/dev/null || true",
-        "chmod 440 " . escapeshellarg($docroot) . "/wp-config.php 2>/dev/null || true",
-        "chmod 440 " . escapeshellarg($docroot) . "/web/wp-config.php 2>/dev/null || true",
-        "chmod 440 " . escapeshellarg($docroot) . "/.env 2>/dev/null || true",
-        "chmod 440 " . escapeshellarg($docroot) . "/web/.env 2>/dev/null || true",
-    ];
+    if (!$ownerDetected) {
+        exec('find ' . escapeshellarg($root) . ' -maxdepth 3 ! -user root -printf "%u\n" 2>/dev/null | head -1', $fOut, $fCode);
+        if ($fCode === 0 && !empty($fOut[0]) && trim($fOut[0]) !== 'root' && preg_match('/^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/', trim($fOut[0]))) {
+            $ownerDetected = trim($fOut[0]);
+        }
+    }
+
+    if (!$ownerDetected) {
+        foreach (['www-data', 'nginx', 'apache'] as $fallbackUser) {
+            exec('id -u ' . escapeshellarg($fallbackUser) . ' 2>/dev/null', $fbOut, $fbCode);
+            if ($fbCode === 0) {
+                $ownerDetected = $fallbackUser;
+                break;
+            }
+        }
+    }
+
+    // 2. Detect Web Group (nogroup, nobody, www-data, nginx, apache)
+    $webGroup = $ownerDetected ?: 'nogroup';
+    exec('for g in nogroup nobody www-data nginx apache; do if getent group "$g" >/dev/null 2>&1; then echo "$g"; exit 0; fi; done; echo ' . escapeshellarg($ownerDetected ?: 'root'), $gOut, $gCode);
+    if ($gCode === 0 && !empty($gOut[0]) && trim($gOut[0])) {
+        $webGroup = trim($gOut[0]);
+    }
 
     $details = [];
+
+    // 3. Unlock & apply standard directory / file permissions
+    $cmds = [
+        "chattr -R -i -a " . escapeshellarg($root) . " 2>/dev/null || true",
+        "chmod -R u+w " . escapeshellarg($root) . " 2>/dev/null || true",
+        "find " . escapeshellarg($root) . " -type d -exec chmod 755 {} + 2>/dev/null",
+        "find " . escapeshellarg($root) . " -type f -exec chmod 644 {} + 2>/dev/null",
+        "chmod 750 " . escapeshellarg($root) . " 2>/dev/null || true",
+    ];
+
     foreach ($cmds as $cmd) {
         exec($cmd . ' 2>&1', $out, $rc);
         $details[] = ($rc === 0 ? 'OK' : 'ERR') . ': ' . $cmd;
     }
 
-    // Step 1: inner files → user:user (recursive)
-    $chown1 = "chown -R {$ownerName}:{$ownerName} " . escapeshellarg($docroot) . " 2>&1";
-    exec($chown1, $chownOut1, $chownRc1);
-    $details[] = ($chownRc1 === 0 ? 'OK' : 'ERR(chown inner)') . ': ' . implode(' ', $chownOut1);
+    if ($ownerDetected) {
+        // Step 1: inner files → user:user (recursive)
+        $chown1 = "chown -R {$ownerDetected}:{$ownerDetected} " . escapeshellarg($root) . " 2>&1";
+        exec($chown1, $chownOut1, $chownRc1);
+        $details[] = ($chownRc1 === 0 ? 'OK' : 'ERR(chown inner)') . ': ' . implode(' ', $chownOut1);
 
-    // Step 2: docroot itself → user:nogroup for LiteSpeed/OLS access
-    $chown2 = "chown {$ownerName}:nogroup " . escapeshellarg($docroot) . " 2>&1";
-    exec($chown2, $chownOut2, $chownRc2);
-    $details[] = ($chownRc2 === 0 ? 'OK' : 'ERR(chown docroot)') . ': ' . implode(' ', $chownOut2);
+        // Step 2: docroot itself → user:webGroup for LiteSpeed/Nginx access
+        $chown2 = "chown {$ownerDetected}:{$webGroup} " . escapeshellarg($root) . " 2>&1";
+        exec($chown2, $chownOut2, $chownRc2);
+        $details[] = ($chownRc2 === 0 ? 'OK' : 'ERR(chown docroot)') . ': ' . implode(' ', $chownOut2);
+    }
 
-    out(true, 'fix_permissions', "Permissions and ownership fixed for owner {$ownerName}", implode("\n", $details));
+    // Step 4: Secure sensitive configuration files (chmod 440, owner:webGroup)
+    $sensitiveConfigs = [
+        $root . '/wp-config.php',
+        $root . '/web/wp-config.php',
+        $root . '/.env',
+        $root . '/web/.env',
+        $root . '/.env.local',
+        $root . '/web/.env.local',
+        $root . '/config/application.php',
+    ];
+    foreach ($sensitiveConfigs as $cfg) {
+        if (file_exists($cfg)) {
+            if ($ownerDetected) {
+                exec('chown ' . escapeshellarg($ownerDetected . ':' . $webGroup) . ' ' . escapeshellarg($cfg) . ' 2>/dev/null || true');
+            }
+            exec('chmod 440 ' . escapeshellarg($cfg) . ' 2>/dev/null || true');
+        }
+    }
+
+    // Step 5: Ensure uploads & cache folders are writable (755, owner:owner)
+    foreach ([$root . '/wp-content/uploads', $root . '/web/app/uploads', $root . '/wp-content/cache', $root . '/web/app/cache', $root . '/storage'] as $upDir) {
+        if (is_dir($upDir)) {
+            exec('chmod 755 ' . escapeshellarg($upDir) . ' 2>/dev/null || true');
+            if ($ownerDetected) {
+                exec('chown -R ' . escapeshellarg($ownerDetected . ':' . $ownerDetected) . ' ' . escapeshellarg($upDir) . ' 2>/dev/null || true');
+            }
+        }
+    }
+
+    $msg = $ownerDetected
+        ? "Permissions and ownership fixed: {$ownerDetected}:{$webGroup} (750) on docroot, {$ownerDetected}:{$ownerDetected} (755/644) on contents, 440 on configs"
+        : "Standard permissions fixed (750 docroot, 755 dirs, 644 files, 440 configs)";
+    out(true, 'fix_permissions', $msg, implode("\n", $details));
 }
 
 function togglePlugins(string $docroot, bool $enable): void {

@@ -553,6 +553,7 @@ function deleteManagedTarget(string $composerDir, string $targetDir, string $slu
         bail("Refusing to delete unsafe target path: {$target}");
     }
 
+    exec('chattr -R -i -a ' . escapeshellarg($realTarget) . ' 2>/dev/null || true; chmod -R u+w ' . escapeshellarg($realTarget) . ' 2>/dev/null || true');
     exec('rm -rf ' . escapeshellarg($realTarget), $out, $code);
     if ($code !== 0) {
         bail("Failed to delete target directory: {$realTarget}");

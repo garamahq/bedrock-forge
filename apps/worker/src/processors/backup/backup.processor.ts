@@ -648,9 +648,16 @@ export class BackupProcessor extends WorkerHost {
         throw new Error("Cancelled by user");
       }
 
-       const isCrossRestore = backup.environment_id !== BigInt(environmentId);
+      // Proactively unlock any immutable attributes and grant write permissions using root SSH
+      await executor
+        .execute(
+          `chattr -R -i -a ${shellQuote(env.root_path)} 2>/dev/null || true; chmod -R u+w ${shellQuote(env.root_path)} 2>/dev/null || true; find ${shellQuote(env.root_path)} -type d -exec chmod 755 {} + 2>/dev/null || true; find ${shellQuote(env.root_path)} -type f -exec chmod 644 {} + 2>/dev/null || true`,
+        )
+        .catch(() => {});
+
+      const isCrossRestore = backup.environment_id !== BigInt(environmentId);
       const siteUrlArg = isCrossRestore ? ` --site-url=${shellQuote(env.url)}` : "";
-      const restoreCmd = `php ${remoteScript} --restore --file=${remoteBackupPath} --docroot=${env.root_path}${storedCredsArgs}${siteUrlArg}`;
+      const restoreCmd = `php ${shellQuote(remoteScript)} --restore --file=${shellQuote(remoteBackupPath)} --docroot=${shellQuote(env.root_path)}${storedCredsArgs}${siteUrlArg}`;
       const maskedCmd = myCnfPath
         ? restoreCmd.replace(myCnfPath, "/tmp/forge_restore_mycnf_***.cnf")
         : restoreCmd;
@@ -739,7 +746,7 @@ export class BackupProcessor extends WorkerHost {
 
               // Auto-detect WP table prefix; fallback 'wp_'
               const prefixRes = await executor.execute(
-                `mysql --defaults-extra-file=${srMycnf} ${shellQuote(dbName)} -sN -e ${shellQuote(
+                `mysql --defaults-extra-file=${shellQuote(srMycnf)} ${shellQuote(dbName)} -sN -e ${shellQuote(
                   `SELECT REPLACE(table_name,'options','') FROM information_schema.tables WHERE table_schema='${escapeMysql(dbName)}' AND table_name LIKE '%options' LIMIT 1`,
                 )}`,
               );
@@ -756,8 +763,8 @@ export class BackupProcessor extends WorkerHost {
               let allPairsOk = true;
               for (const [oldUrl, newUrl] of pairs) {
                 const phpResult = await executor.execute(
-                  `php ${srScript}` +
-                    ` --mycnf=${srMycnf}` +
+                  `php ${shellQuote(srScript)}` +
+                    ` --mycnf=${shellQuote(srMycnf)}` +
                     ` --db-name=${shellQuote(dbName)}` +
                     ` --prefix=${shellQuote(p)}` +
                     ` --search=${shellQuote(oldUrl)}` +
@@ -807,9 +814,9 @@ export class BackupProcessor extends WorkerHost {
                   content: Buffer.from(statements.join(";\n") + ";"),
                 });
                 const srResult = await executor.execute(
-                  `mysql --defaults-extra-file=${srMycnf} ${shellQuote(dbName)} < ${srSqlFile}`,
+                  `mysql --defaults-extra-file=${shellQuote(srMycnf)} ${shellQuote(dbName)} < ${shellQuote(srSqlFile)}`,
                 );
-                await executor.execute(`rm -f ${srSqlFile}`).catch(() => {});
+                await executor.execute(`rm -f ${shellQuote(srSqlFile)}`).catch(() => {});
 
                 if (srResult.code !== 0) {
                   await tracker.track({
@@ -978,8 +985,7 @@ export class BackupProcessor extends WorkerHost {
         queue_name: QUEUES.BACKUPS,
         bull_job_id: bullJobId,
         environment_id: BigInt(environmentId),
-        status: "active",
-        started_at: new Date(),
+        status: "queued",
         payload: { scheduleId, environmentId, type } as object,
       },
     });
@@ -989,11 +995,11 @@ export class BackupProcessor extends WorkerHost {
     });
 
     if (!env.google_drive_folder_id) {
-      const tracker = new StepTracker(
+      const tracker = await StepTracker.start(
         this.prisma,
         exec.id,
         this.logger,
-        job.id ?? "",
+        job,
       );
       await tracker.fail(
         new Error(`Environment ${environmentId} has no google_drive_folder_id`),
@@ -1010,8 +1016,7 @@ export class BackupProcessor extends WorkerHost {
         environment_id: BigInt(environmentId),
         job_execution_id: exec.id,
         type: type as "full" | "db_only" | "files_only",
-        status: "running",
-        started_at: new Date(),
+        status: "pending",
       },
     });
 

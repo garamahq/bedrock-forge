@@ -154,12 +154,27 @@ export class BackupsRepository {
     });
   }
 
+  async cancelJobExecutionIfActive(
+    id: bigint,
+    error: string,
+  ): Promise<boolean> {
+    const result = await this.prisma.jobExecution.updateMany({
+      where: { id, status: "active" },
+      data: {
+        status: "failed",
+        last_error: error,
+        completed_at: new Date(),
+      },
+    });
+    return result.count > 0;
+  }
+
   hasActiveJob(envId: bigint): Promise<boolean> {
     return this.prisma.jobExecution
       .findFirst({
         where: {
           environment_id: envId,
-          queue_name: QUEUES.BACKUPS,
+          queue_name: { in: [QUEUES.BACKUPS, QUEUES.SYNC] },
           status: { in: ["queued", "active"] },
         },
         select: { id: true },
@@ -167,3 +182,4 @@ export class BackupsRepository {
       .then((r) => r !== null);
   }
 }
+

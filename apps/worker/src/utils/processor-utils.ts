@@ -22,23 +22,131 @@ export function flipProtocol(url: string): string | null {
 }
 
 /**
- * Fix CyberPanel file ownership on a remote docroot.
+ * Detect the Unix user and web server group for a WordPress docroot.
  *
- * CyberPanel assigns each website a dedicated system user and expects:
- *   - The docroot folder itself  →  user:nogroup  mode 750  (drwxr-x---)
- *   - All files/dirs inside       →  user:user     (recursive)
+ * Owner Detection Strategies:
+ * 1. stat parent directory (e.g. /home/<domain>)
+ * 2. stat docroot itself
+ * 3. extract candidate user from /home/<user>/... path and check `id -u <user>`
+ * 4. stat inner files (e.g. wp-content/uploads or any non-root file)
+ * 5. fallback to common web server users (www-data, nginx, apache) if present
  *
- * Detection: stat the parent of rootPath (e.g. /home/<domain>) to find the
- * site owner, then fall back to stat on rootPath itself if the parent is
- * root-owned or unreadable. Skips silently when no non-root owner is found.
+ * Web Group Detection:
+ * Probes existing groups in order: `nogroup` (Debian/Ubuntu OLS), `nobody` (RHEL/CentOS/AlmaLinux OLS), `www-data`, `nginx`, `apache`.
+ */
+export async function detectSiteOwnerAndGroup(
+  executor: RemoteExecutorService,
+  rootPath: string,
+): Promise<{ owner: string | null; webGroup: string }> {
+  const root = rootPath.replace(/\/+$/, "");
+  const parentDir = root.replace(/\/[^/]+$/, "");
+
+  let owner: string | null = null;
+
+  // 1. Parent dir stat
+  const parentStat = await executor
+    .execute(`stat -c '%U' ${shellQuote(parentDir)} 2>/dev/null`)
+    .catch(() => ({ code: 1, stdout: "", stderr: "" }));
+  if (
+    parentStat.code === 0 &&
+    parentStat.stdout.trim() &&
+    parentStat.stdout.trim() !== "root" &&
+    /^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/.test(parentStat.stdout.trim())
+  ) {
+    owner = parentStat.stdout.trim();
+  }
+
+  // 2. Docroot stat
+  if (!owner) {
+    const selfStat = await executor
+      .execute(`stat -c '%U' ${shellQuote(root)} 2>/dev/null`)
+      .catch(() => ({ code: 1, stdout: "", stderr: "" }));
+    if (
+      selfStat.code === 0 &&
+      selfStat.stdout.trim() &&
+      selfStat.stdout.trim() !== "root" &&
+      /^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/.test(selfStat.stdout.trim())
+    ) {
+      owner = selfStat.stdout.trim();
+    }
+  }
+
+  // 3. /home/<candidate>/... path extraction and system account verification
+  if (!owner) {
+    const match = root.match(/\/home\/([^\/]+)/);
+    if (match && /^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/.test(match[1])) {
+      const cand = match[1];
+      const checkUser = await executor
+        .execute(`id -u ${shellQuote(cand)} 2>/dev/null`)
+        .catch(() => ({ code: 1, stdout: "", stderr: "" }));
+      if (checkUser.code === 0) {
+        owner = cand;
+      }
+    }
+  }
+
+  // 4. Inner non-root files
+  if (!owner) {
+    const innerStat = await executor
+      .execute(
+        `find ${shellQuote(root)} -maxdepth 3 ! -user root -printf '%u\\n' 2>/dev/null | head -1`,
+      )
+      .catch(() => ({ code: 1, stdout: "", stderr: "" }));
+    const cand = innerStat.stdout.trim();
+    if (
+      innerStat.code === 0 &&
+      cand &&
+      cand !== "root" &&
+      /^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/.test(cand)
+    ) {
+      owner = cand;
+    }
+  }
+
+  // 5. System web user fallback (www-data, nginx, apache)
+  if (!owner) {
+    const fallbackCheck = await executor
+      .execute(
+        `for u in www-data nginx apache; do if id -u "$u" >/dev/null 2>&1; then echo "$u"; exit 0; fi; done; echo ""`,
+      )
+      .catch(() => ({ code: 1, stdout: "", stderr: "" }));
+    const cand = fallbackCheck.stdout.trim();
+    if (cand) {
+      owner = cand;
+    }
+  }
+
+  // 6. Detect web group (nogroup on Debian/Ubuntu, nobody on AlmaLinux/CentOS, www-data, nginx, apache)
+  let webGroup = owner || "nogroup";
+  const groupCheck = await executor
+    .execute(
+      `for g in nogroup nobody www-data nginx apache; do if getent group "$g" >/dev/null 2>&1; then echo "$g"; exit 0; fi; done; echo ${shellQuote(owner || "root")}`,
+    )
+    .catch(() => ({ code: 1, stdout: "", stderr: "" }));
+  const groupCand = groupCheck.stdout.trim();
+  if (groupCand) {
+    webGroup = groupCand;
+  }
+
+  return { owner, webGroup };
+}
+
+/**
+ * Fix CyberPanel and standard WordPress file ownership & permissions on a remote docroot.
+ *
+ * Enforces:
+ *   - The docroot folder itself  →  owner:webGroup  mode 750  (drwxr-x---)
+ *   - All subdirectories         →  owner:owner     mode 755  (drwxr-xr-x)
+ *   - All regular files          →  owner:owner     mode 644  (-rw-r--r--)
+ *   - Sensitive configs          →  owner:webGroup  mode 440  (-r--r-----)
+ *   - Uploads / Cache folders    →  owner:owner     mode 755  (drwxr-xr-x)
  */
 export async function fixCyberPanelOwnership(
   executor: RemoteExecutorService,
   rootPath: string,
   tracker?: StepTracker,
-): Promise<void> {
+): Promise<{ owner: string | null; webGroup: string }> {
   const root = rootPath.replace(/\/+$/, "");
-  const parentDir = root.replace(/\/[^/]+$/, "");
 
   const log = async (
     step: string,
@@ -50,76 +158,61 @@ export async function fixCyberPanelOwnership(
     }
   };
 
-  // Detect the site owner from the parent directory (e.g. /home/<domain>)
-  const parentStat = await executor
-    .execute(`stat -c '%U' ${shellQuote(parentDir)} 2>/dev/null`)
-    .catch(() => ({ code: 1, stdout: "", stderr: "" }));
-  let owner: string | null =
-    parentStat.code === 0 &&
-    parentStat.stdout.trim() &&
-    parentStat.stdout.trim() !== "root"
-      ? parentStat.stdout.trim()
-      : null;
-
-  // Fallback: stat the docroot itself when parent is root-owned or unreadable
-  if (!owner) {
-    const selfStat = await executor
-      .execute(`stat -c '%U' ${shellQuote(root)} 2>/dev/null`)
-      .catch(() => ({ code: 1, stdout: "", stderr: "" }));
-    if (
-      selfStat.code === 0 &&
-      selfStat.stdout.trim() &&
-      selfStat.stdout.trim() !== "root"
-    ) {
-      owner = selfStat.stdout.trim();
-    }
-  }
+  const { owner, webGroup } = await detectSiteOwnerAndGroup(executor, root);
 
   if (!owner) {
     await log(
-      "Could not detect site owner — skipping ownership fix",
+      "Could not detect site owner — applying safe standard permissions (755/644/750)",
       "warn",
       `root=${root}`,
     );
-    return;
+  } else {
+    await log(
+      `Fixing ownership & permissions: ${owner}:${owner} (recursive), ${owner}:${webGroup} on docroot (750)`,
+      "info",
+      root,
+    );
   }
 
-  await log(
-    `Fixing ownership & permissions: ${owner}:${owner} (recursive) then ${owner}:nogroup on docroot`,
-    "info",
-    root,
-  );
+  // Step 0 — unlock immutable attributes & make writable before changing perms
+  await executor
+    .execute(
+      `chattr -R -i -a ${shellQuote(root)} 2>/dev/null || true; chmod -R u+w ${shellQuote(root)} 2>/dev/null || true`,
+    )
+    .catch(() => {});
 
-  // Step 0 — standard modes: 755 dirs, 644 files
+  // Step 1 — standard directory modes (755) and file modes (644)
   await executor
     .execute(
       `find ${shellQuote(root)} -type d -exec chmod 755 {} + 2>/dev/null; find ${shellQuote(root)} -type f -exec chmod 644 {} + 2>/dev/null`,
     )
     .catch(() => {});
 
-  // Step 1 — inner files: user:user (recursive)
-  await executor
-    .execute(`chown -R ${shellQuote(`${owner}:${owner}`)} ${shellQuote(root)}`)
-    .catch(async (e: unknown) => {
-      await log(
-        "chown -R failed — inner files may have wrong ownership",
-        "warn",
-        e instanceof Error ? e.message : String(e),
-      );
-    });
+  if (owner) {
+    // Step 2 — inner files & dirs: owner:owner (recursive)
+    await executor
+      .execute(`chown -R ${shellQuote(`${owner}:${owner}`)} ${shellQuote(root)}`)
+      .catch(async (e: unknown) => {
+        await log(
+          "chown -R failed — inner files may have wrong ownership",
+          "warn",
+          e instanceof Error ? e.message : String(e),
+        );
+      });
 
-  // Step 2 — docroot folder itself: user:nogroup (non-recursive override)
-  await executor
-    .execute(`chown ${shellQuote(`${owner}:nogroup`)} ${shellQuote(root)}`)
-    .catch(async (e: unknown) => {
-      await log(
-        "chown user:nogroup on docroot failed",
-        "warn",
-        e instanceof Error ? e.message : String(e),
-      );
-    });
+    // Step 3 — docroot folder itself: owner:webGroup (non-recursive override for OLS/Nginx traversal)
+    await executor
+      .execute(`chown ${shellQuote(`${owner}:${webGroup}`)} ${shellQuote(root)}`)
+      .catch(async (e: unknown) => {
+        await log(
+          `chown ${owner}:${webGroup} on docroot failed`,
+          "warn",
+          e instanceof Error ? e.message : String(e),
+        );
+      });
+  }
 
-  // Step 3 — enforce correct mode on the docroot and secure configs
+  // Step 4 — enforce drwxr-x--- (750) on the docroot
   await executor
     .execute(`chmod 750 ${shellQuote(root)}`)
     .catch(async (e: unknown) => {
@@ -130,16 +223,62 @@ export async function fixCyberPanelOwnership(
       );
     });
 
-  await executor
-    .execute(
-      `chmod 440 ${shellQuote(`${root}/wp-config.php`)} 2>/dev/null || true; chmod 440 ${shellQuote(`${root}/web/wp-config.php`)} 2>/dev/null || true; chmod 440 ${shellQuote(`${root}/.env`)} 2>/dev/null || true; chmod 440 ${shellQuote(`${root}/web/.env`)} 2>/dev/null || true;`,
-    )
-    .catch(() => {});
+  // Step 5 — secure sensitive configuration files (chmod 440, owner:webGroup)
+  const sensitiveFiles = [
+    `${root}/wp-config.php`,
+    `${root}/web/wp-config.php`,
+    `${root}/.env`,
+    `${root}/web/.env`,
+    `${root}/.env.local`,
+    `${root}/web/.env.local`,
+    `${root}/config/application.php`,
+  ];
+  for (const file of sensitiveFiles) {
+    if (owner) {
+      await executor
+        .execute(
+          `[ -f ${shellQuote(file)} ] && chown ${shellQuote(`${owner}:${webGroup}`)} ${shellQuote(file)} 2>/dev/null || true`,
+        )
+        .catch(() => {});
+    }
+    await executor
+      .execute(
+        `[ -f ${shellQuote(file)} ] && chmod 440 ${shellQuote(file)} 2>/dev/null || true`,
+      )
+      .catch(() => {});
+  }
+
+  // Step 6 — ensure uploads & cache folders are writable (755, owner:owner)
+  const writableDirs = [
+    `${root}/wp-content/uploads`,
+    `${root}/web/app/uploads`,
+    `${root}/wp-content/cache`,
+    `${root}/web/app/cache`,
+    `${root}/storage`,
+  ];
+  for (const dir of writableDirs) {
+    await executor
+      .execute(
+        `[ -d ${shellQuote(dir)} ] && chmod 755 ${shellQuote(dir)} 2>/dev/null || true`,
+      )
+      .catch(() => {});
+    if (owner) {
+      await executor
+        .execute(
+          `[ -d ${shellQuote(dir)} ] && chown -R ${shellQuote(`${owner}:${owner}`)} ${shellQuote(dir)} 2>/dev/null || true`,
+        )
+        .catch(() => {});
+    }
+  }
 
   await log(
-    `Ownership & permissions fixed: ${owner}:nogroup on docroot, ${owner}:${owner} on contents (755/644)`,
+    owner
+      ? `Ownership & permissions secured: ${owner}:${webGroup} (750) on docroot, ${owner}:${owner} (755/644) on contents, 440 on configs`
+      : `Permissions secured: 750 on docroot, 755/644 on contents, 440 on configs`,
     "info",
   );
+
+  return { owner, webGroup };
 }
 
 /**
@@ -172,21 +311,30 @@ export async function buildWpCliPrefix(
   let prefix = "";
   let allowRootFlag = "--allow-root";
   try {
+    let owner: string | null = null;
     const r = await executor.execute(
       `stat -c '%U' ${shellQuote(wpPath)} 2>/dev/null`,
     );
-    const owner = r.stdout.trim();
-    // Accept only valid unix usernames — reject anything with shell metacharacters
+    const statOwner = r.stdout.trim();
     if (
-      owner &&
-      owner !== "root" &&
-      /^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/.test(owner)
+      statOwner &&
+      statOwner !== "root" &&
+      /^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/.test(statOwner)
     ) {
+      owner = statOwner;
+    } else {
+      const detected = await detectSiteOwnerAndGroup(executor, wpPath);
+      if (detected.owner && detected.owner !== "root") {
+        owner = detected.owner;
+      }
+    }
+
+    if (owner) {
       prefix = `sudo -u ${owner}`;
       allowRootFlag = "";
     }
   } catch {
-    // stat failed — proceed with --allow-root
+    // detection failed — proceed with --allow-root
   }
   // Detect LiteSpeed PHP binary and WP-CLI path for direct phar invocation.
   // On CyberPanel, system PHP (/usr/bin/php) often lacks mysqli; lsphpXX does not.

@@ -19,6 +19,7 @@ function makeRepo() {
     createJobExecutionAndBackup: jest.fn(),
     findJobExecutionById: jest.fn(),
     updateJobExecution: jest.fn(),
+    cancelJobExecutionIfActive: jest.fn(),
     findJobExecutionLog: jest.fn(),
     hasActiveJob: jest.fn(),
   };
@@ -311,7 +312,7 @@ describe("BackupsService", () => {
         status: "active",
         bull_job_id: "some-bull-id",
       });
-      repo.updateJobExecution.mockResolvedValue({});
+      repo.cancelJobExecutionIfActive.mockResolvedValue(true);
 
       const result = await svc.cancelJobExecution(1);
 
@@ -321,12 +322,9 @@ describe("BackupsService", () => {
         "EX",
         3600,
       );
-      expect(repo.updateJobExecution).toHaveBeenCalledWith(
+      expect(repo.cancelJobExecutionIfActive).toHaveBeenCalledWith(
         BigInt(1),
-        expect.objectContaining({
-          status: "failed",
-          last_error: "Cancelled by user",
-        }),
+        "Cancelled by user",
       );
       expect(result).toEqual({ cancelled: true });
     });

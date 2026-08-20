@@ -19,6 +19,15 @@ export class SyncService {
   ) {}
 
   async enqueueClone(dto: SyncCloneDto) {
+    const hasActive = await this.repo.hasActiveJob(
+      BigInt(dto.targetEnvironmentId),
+    );
+    if (hasActive) {
+      throw new BadRequestException(
+        "An active sync or backup job is already running for the target environment.",
+      );
+    }
+
     // Validate target environment has a Google Drive folder configured.
     // Sync overwrites the target DB; a safety backup to GDrive is mandatory.
     // skipSafetyBackup bypasses this check — the user explicitly accepts the risk.
@@ -46,6 +55,15 @@ export class SyncService {
   }
 
   async enqueuePush(dto: SyncPushDto) {
+    const hasActive = await this.repo.hasActiveJob(
+      BigInt(dto.targetEnvironmentId),
+    );
+    if (hasActive) {
+      throw new BadRequestException(
+        "An active sync or backup job is already running for the target environment.",
+      );
+    }
+
     return this.jobOrchestrator.enqueue({
       queue: this.queue,
       queueName: QUEUES.SYNC,
@@ -68,12 +86,13 @@ export class SyncService {
     const client = await this.queue.client;
     await client.set(`forge:cancel:${exec.bull_job_id}`, "1", "EX", 3600);
 
-    await this.repo.updateJobExecution(BigInt(id), {
-      status: "failed",
-      last_error: "Cancelled by user",
-      completed_at: new Date(),
-    });
+    // Optimistically mark as failed if still active; prevents overwriting completed status in a race.
+    await this.repo.cancelJobExecutionIfActive(
+      BigInt(id),
+      "Cancelled by user",
+    );
 
     return { cancelled: true };
   }
 }
+

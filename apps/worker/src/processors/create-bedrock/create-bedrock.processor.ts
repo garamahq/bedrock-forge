@@ -277,9 +277,11 @@ export class CreateBedrockProcessor extends WorkerHost {
           await executor.pushFile({ remotePath: keyTmp, content: srcKey });
           await executor.execute(`chmod 600 ${shellQuote(keyTmp)}`);
           try {
-            await executor.execute(`mkdir -p ${shellQuote(tgtPath)}`);
+            await executor.execute(
+              `chattr -R -i -a ${shellQuote(tgtPath)} 2>/dev/null || true; chmod -R u+w ${shellQuote(tgtPath)} 2>/dev/null || true; mkdir -p ${shellQuote(tgtPath)}`,
+            );
             const pullResult = await executor.execute(
-              `ssh -o StrictHostKeyChecking=no -i ${shellQuote(keyTmp)} ${shellQuote(srcEnv.server.ssh_user)}@${shellQuote(srcEnv.server.ip_address)} "tar -cz -C ${shellQuote(srcPath)} ." | tar -xz -C ${shellQuote(tgtPath)}`,
+              `ssh -o StrictHostKeyChecking=no -i ${shellQuote(keyTmp)} ${shellQuote(srcEnv.server.ssh_user)}@${shellQuote(srcEnv.server.ip_address)} "tar -cz -C ${shellQuote(srcPath)} ." | tar -xz -C ${shellQuote(tgtPath)} --no-same-owner --no-same-permissions --touch --overwrite --unlink-first --warning=no-timestamp`,
             );
             if (pullResult.code !== 0) {
               throw new Error(`Failed to transfer files from source server: ${pullResult.stderr}`);
@@ -448,7 +450,7 @@ export class CreateBedrockProcessor extends WorkerHost {
         const rootPath =
           env.root_path ?? `/home/${domain ?? "site"}/public_html`;
         await executor.execute(
-          `rm -rf ${shellQuote(rootPath)} && composer create-project roots/bedrock ${shellQuote(rootPath)} --no-interaction`,
+          `chattr -R -i -a ${shellQuote(rootPath)} 2>/dev/null || true; chmod -R u+w ${shellQuote(rootPath)} 2>/dev/null || true; rm -rf ${shellQuote(rootPath)} && composer create-project roots/bedrock ${shellQuote(rootPath)} --no-interaction`,
         );
         await job.updateProgress({ value: 70, step: "Bedrock installed" });
 

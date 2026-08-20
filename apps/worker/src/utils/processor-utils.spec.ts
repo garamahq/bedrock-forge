@@ -6,6 +6,8 @@ import {
   isValidTableName,
   sanitizeTableList,
   pushRemoteScript,
+  detectSiteOwnerAndGroup,
+  fixCyberPanelOwnership,
   WpCliBuilder,
   ComposerCommandBuilder,
 } from "./processor-utils";
@@ -213,3 +215,92 @@ describe("ComposerCommandBuilder", () => {
     );
   });
 });
+
+describe("detectSiteOwnerAndGroup", () => {
+  it("detects owner from parent directory and web group", async () => {
+    const mockExecutor = {
+      execute: jest.fn().mockImplementation((cmd: string) => {
+        if (cmd.includes("stat -c '%U' '/home/example.com'")) {
+          return Promise.resolve({ code: 0, stdout: "siteuser\n", stderr: "" });
+        }
+        if (cmd.includes("getent group")) {
+          return Promise.resolve({ code: 0, stdout: "nogroup\n", stderr: "" });
+        }
+        return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+      }),
+    } as any;
+
+    const result = await detectSiteOwnerAndGroup(
+      mockExecutor,
+      "/home/example.com/public_html",
+    );
+    expect(result.owner).toBe("siteuser");
+    expect(result.webGroup).toBe("nogroup");
+  });
+
+  it("detects owner from /home/<user> path when stat is root and selects nobody on RHEL", async () => {
+    const mockExecutor = {
+      execute: jest.fn().mockImplementation((cmd: string) => {
+        if (cmd.includes("stat -c '%U'")) {
+          return Promise.resolve({ code: 0, stdout: "root\n", stderr: "" });
+        }
+        if (cmd.includes("id -u 'ct_staging'")) {
+          return Promise.resolve({ code: 0, stdout: "1001\n", stderr: "" });
+        }
+        if (cmd.includes("getent group")) {
+          return Promise.resolve({ code: 0, stdout: "nobody\n", stderr: "" });
+        }
+        return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+      }),
+    } as any;
+
+    const result = await detectSiteOwnerAndGroup(
+      mockExecutor,
+      "/home/ct_staging/public_html",
+    );
+    expect(result.owner).toBe("ct_staging");
+    expect(result.webGroup).toBe("nobody");
+  });
+});
+
+describe("fixCyberPanelOwnership", () => {
+  it("detects owner, unlocks immutable flags, and sets permissions/ownership", async () => {
+    const executedCommands: string[] = [];
+    const mockExecutor = {
+      execute: jest.fn().mockImplementation((cmd: string) => {
+        executedCommands.push(cmd);
+        if (cmd.includes("stat -c '%U'")) {
+          return Promise.resolve({ code: 0, stdout: "siteuser\n", stderr: "" });
+        }
+        if (cmd.includes("getent group")) {
+          return Promise.resolve({ code: 0, stdout: "nogroup\n", stderr: "" });
+        }
+        return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+      }),
+    } as any;
+
+    const result = await fixCyberPanelOwnership(
+      mockExecutor,
+      "/home/example.com/public_html",
+    );
+
+    expect(result.owner).toBe("siteuser");
+    expect(result.webGroup).toBe("nogroup");
+    expect(executedCommands.some((c) => c.includes("chattr -R -i -a"))).toBe(
+      true,
+    );
+    expect(
+      executedCommands.some(
+        (c) => c.includes("chown -R 'siteuser:siteuser'") || c.includes("chown -R"),
+      ),
+    ).toBe(true);
+    expect(
+      executedCommands.some(
+        (c) => c.includes("chown 'siteuser:nogroup'") || c.includes(":nogroup"),
+      ),
+    ).toBe(true);
+    expect(executedCommands.some((c) => c.includes("chmod 440"))).toBe(true);
+    expect(executedCommands.some((c) => c.includes("chmod 750"))).toBe(true);
+  });
+});
+

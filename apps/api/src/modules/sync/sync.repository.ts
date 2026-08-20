@@ -1,5 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
+import { QUEUES } from "@bedrock-forge/shared";
 
 @Injectable()
 export class SyncRepository {
@@ -28,6 +29,19 @@ export class SyncRepository {
     });
   }
 
+  hasActiveJob(envId: bigint): Promise<boolean> {
+    return this.prisma.jobExecution
+      .findFirst({
+        where: {
+          environment_id: envId,
+          queue_name: { in: [QUEUES.SYNC, QUEUES.BACKUPS] },
+          status: { in: ["queued", "active"] },
+        },
+        select: { id: true },
+      })
+      .then((r) => r !== null);
+  }
+
   createJobExecution(data: {
     queue_name: string;
     job_type?: string;
@@ -41,6 +55,21 @@ export class SyncRepository {
     return this.prisma.jobExecution.findUnique({ where: { id } });
   }
 
+  async cancelJobExecutionIfActive(
+    id: bigint,
+    error: string,
+  ): Promise<boolean> {
+    const result = await this.prisma.jobExecution.updateMany({
+      where: { id, status: "active" },
+      data: {
+        status: "failed",
+        last_error: error,
+        completed_at: new Date(),
+      },
+    });
+    return result.count > 0;
+  }
+
   updateJobExecution(
     id: bigint,
     data: {
@@ -52,3 +81,4 @@ export class SyncRepository {
     return this.prisma.jobExecution.update({ where: { id }, data });
   }
 }
+

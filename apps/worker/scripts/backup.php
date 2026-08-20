@@ -58,12 +58,16 @@ if ($restore) {
     // Deleting the docroot first guarantees the result is an exact mirror of
     // the backup. We only delete AFTER confirming the archive file exists.
     if (is_dir($docroot)) {
+        // Step 0: remove any immutable or append-only attributes that may have been set for security
+        exec('chattr -R -i -a ' . escapeshellarg($docroot) . ' 2>/dev/null || true');
         // Step 1: ensure all directories and files are writable by current user
-        exec('find ' . escapeshellarg($docroot) . ' -type d -exec chmod 755 {} + 2>/dev/null; find ' . escapeshellarg($docroot) . ' -type f -exec chmod 644 {} + 2>/dev/null; chmod -R u+w ' . escapeshellarg($docroot) . ' 2>/dev/null');
+        exec('find ' . escapeshellarg($docroot) . ' -type d -exec chmod 755 {} + 2>/dev/null; find ' . escapeshellarg($docroot) . ' -type f -exec chmod 644 {} + 2>/dev/null; chmod -R u+w ' . escapeshellarg($docroot) . ' 2>/dev/null || true');
         $rmOut  = [];
         $rmCode = 0;
         exec('rm -rf ' . escapeshellarg($docroot) . ' 2>&1', $rmOut, $rmCode);
         if ($rmCode !== 0) {
+            // Secondary attempt: wipe contents inside if docroot folder itself is locked
+            exec('rm -rf ' . escapeshellarg($docroot) . '/* ' . escapeshellarg($docroot) . '/.[!.]* 2>/dev/null || true');
             fwrite(STDERR, "WARNING: could not completely wipe docroot before restore (exit {$rmCode}) — will overwrite during extraction.\n");
         } else {
             fwrite(STDERR, "Cleaned docroot before restore: {$docroot}\n");
@@ -80,8 +84,9 @@ if ($restore) {
     // --no-same-permissions: do not copy restrictive file modes from archive
     // --touch: do not fail on timestamp updates (prevents utime: Operation not permitted)
     // --overwrite: cleanly overwrite any existing files
+    // --unlink-first: remove each existing file before writing to prevent EPERM/EACCES on 0440 files
     // --warning=no-timestamp: suppress timestamp warnings
-    $tarFlags = '--no-same-owner --no-same-permissions --touch --overwrite --warning=no-timestamp';
+    $tarFlags = '--no-same-owner --no-same-permissions --touch --overwrite --unlink-first --warning=no-timestamp';
     $cmd = "tar -xzf " . escapeshellarg($file) . " -C " . escapeshellarg($extractTo) . " " . $tarFlags . " 2>&1";
     exec($cmd, $out, $code);
     if ($code > 0) {
@@ -108,44 +113,6 @@ if ($restore) {
         }
     }
 
-    // ── Fix file ownership (CyberPanel pattern) ────────────────────────────
-    // CyberPanel expects:
-    //   - docroot folder itself → user:nogroup  mode 750  (drwxr-x---)
-    //   - all files/dirs inside → user:user     (recursive)
-    // Detect the site owner from the parent directory (e.g. /home/<domain>),
-    // then fall back to the docroot itself.  Skip when owner resolves to root.
-    $ownerDetected = null;
-    $parentForOwner = dirname($docroot);
-    exec('stat -c %U ' . escapeshellarg($parentForOwner) . ' 2>/dev/null', $parentOwnerOut, $parentOwnerCode);
-    if ($parentOwnerCode === 0 && !empty($parentOwnerOut[0]) && trim($parentOwnerOut[0]) !== 'root') {
-        $ownerDetected = trim($parentOwnerOut[0]);
-    }
-    if (!$ownerDetected) {
-        exec('stat -c %U ' . escapeshellarg($docroot) . ' 2>/dev/null', $selfOwnerOut, $selfOwnerCode);
-        if ($selfOwnerCode === 0 && !empty($selfOwnerOut[0]) && trim($selfOwnerOut[0]) !== 'root') {
-            $ownerDetected = trim($selfOwnerOut[0]);
-        }
-    }
-    if ($ownerDetected) {
-        // Enforce 755 dirs, 644 files
-        exec('find ' . escapeshellarg($docroot) . ' -type d -exec chmod 755 {} + 2>/dev/null');
-        exec('find ' . escapeshellarg($docroot) . ' -type f -exec chmod 644 {} + 2>/dev/null');
-        // Step 1: inner files → user:user (recursive)
-        exec('chown -R ' . escapeshellarg($ownerDetected . ':' . $ownerDetected) . ' ' . escapeshellarg($docroot) . ' 2>&1');
-        // Step 2: docroot folder itself → user:nogroup (non-recursive override)
-        exec('chown ' . escapeshellarg($ownerDetected . ':nogroup') . ' ' . escapeshellarg($docroot) . ' 2>&1');
-        // Step 3: enforce drwxr-x--- on the docroot
-        exec('chmod 750 ' . escapeshellarg($docroot) . ' 2>&1');
-        // Secure sensitive config files
-        exec('chmod 440 ' . escapeshellarg($docroot . '/wp-config.php') . ' 2>/dev/null || true');
-        exec('chmod 440 ' . escapeshellarg($docroot . '/web/wp-config.php') . ' 2>/dev/null || true');
-        exec('chmod 440 ' . escapeshellarg($docroot . '/.env') . ' 2>/dev/null || true');
-        exec('chmod 440 ' . escapeshellarg($docroot . '/web/.env') . ' 2>/dev/null || true');
-        fwrite(STDERR, "Fixed ownership: {$ownerDetected}:nogroup on {$docroot}, {$ownerDetected}:{$ownerDetected} on contents\n");
-    } else {
-        fwrite(STDERR, "WARNING: could not detect site owner — skipping ownership fix\n");
-    }
-
     // ── Database import ────────────────────────────────────────────────────
     // The archive places forge_db_*.sql at the $extractTo level (same level
     // as the docroot directory itself).  Import it if found.
@@ -163,9 +130,10 @@ if ($restore) {
             $creds['DB_PASSWORD'] = $cliDbPass;
             $creds['DB_HOST']     = $cliDbHost;
 
-            // Write back to config files
+            // Write back to config files — unlock write permission first
             $envFile = $docroot . '/.env';
             if (file_exists($envFile)) {
+                @chmod($envFile, 0644);
                 $envContent = file_get_contents($envFile);
                 $envContent = preg_replace("/^DB_NAME\s*=.*/m", "DB_NAME='{$cliDbName}'", $envContent);
                 $envContent = preg_replace("/^DB_USER\s*=.*/m", "DB_USER='{$cliDbUser}'", $envContent);
@@ -182,6 +150,7 @@ if ($restore) {
                     $configFile = $docroot . '/config/application.php';
                 }
                 if (file_exists($configFile)) {
+                    @chmod($configFile, 0644);
                     $configContent = file_get_contents($configFile);
                     $configContent = preg_replace("/define\s*\(\s*['\"]DB_NAME['\"]\s*,\s*['\"][^'\"]*['\"]\s*\)/", "define('DB_NAME', '{$cliDbName}')", $configContent);
                     $configContent = preg_replace("/define\s*\(\s*['\"]DB_USER['\"]\s*,\s*['\"][^'\"]*['\"]\s*\)/", "define('DB_USER', '{$cliDbUser}')", $configContent);
@@ -240,8 +209,119 @@ if ($restore) {
         @unlink($sqlFile); // clean up extracted dump regardless of import success
     }
 
+    // ── Fix file ownership (CyberPanel pattern) ────────────────────────────
+    // CyberPanel expects:
+    //   - docroot folder itself → user:nogroup  mode 750  (drwxr-x---)
+    // ── Fix file ownership & permissions ──────────────────────────────────
+    fixSiteOwnershipAndPermissions($docroot);
+
     echo json_encode(['status' => 'restored', 'file' => $file, 'db_imported' => $dbImported]);
     exit(0);
+}
+
+/**
+ * Robustly detect site user and web server group, unlock immutable attributes,
+ * and enforce secure file ownership and permissions across WordPress/Bedrock.
+ */
+function fixSiteOwnershipAndPermissions(string $docroot): array {
+    $root = rtrim($docroot, '/');
+    $parentDir = dirname($root);
+
+    // 1. Detect Owner (parentDir -> docroot -> path user -> inner files -> common fallback)
+    $owner = null;
+    exec('stat -c %U ' . escapeshellarg($parentDir) . ' 2>/dev/null', $pOut, $pCode);
+    if ($pCode === 0 && !empty($pOut[0]) && trim($pOut[0]) !== 'root' && preg_match('/^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/', trim($pOut[0]))) {
+        $owner = trim($pOut[0]);
+    }
+    if (!$owner) {
+        exec('stat -c %U ' . escapeshellarg($root) . ' 2>/dev/null', $sOut, $sCode);
+        if ($sCode === 0 && !empty($sOut[0]) && trim($sOut[0]) !== 'root' && preg_match('/^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/', trim($sOut[0]))) {
+            $owner = trim($sOut[0]);
+        }
+    }
+    if (!$owner && preg_match('#/home/([^/]+)#', $root, $m)) {
+        $cand = $m[1];
+        if (preg_match('/^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/', $cand)) {
+            exec('id -u ' . escapeshellarg($cand) . ' 2>/dev/null', $uOut, $uCode);
+            if ($uCode === 0) {
+                $owner = $cand;
+            }
+        }
+    }
+    if (!$owner) {
+        exec('find ' . escapeshellarg($root) . ' -maxdepth 3 ! -user root -printf "%u\n" 2>/dev/null | head -1', $fOut, $fCode);
+        if ($fCode === 0 && !empty($fOut[0]) && trim($fOut[0]) !== 'root' && preg_match('/^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/', trim($fOut[0]))) {
+            $owner = trim($fOut[0]);
+        }
+    }
+    if (!$owner) {
+        foreach (['www-data', 'nginx', 'apache'] as $fallbackUser) {
+            exec('id -u ' . escapeshellarg($fallbackUser) . ' 2>/dev/null', $fbOut, $fbCode);
+            if ($fbCode === 0) {
+                $owner = $fallbackUser;
+                break;
+            }
+        }
+    }
+
+    // 2. Detect Web Group (nogroup on Debian/Ubuntu OLS, nobody on RHEL/CentOS/AlmaLinux OLS, www-data, etc.)
+    $webGroup = $owner ?: 'nogroup';
+    exec('for g in nogroup nobody www-data nginx apache; do if getent group "$g" >/dev/null 2>&1; then echo "$g"; exit 0; fi; done; echo ' . escapeshellarg($owner ?: 'root'), $gOut, $gCode);
+    if ($gCode === 0 && !empty($gOut[0]) && trim($gOut[0])) {
+        $webGroup = trim($gOut[0]);
+    }
+
+    // 3. Unlock & apply standard directory / file permissions
+    exec('chattr -R -i -a ' . escapeshellarg($root) . ' 2>/dev/null || true');
+    exec('chmod -R u+w ' . escapeshellarg($root) . ' 2>/dev/null || true');
+    exec('find ' . escapeshellarg($root) . ' -type d -exec chmod 755 {} + 2>/dev/null');
+    exec('find ' . escapeshellarg($root) . ' -type f -exec chmod 644 {} + 2>/dev/null');
+
+    if ($owner) {
+        // Step 1: inner contents -> owner:owner (recursive)
+        exec('chown -R ' . escapeshellarg($owner . ':' . $owner) . ' ' . escapeshellarg($root) . ' 2>&1');
+        // Step 2: docroot folder -> owner:webGroup (non-recursive)
+        exec('chown ' . escapeshellarg($owner . ':' . $webGroup) . ' ' . escapeshellarg($root) . ' 2>&1');
+        // Step 3: enforce 750 on docroot
+        exec('chmod 750 ' . escapeshellarg($root) . ' 2>&1');
+    }
+
+    // Step 4: Secure sensitive config files (chmod 440)
+    $sensitiveConfigs = [
+        $root . '/wp-config.php',
+        $root . '/web/wp-config.php',
+        $root . '/.env',
+        $root . '/web/.env',
+        $root . '/.env.local',
+        $root . '/web/.env.local',
+        $root . '/config/application.php',
+    ];
+    foreach ($sensitiveConfigs as $cfg) {
+        if (file_exists($cfg)) {
+            if ($owner) {
+                exec('chown ' . escapeshellarg($owner . ':' . $webGroup) . ' ' . escapeshellarg($cfg) . ' 2>/dev/null || true');
+            }
+            exec('chmod 440 ' . escapeshellarg($cfg) . ' 2>/dev/null || true');
+        }
+    }
+
+    // Step 5: Ensure uploads & cache directories are 755 and owned by user
+    foreach ([$root . '/wp-content/uploads', $root . '/web/app/uploads', $root . '/wp-content/cache', $root . '/web/app/cache', $root . '/storage'] as $upDir) {
+        if (is_dir($upDir)) {
+            exec('chmod 755 ' . escapeshellarg($upDir) . ' 2>/dev/null || true');
+            if ($owner) {
+                exec('chown -R ' . escapeshellarg($owner . ':' . $owner) . ' ' . escapeshellarg($upDir) . ' 2>/dev/null || true');
+            }
+        }
+    }
+
+    if ($owner) {
+        fwrite(STDERR, "Fixed ownership: {$owner}:{$webGroup} on {$root}, {$owner}:{$owner} on contents (755/644), 440 on configs\n");
+    } else {
+        fwrite(STDERR, "Applied safe permissions on {$root} (750 docroot, 755 dirs, 644 files, 440 configs)\n");
+    }
+
+    return ['owner' => $owner, 'webGroup' => $webGroup];
 }
 
 // Parse DB credentials — tries Bedrock .env first, then wp-config.php, then config/application.php

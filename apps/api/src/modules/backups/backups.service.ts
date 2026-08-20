@@ -191,12 +191,11 @@ export class BackupsService {
     const client = await this.backupsQueue.client;
     await client.set(`forge:cancel:${exec.bull_job_id}`, "1", "EX", 3600);
 
-    // Optimistically mark as failed; the worker will finalise the log entry.
-    await this.repo.updateJobExecution(BigInt(id), {
-      status: "failed",
-      last_error: "Cancelled by user",
-      completed_at: new Date(),
-    });
+    // Optimistically mark as failed if still active; prevents overwriting completed status in a race.
+    await this.repo.cancelJobExecutionIfActive(
+      BigInt(id),
+      "Cancelled by user",
+    );
 
     return { cancelled: true };
   }

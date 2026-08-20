@@ -42,7 +42,10 @@ if ($newContent === $content) {
     exit(0);
 }
 
+exec('chattr -i -a ' . escapeshellarg($file) . ' 2>/dev/null || true');
+@chmod($file, 0644);
 file_put_contents($file, $newContent);
+@chmod($file, 0440);
 echo json_encode(['success' => true, 'was_enabled' => $wasEnabled, 'now_enabled' => $setEnabled, 'modified_file' => $file]);
 exit(0);
 

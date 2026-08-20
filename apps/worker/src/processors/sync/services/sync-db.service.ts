@@ -1,6 +1,6 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { Job } from "bullmq";
-import { mkdir, rm, writeFile } from "fs/promises";
+import { mkdir, rm, writeFile, stat } from "fs/promises";
 import { join } from "path";
 import { PrismaService } from "../../../prisma/prisma.service";
 import { RcloneService } from "../../../services/rclone.service";
@@ -212,7 +212,7 @@ export class SyncDbService {
     try {
       urlMycnf = await createRemoteMyCnf(executor, creds, `url_${Date.now()}`);
       const pfxRes = await executor.execute(
-        `mysql --defaults-extra-file=${urlMycnf} ${creds.dbName} -sN -e ${shellQuote(
+        `mysql --defaults-extra-file=${shellQuote(urlMycnf)} ${shellQuote(creds.dbName)} -sN -e ${shellQuote(
           `SELECT REPLACE(table_name,'options','') FROM information_schema.tables WHERE table_schema='${escapeMysql(creds.dbName)}' AND table_name LIKE '%options' LIMIT 1`,
         )}`,
       );
@@ -222,7 +222,7 @@ export class SyncDbService {
           : "wp_";
       const query = `SELECT option_value FROM \`${tblPrefix}options\` WHERE option_name = 'siteurl' LIMIT 1`;
       const result = await executor.execute(
-        `mysql --defaults-extra-file=${urlMycnf} ${creds.dbName} -sN -e ${shellQuote(query)}`,
+        `mysql --defaults-extra-file=${shellQuote(urlMycnf)} ${shellQuote(creds.dbName)} -sN -e ${shellQuote(query)}`,
       );
       if (result.code === 0 && result.stdout.trim()) {
         const url = result.stdout.trim().replace(/\/$/, "");
@@ -265,7 +265,7 @@ export class SyncDbService {
       .map((t) => `'${escapeMysql(t)}'`)
       .join(",");
     const result = await executor.execute(
-      `mysql --defaults-extra-file=${mycnf} ${dbName} -sN -e ${shellQuote(
+      `mysql --defaults-extra-file=${shellQuote(mycnf)} ${shellQuote(dbName)} -sN -e ${shellQuote(
         `SELECT TABLE_NAME FROM information_schema.tables WHERE table_schema='${escapeMysql(dbName)}' AND TABLE_NAME IN (${quotedTables})`,
       )}`,
       { timeout: 30_000 },
@@ -323,7 +323,7 @@ export class SyncDbService {
     try {
       const prefixQuery = `SELECT REPLACE(table_name,'options','') FROM information_schema.tables WHERE table_schema='${escapeMysql(creds.dbName)}' AND table_name LIKE '%options' LIMIT 1`;
       const prefixResult = await executor.execute(
-        `mysql --defaults-extra-file=${tgtMycnf} ${creds.dbName} -sN -e ${shellQuote(prefixQuery)}`,
+        `mysql --defaults-extra-file=${shellQuote(tgtMycnf)} ${shellQuote(creds.dbName)} -sN -e ${shellQuote(prefixQuery)}`,
       );
       if (prefixResult.code === 0 && prefixResult.stdout.trim()) {
         prefix = prefixResult.stdout.trim();
@@ -446,15 +446,15 @@ export class SyncDbService {
     }
 
     await mkdir(localDir, { recursive: true });
-    const dumpBuffer = await targetExecutor.pullFile(remoteTemp);
-    await targetExecutor.execute(`rm -f ${shellQuote(remoteTemp)}`);
+    await targetExecutor.pullFileToPath(remoteTemp, localFile);
+    await targetExecutor.execute(`rm -f ${shellQuote(remoteTemp)}`).catch(() => {});
 
-    await writeFile(localFile, dumpBuffer);
+    const { size: dumpBytes } = await stat(localFile);
 
     await tracker.track({
       step: "Safety backup pulled — uploading to Google Drive",
       level: "info",
-      detail: `${filename} (${dumpBuffer.length} bytes)`,
+      detail: `${filename} (${dumpBytes} bytes)`,
     });
 
     try {
@@ -484,7 +484,7 @@ export class SyncDbService {
           type: "db_only",
           status: "completed",
           file_path: filePath,
-          size_bytes: BigInt(dumpBuffer.length),
+          size_bytes: BigInt(dumpBytes),
           completed_at: new Date(),
           started_at: new Date(),
         },
@@ -818,7 +818,7 @@ export class SyncDbService {
     );
     try {
       const pfxRes = await executor.execute(
-        `mysql --defaults-extra-file=${valMycnf} ${creds.dbName} -sN -e ${shellQuote(
+        `mysql --defaults-extra-file=${shellQuote(valMycnf)} ${shellQuote(creds.dbName)} -sN -e ${shellQuote(
           `SELECT REPLACE(table_name,'options','') FROM information_schema.tables WHERE table_schema='${escapeMysql(creds.dbName)}' AND table_name LIKE '%options' LIMIT 1`,
         )}`,
       );
@@ -871,7 +871,7 @@ export class SyncDbService {
       const staleMatches: string[] = [];
       for (const probe of probes) {
         const result = await executor.execute(
-          `mysql --defaults-extra-file=${valMycnf} ${creds.dbName} -sN -e ${shellQuote(probe.sql)}`,
+          `mysql --defaults-extra-file=${shellQuote(valMycnf)} ${shellQuote(creds.dbName)} -sN -e ${shellQuote(probe.sql)}`,
         );
         if (result.code !== 0) {
           throw new Error(
@@ -1046,7 +1046,7 @@ export class SyncDbService {
         `builder_flush_${Date.now()}`,
       );
       const pfxRes = await executor.execute(
-        `mysql --defaults-extra-file=${dbFlushMycnf} ${creds.dbName} -sN -e ${shellQuote(
+        `mysql --defaults-extra-file=${shellQuote(dbFlushMycnf)} ${shellQuote(creds.dbName)} -sN -e ${shellQuote(
           `SELECT REPLACE(table_name,'options','') FROM information_schema.tables WHERE table_schema='${escapeMysql(creds.dbName)}' AND table_name LIKE '%options' LIMIT 1`,
         )}`,
       );
@@ -1090,7 +1090,7 @@ export class SyncDbService {
         `option_name LIKE 'fusion_dynamic_css_%'`;
 
       await executor.execute(
-        `mysql --defaults-extra-file=${dbFlushMycnf} ${creds.dbName} -e ${shellQuote(postmetaCleanSql)}; mysql --defaults-extra-file=${dbFlushMycnf} ${creds.dbName} -e ${shellQuote(optionsCleanSql)}`,
+        `mysql --defaults-extra-file=${shellQuote(dbFlushMycnf)} ${shellQuote(creds.dbName)} -e ${shellQuote(`${postmetaCleanSql}; ${optionsCleanSql}`)}`,
       );
 
       await tracker.track({

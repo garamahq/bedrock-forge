@@ -96,6 +96,13 @@ export class SyncFilesService {
       return;
     }
 
+    // Pre-sync: proactively unlock permissions and immutable attributes on target
+    await targetExecutor
+      .execute(
+        `chattr -R -i -a ${shellQuote(targetSite)} 2>/dev/null || true; chmod -R u+w ${shellQuote(targetSite)} 2>/dev/null || true; find ${shellQuote(targetSite)} -type d -exec chmod 755 {} + 2>/dev/null || true; find ${shellQuote(targetSite)} -type f -exec chmod 644 {} + 2>/dev/null || true`,
+      )
+      .catch(() => {});
+
     // Check if rsync is available on both source and target
     const [rsyncSrcCheck, rsyncTgtCheck] = await Promise.all([
       sourceExecutor.execute(
@@ -361,7 +368,7 @@ export class SyncFilesService {
     }
 
     await targetExecutor.execute(`mkdir -p ${shellQuote(targetContent)}`);
-    const extractCmd = `tar -xzf ${shellQuote(remoteTar)} -C ${shellQuote(targetContent)} --no-same-owner --no-same-permissions --touch --overwrite --warning=no-timestamp`;
+    const extractCmd = `tar -xzf ${shellQuote(remoteTar)} -C ${shellQuote(targetContent)} --no-same-owner --no-same-permissions --touch --overwrite --unlink-first --warning=no-timestamp`;
     await tracker.track({
       step: "Extracting site files on target",
       level: "info",
@@ -440,6 +447,13 @@ export class SyncFilesService {
       });
       return;
     }
+
+    // Ensure content files and directories are writable before search-replace
+    await executor
+      .execute(
+        `chattr -R -i -a ${shellQuote(wpContentPath)} 2>/dev/null || true; chmod -R u+w ${shellQuote(wpContentPath)} 2>/dev/null || true; find ${shellQuote(wpContentPath)} -type f -exec chmod 644 {} + 2>/dev/null || true`,
+      )
+      .catch(() => {});
 
     const fileStart = Date.now();
     let anyError = false;
