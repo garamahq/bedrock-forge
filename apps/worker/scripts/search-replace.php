@@ -23,7 +23,7 @@
  */
 
 error_reporting(E_ALL);
-set_time_limit(300);
+set_time_limit(0);
 
 // ── Parse CLI arguments ─────────────────────────────────────────────────
 

@@ -10,6 +10,9 @@
  * Output: JSON { success, action, message, details }
  */
 
+error_reporting(E_ALL);
+set_time_limit(0);
+
 $opts = getopt('', ['docroot:', 'wp-path::', 'action:']);
 $docroot  = rtrim($opts['docroot'] ?? '', '/');
 $wpPath   = rtrim($opts['wp-path'] ?? $docroot, '/');
@@ -147,8 +150,12 @@ function fixPermissions(string $docroot): void {
 }
 
 function togglePlugins(string $docroot, bool $enable): void {
-    $pluginsDir  = $docroot . '/wp-content/plugins';
-    $disabledDir = $docroot . '/wp-content/plugins-disabled';
+    $base = (is_dir($docroot . '/web/app/plugins') || is_dir($docroot . '/web/app/plugins-disabled'))
+        ? $docroot . '/web/app'
+        : $docroot . '/wp-content';
+
+    $pluginsDir  = $base . '/plugins';
+    $disabledDir = $base . '/plugins-disabled';
 
     if ($enable) {
         if (!is_dir($disabledDir)) {

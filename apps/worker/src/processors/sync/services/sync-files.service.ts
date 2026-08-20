@@ -328,10 +328,16 @@ export class SyncFilesService {
       Date.now() - tarStart,
     );
 
-    if (tarResult.code !== 0) {
+    if (tarResult.code > 1) {
       throw new Error(
-        `tar failed (exit ${tarResult.code}): ${tarResult.stderr}`,
+        `tar archiving failed (exit ${tarResult.code}): ${tarResult.stderr}`,
       );
+    }
+    if (tarResult.code === 1) {
+      await tracker.track({
+        step: "tar exited 1 (file changed during read) — proceeding with archive",
+        level: "warn",
+      });
     }
 
     await tracker.track({
@@ -355,7 +361,7 @@ export class SyncFilesService {
     }
 
     await targetExecutor.execute(`mkdir -p ${shellQuote(targetContent)}`);
-    const extractCmd = `tar -xzf ${shellQuote(remoteTar)} -C ${shellQuote(targetContent)}`;
+    const extractCmd = `tar -xzf ${shellQuote(remoteTar)} -C ${shellQuote(targetContent)} --no-same-owner --no-same-permissions --touch --overwrite --warning=no-timestamp`;
     await tracker.track({
       step: "Extracting site files on target",
       level: "info",
@@ -371,7 +377,7 @@ export class SyncFilesService {
       Date.now() - extractStart,
     );
 
-    if (extractResult.code !== 0) {
+    if (extractResult.code > 1) {
       throw new Error(
         `tar extract failed (exit ${extractResult.code}): ${extractResult.stderr}`,
       );

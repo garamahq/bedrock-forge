@@ -12,6 +12,9 @@ if (PHP_VERSION_ID < 70000) {
     exit(1);
 }
 
+error_reporting(E_ALL);
+set_time_limit(0);
+
 $opts = getopt('', ['docroot:', 'type:', 'output:', 'restore', 'file:', 'db-name:', 'db-user:', 'db-pass:', 'db-host:', 'site-url:', 'mycnf:']);
 
 $docroot = $opts['docroot'] ?? null;
@@ -449,13 +452,26 @@ if ($isIncremental) {
     }
 }
 
+// Exclude volatile cache and temporary directories from backup archive
+$tarExcludes = [
+    '--exclude="*/cache/*"',
+    '--exclude="*/et-cache/*"',
+    '--exclude="*/et_temp/*"',
+    '--exclude="*/elementor/css/*"',
+    '--exclude="*/litespeed/*"',
+    '--exclude="*/node_modules/*"',
+    '--exclude="*/storage/framework/cache/*"',
+    '--exclude="*/.forge_backup_cache/*"',
+];
+$excludeFlags = ' ' . implode(' ', $tarExcludes) . ' ';
+
 // Use pigz (parallel gzip) when available for faster compression on multi-core
 // servers. Falls back to standard gzip transparently.
 $pigz = trim(shell_exec('which pigz 2>/dev/null') ?? '');
 if ($pigz) {
-    $tarCmd = 'tar --use-compress-program=' . escapeshellarg($pigz) . ' -cf ' . escapeshellarg($output);
+    $tarCmd = 'tar --use-compress-program=' . escapeshellarg($pigz) . $excludeFlags . '-cf ' . escapeshellarg($output);
 } else {
-    $tarCmd = 'tar -czf ' . escapeshellarg($output);
+    $tarCmd = 'tar -czf ' . escapeshellarg($output) . $excludeFlags;
 }
 
 if ($type === 'full' || $type === 'files_only') {
