@@ -17,8 +17,15 @@
 #  2. Stream each image to the server via:  docker save | gzip | ssh | docker load
 #     No registry required; images travel directly over the existing SSH tunnel.
 #  3. Server only runs `docker compose up` — zero build work on the VPS.
-#
-set -euo pipefail
+# Prevent concurrent deploy.sh runs from colliding
+LOCK_FILE="/tmp/bedrock_forge_deploy.lock"
+exec 200>"$LOCK_FILE"
+if ! flock -n 200; then
+  LOCK_PID=$(fuser "$LOCK_FILE" 2>/dev/null | tr -d ' ' || echo "unknown")
+  echo -e "\033[0;31m✖  Another deployment (PID ${LOCK_PID}) is already running on this machine.\033[0m" >&2
+  echo -e "\033[0;33mℹ  If this is an orphaned process, you can kill it with: kill -9 ${LOCK_PID}\033[0m" >&2
+  exit 1
+fi
 
 # ── Load deployment config ────────────────────────────────────────────────────
 if [[ ! -f .env.deploy ]]; then
@@ -67,6 +74,7 @@ CLEANUP_ONLY=false
 BUILD_ONLY=false
 NO_CACHE=""
 SKIP_BACKUP=false
+AUTO_YES=false
 for arg in "$@"; do
   case "$arg" in
     --install)      FORCE_INSTALL=true ;;
@@ -74,6 +82,7 @@ for arg in "$@"; do
     --build-only)   BUILD_ONLY=true ;;
     --no-cache)     NO_CACHE="--no-cache" ;;
     --skip-backup)  SKIP_BACKUP=true ;;
+    -y|--yes)       AUTO_YES=true ;;
     *) err "Unknown argument: $arg" ;;
   esac
 done
@@ -92,11 +101,13 @@ echo ""
 if [[ "$BUILD_ONLY" == "false" && "$CLEANUP_ONLY" == "false" ]]; then
   if ! git diff-index --quiet HEAD --; then
     warn "You have uncommitted changes in your git repository. Deploying tag: ${IMAGE_TAG}"
-    if [ -t 0 ]; then
-      read -p "Do you want to continue? (y/N) " -n 1 -r
+    if [[ "$AUTO_YES" == "true" ]]; then
+      info "Auto-confirming deployment (-y / --yes flag provided)."
+    elif [ -t 0 ]; then
+      read -t 30 -p "Do you want to continue? (y/N) " -n 1 -r || REPLY="n"
       echo ""
-      if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        err "Deployment aborted by user."
+      if [[ ! ${REPLY:-} =~ ^[Yy]$ ]]; then
+        err "Deployment aborted by user (or timed out)."
       fi
     else
       warn "Stdin is not a TTY. Proceeding anyway..."
@@ -266,20 +277,20 @@ else
 fi
 
 # Helper: upload one image. By default this overwrites the remote tag with the
-# local build, because direct Docker image streaming has no registry digest check.
+# local build unless DEPLOY_SKIP_EXISTING_IMAGE_UPLOAD is true.
 ship_image() {
   local image="$1"
   local label="$2"
 
-  if [[ "${DEPLOY_SKIP_EXISTING_IMAGE_UPLOAD:-false}" == "true" ]]; then
+  if [[ "${DEPLOY_SKIP_EXISTING_IMAGE_UPLOAD:-true}" == "true" ]]; then
     if ssh "${SSH_OPTS[@]}" "${SERVER_USER}@${SERVER_HOST}" \
          "docker image inspect '${image}' > /dev/null 2>&1"; then
-      ok "${label} already on server — skipping upload"
+      ok "${label} already exists on server — skipping upload"
       return 0
     fi
   fi
 
-  info "Uploading ${label} (${image})…"
+  info "Uploading ${label} (${image}) via ${COMPRESS_CMD} over SSH…"
   docker save "${image}" \
     | ${COMPRESS_CMD} \
     | ${PROGRESS_PIPE} \
@@ -288,14 +299,9 @@ ship_image() {
   ok "${label} loaded on server"
 }
 
-# Upload forge (large) and web (small) in parallel so we don't wait twice.
-ship_image "${FORGE_IMAGE}" "forge image" &
-FORGE_PID=$!
-ship_image "${WEB_IMAGE}"   "web image"   &
-WEB_PID=$!
-
-wait "${FORGE_PID}" || err "forge image upload failed."
-wait "${WEB_PID}"   || err "web image upload failed."
+# Upload sequentially so progress display renders cleanly and network upload is dedicated
+ship_image "${WEB_IMAGE}"   "web image"
+ship_image "${FORGE_IMAGE}" "forge image"
 echo ""
 
 # ── Step 5: Remote deploy (compose up only — no build) ───────────────────────
