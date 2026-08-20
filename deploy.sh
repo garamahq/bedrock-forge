@@ -21,8 +21,8 @@
 LOCK_FILE="/tmp/bedrock_forge_deploy.lock"
 exec 200>"$LOCK_FILE"
 if ! flock -n 200; then
-  LOCK_PID=$(fuser "$LOCK_FILE" 2>/dev/null | tr -d ' ' || echo "unknown")
-  echo -e "\033[0;31m✖  Another deployment (PID ${LOCK_PID}) is already running on this machine.\033[0m" >&2
+  LOCK_PID=$(fuser "$LOCK_FILE" 2>/dev/null | xargs || echo "unknown")
+  echo -e "\033[0;31m✖  Another deployment (PID: ${LOCK_PID}) is currently running on this machine.\033[0m" >&2
   echo -e "\033[0;33mℹ  If this is an orphaned process, you can kill it with: kill -9 ${LOCK_PID}\033[0m" >&2
   exit 1
 fi

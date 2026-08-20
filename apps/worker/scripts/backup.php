@@ -43,9 +43,24 @@ if ($mycnf && file_exists($mycnf)) {
     if (!empty($section['database'])) $cliDbName = $section['database'];
 }
 
-if (!$docroot || !is_dir($docroot)) {
-    fwrite(STDERR, "ERROR: Invalid or missing --docroot\n");
-    exit(1);
+if (!$restore) {
+    if (!$docroot || !is_dir($docroot)) {
+        fwrite(STDERR, "ERROR: Invalid or missing --docroot (directory does not exist)\n");
+        exit(1);
+    }
+} else {
+    if (!$docroot || !is_string($docroot) || strlen(trim($docroot)) < 2 || $docroot[0] !== '/') {
+        fwrite(STDERR, "ERROR: Invalid or missing --docroot (must be an absolute path)\n");
+        exit(1);
+    }
+    $extractTo = dirname($docroot);
+    if (!is_dir($extractTo)) {
+        @mkdir($extractTo, 0755, true);
+    }
+    if (!is_dir($extractTo)) {
+        fwrite(STDERR, "ERROR: Parent directory {$extractTo} does not exist and could not be created\n");
+        exit(1);
+    }
 }
 
 if ($restore) {

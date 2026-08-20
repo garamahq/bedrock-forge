@@ -3,7 +3,7 @@ import { Logger } from "@nestjs/common";
 import { Job, Queue } from "bullmq";
 import { mkdir, rm, readFile, stat, statfs } from "fs/promises";
 import { StepTracker } from "../../services/step-tracker";
-import { join } from "path";
+import { join, dirname } from "path";
 import { PrismaService } from "../../prisma/prisma.service";
 import { RcloneService } from "../../services/rclone.service";
 import { SshKeyService } from "../../services/ssh-key.service";
@@ -651,7 +651,7 @@ export class BackupProcessor extends WorkerHost {
       // Proactively unlock any immutable attributes and grant write permissions using root SSH
       await executor
         .execute(
-          `chattr -R -i -a ${shellQuote(env.root_path)} 2>/dev/null || true; chmod -R u+w ${shellQuote(env.root_path)} 2>/dev/null || true; find ${shellQuote(env.root_path)} -type d -exec chmod 755 {} + 2>/dev/null || true; find ${shellQuote(env.root_path)} -type f -exec chmod 644 {} + 2>/dev/null || true`,
+          `mkdir -p ${shellQuote(dirname(env.root_path))} 2>/dev/null || true; chattr -R -i -a ${shellQuote(env.root_path)} 2>/dev/null || true; chmod -R u+w ${shellQuote(env.root_path)} 2>/dev/null || true; find ${shellQuote(env.root_path)} -type d -exec chmod 755 {} + 2>/dev/null || true; find ${shellQuote(env.root_path)} -type f -exec chmod 644 {} + 2>/dev/null || true`,
         )
         .catch(() => {});
 
