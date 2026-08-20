@@ -85,10 +85,17 @@ export async function fixCyberPanelOwnership(
   }
 
   await log(
-    `Fixing ownership: ${owner}:${owner} (recursive) then ${owner}:nogroup on docroot`,
+    `Fixing ownership & permissions: ${owner}:${owner} (recursive) then ${owner}:nogroup on docroot`,
     "info",
     root,
   );
+
+  // Step 0 — standard modes: 755 dirs, 644 files
+  await executor
+    .execute(
+      `find ${shellQuote(root)} -type d -exec chmod 755 {} + 2>/dev/null; find ${shellQuote(root)} -type f -exec chmod 644 {} + 2>/dev/null`,
+    )
+    .catch(() => {});
 
   // Step 1 — inner files: user:user (recursive)
   await executor
@@ -112,7 +119,7 @@ export async function fixCyberPanelOwnership(
       );
     });
 
-  // Step 3 — enforce correct mode on the docroot
+  // Step 3 — enforce correct mode on the docroot and secure configs
   await executor
     .execute(`chmod 750 ${shellQuote(root)}`)
     .catch(async (e: unknown) => {
@@ -123,8 +130,14 @@ export async function fixCyberPanelOwnership(
       );
     });
 
+  await executor
+    .execute(
+      `chmod 440 ${shellQuote(`${root}/wp-config.php`)} 2>/dev/null || true; chmod 440 ${shellQuote(`${root}/web/wp-config.php`)} 2>/dev/null || true; chmod 440 ${shellQuote(`${root}/.env`)} 2>/dev/null || true; chmod 440 ${shellQuote(`${root}/web/.env`)} 2>/dev/null || true;`,
+    )
+    .catch(() => {});
+
   await log(
-    `Ownership fixed: ${owner}:nogroup on docroot, ${owner}:${owner} on contents`,
+    `Ownership & permissions fixed: ${owner}:nogroup on docroot, ${owner}:${owner} on contents (755/644)`,
     "info",
   );
 }

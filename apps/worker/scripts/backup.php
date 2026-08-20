@@ -52,37 +52,16 @@ if ($restore) {
     }
 
     // ── Wipe the existing docroot before extracting ────────────────────────
-    // tar -xzf is additive: files present on disk but absent from the archive
-    // are left untouched, which causes stale plugins/themes to survive a
-    // restore, and can create duplicated directories (e.g. public_html/public_html/)
-    // when an older backup had a different path structure.
     // Deleting the docroot first guarantees the result is an exact mirror of
-    // the backup.  We only delete AFTER confirming the archive file exists
-    // (validated above), so a missing/corrupt archive never nukes the live site.
-    $excludeCmdStr = '';
+    // the backup. We only delete AFTER confirming the archive file exists.
     if (is_dir($docroot)) {
+        // Step 1: ensure all directories and files are writable by current user
+        exec('find ' . escapeshellarg($docroot) . ' -type d -exec chmod 755 {} + 2>/dev/null; find ' . escapeshellarg($docroot) . ' -type f -exec chmod 644 {} + 2>/dev/null; chmod -R u+w ' . escapeshellarg($docroot) . ' 2>/dev/null');
         $rmOut  = [];
         $rmCode = 0;
         exec('rm -rf ' . escapeshellarg($docroot) . ' 2>&1', $rmOut, $rmCode);
         if ($rmCode !== 0) {
-            fwrite(STDERR, "WARNING: could not clean docroot before restore (exit {$rmCode}): " . implode("\n", $rmOut) . "\n");
-            // Non-fatal: proceed with extraction; stale files may remain.
-            // Find all files that couldn't be deleted and exclude them from tar extraction
-            $parentDir = dirname($docroot);
-            $parentLength = strlen($parentDir) + 1;
-            try {
-                $di = new RecursiveDirectoryIterator($docroot, RecursiveDirectoryIterator::SKIP_DOTS);
-                $it = new RecursiveIteratorIterator($di, RecursiveIteratorIterator::CHILD_FIRST);
-                foreach ($it as $fileinfo) {
-                    if ($fileinfo->isFile()) {
-                        $filePath = $fileinfo->getPathname();
-                        $relativePath = substr($filePath, $parentLength);
-                        $excludeCmdStr .= ' --exclude=' . escapeshellarg($relativePath);
-                    }
-                }
-            } catch (Exception $e) {
-                // Ignore iterator failures
-            }
+            fwrite(STDERR, "WARNING: could not completely wipe docroot before restore (exit {$rmCode}) — will overwrite during extraction.\n");
         } else {
             fwrite(STDERR, "Cleaned docroot before restore: {$docroot}\n");
         }
@@ -93,14 +72,37 @@ if ($restore) {
     // so every file inside is stored as  basename/path/to/file.php
     // Extracting to dirname(docroot) restores files to the correct location.
     $extractTo = dirname($docroot);
-    $cmd = "tar -xzf " . escapeshellarg($file) . " -C " . escapeshellarg($extractTo) . $excludeCmdStr . " 2>&1";
+    // Flags explanation:
+    // --no-same-owner: do not try to chown to archived UID/GID (prevents exit 2 on non-root or differing server UIDs)
+    // --no-same-permissions: do not copy restrictive file modes from archive
+    // --touch: do not fail on timestamp updates (prevents utime: Operation not permitted)
+    // --overwrite: cleanly overwrite any existing files
+    // --warning=no-timestamp: suppress timestamp warnings
+    $tarFlags = '--no-same-owner --no-same-permissions --touch --overwrite --warning=no-timestamp';
+    $cmd = "tar -xzf " . escapeshellarg($file) . " -C " . escapeshellarg($extractTo) . " " . $tarFlags . " 2>&1";
     exec($cmd, $out, $code);
-    if ($code > 1) {
-        fwrite(STDERR, "ERROR: restore (files) failed (exit {$code}): " . implode("\n", $out) . "\n");
-        exit($code);
-    }
-    if ($code === 1) {
-        fwrite(STDERR, "WARNING: tar exited 1 during extract (harmless race) — continuing\n");
+    if ($code > 0) {
+        $nonFatal = true;
+        foreach ($out as $line) {
+            $line = trim($line);
+            if (empty($line)) continue;
+            if (stripos($line, 'Cannot utime') !== false ||
+                stripos($line, 'Cannot change ownership') !== false ||
+                stripos($line, 'Cannot change mode') !== false ||
+                stripos($line, 'time stamp') !== false ||
+                stripos($line, 'Exiting with failure status') !== false) {
+                continue;
+            }
+            $nonFatal = false;
+            break;
+        }
+
+        if ($nonFatal && is_dir($docroot)) {
+            fwrite(STDERR, "WARNING: tar exited {$code} with non-fatal attribute warnings — proceeding with restore: " . implode(" | ", array_slice($out, 0, 5)) . "\n");
+        } else {
+            fwrite(STDERR, "ERROR: restore (files) failed (exit {$code}): " . implode("\n", $out) . "\n");
+            exit($code);
+        }
     }
 
     // ── Fix file ownership (CyberPanel pattern) ────────────────────────────
@@ -122,12 +124,20 @@ if ($restore) {
         }
     }
     if ($ownerDetected) {
+        // Enforce 755 dirs, 644 files
+        exec('find ' . escapeshellarg($docroot) . ' -type d -exec chmod 755 {} + 2>/dev/null');
+        exec('find ' . escapeshellarg($docroot) . ' -type f -exec chmod 644 {} + 2>/dev/null');
         // Step 1: inner files → user:user (recursive)
         exec('chown -R ' . escapeshellarg($ownerDetected . ':' . $ownerDetected) . ' ' . escapeshellarg($docroot) . ' 2>&1');
         // Step 2: docroot folder itself → user:nogroup (non-recursive override)
         exec('chown ' . escapeshellarg($ownerDetected . ':nogroup') . ' ' . escapeshellarg($docroot) . ' 2>&1');
         // Step 3: enforce drwxr-x--- on the docroot
         exec('chmod 750 ' . escapeshellarg($docroot) . ' 2>&1');
+        // Secure sensitive config files
+        exec('chmod 440 ' . escapeshellarg($docroot . '/wp-config.php') . ' 2>/dev/null || true');
+        exec('chmod 440 ' . escapeshellarg($docroot . '/web/wp-config.php') . ' 2>/dev/null || true');
+        exec('chmod 440 ' . escapeshellarg($docroot . '/.env') . ' 2>/dev/null || true');
+        exec('chmod 440 ' . escapeshellarg($docroot . '/web/.env') . ' 2>/dev/null || true');
         fwrite(STDERR, "Fixed ownership: {$ownerDetected}:nogroup on {$docroot}, {$ownerDetected}:{$ownerDetected} on contents\n");
     } else {
         fwrite(STDERR, "WARNING: could not detect site owner — skipping ownership fix\n");

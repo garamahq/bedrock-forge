@@ -102,14 +102,29 @@ function clearCache(string $docroot, string $wpPath): void {
 }
 
 function fixPermissions(string $docroot): void {
-    $owner = posix_getpwuid(fileowner($docroot));
-    $ownerName = $owner ? $owner['name'] : 'www-data';
+    $parentForOwner = dirname($docroot);
+    exec('stat -c %U ' . escapeshellarg($parentForOwner) . ' 2>/dev/null', $parentOwnerOut, $parentOwnerCode);
+    $ownerDetected = ($parentOwnerCode === 0 && !empty($parentOwnerOut[0]) && trim($parentOwnerOut[0]) !== 'root')
+        ? trim($parentOwnerOut[0])
+        : null;
+
+    if (!$ownerDetected) {
+        exec('stat -c %U ' . escapeshellarg($docroot) . ' 2>/dev/null', $selfOwnerOut, $selfOwnerCode);
+        if ($selfOwnerCode === 0 && !empty($selfOwnerOut[0]) && trim($selfOwnerOut[0]) !== 'root') {
+            $ownerDetected = trim($selfOwnerOut[0]);
+        }
+    }
+
+    $ownerName = $ownerDetected ?: 'www-data';
 
     $cmds = [
-        "find " . escapeshellarg($docroot) . " -type d -exec chmod 755 {} +",
-        "find " . escapeshellarg($docroot) . " -type f -exec chmod 644 {} +",
+        "find " . escapeshellarg($docroot) . " -type d -exec chmod 755 {} + 2>/dev/null",
+        "find " . escapeshellarg($docroot) . " -type f -exec chmod 644 {} + 2>/dev/null",
+        "chmod 750 " . escapeshellarg($docroot) . " 2>/dev/null || true",
         "chmod 440 " . escapeshellarg($docroot) . "/wp-config.php 2>/dev/null || true",
+        "chmod 440 " . escapeshellarg($docroot) . "/web/wp-config.php 2>/dev/null || true",
         "chmod 440 " . escapeshellarg($docroot) . "/.env 2>/dev/null || true",
+        "chmod 440 " . escapeshellarg($docroot) . "/web/.env 2>/dev/null || true",
     ];
 
     $details = [];
@@ -118,12 +133,17 @@ function fixPermissions(string $docroot): void {
         $details[] = ($rc === 0 ? 'OK' : 'ERR') . ': ' . $cmd;
     }
 
-    // chown
-    $chown = "chown -R {$ownerName}:{$ownerName} " . escapeshellarg($docroot) . " 2>&1";
-    exec($chown, $chownOut, $chownRc);
-    $details[] = ($chownRc === 0 ? 'OK' : 'ERR(chown)') . ': ' . implode(' ', $chownOut);
+    // Step 1: inner files → user:user (recursive)
+    $chown1 = "chown -R {$ownerName}:{$ownerName} " . escapeshellarg($docroot) . " 2>&1";
+    exec($chown1, $chownOut1, $chownRc1);
+    $details[] = ($chownRc1 === 0 ? 'OK' : 'ERR(chown inner)') . ': ' . implode(' ', $chownOut1);
 
-    out(true, 'fix_permissions', "Permissions fixed for owner $ownerName", implode("\n", $details));
+    // Step 2: docroot itself → user:nogroup for LiteSpeed/OLS access
+    $chown2 = "chown {$ownerName}:nogroup " . escapeshellarg($docroot) . " 2>&1";
+    exec($chown2, $chownOut2, $chownRc2);
+    $details[] = ($chownRc2 === 0 ? 'OK' : 'ERR(chown docroot)') . ': ' . implode(' ', $chownOut2);
+
+    out(true, 'fix_permissions', "Permissions and ownership fixed for owner {$ownerName}", implode("\n", $details));
 }
 
 function togglePlugins(string $docroot, bool $enable): void {
