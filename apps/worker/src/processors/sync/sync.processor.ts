@@ -496,14 +496,33 @@ export class SyncProcessor extends WorkerHost {
         protectedPostTypesBackup?.uploadPaths ?? [],
       ),
     );
-    await job.updateProgress({ value: 85, step: "Files synced" });
+
+    // Re-detect WordPress layout on target after files are synced
+    const updatedTargetLayout = await this.layoutDetector.detectWpLayout(
+      targetExecutor,
+      targetEnv.root_path,
+      tracker,
+      "target (post-sync)",
+    );
+
+    // Guarantee target .env / wp-config.php is synchronized with target DB credentials and URLs
+    await this.syncDb.ensureTargetEnvironmentConfig(
+      targetExecutor,
+      targetEnv,
+      updatedTargetLayout,
+      targetCreds,
+      targetUrl,
+      tracker,
+    );
+
+    await job.updateProgress({ value: 85, step: "Files synced & config ensured" });
 
     // Replace hardcoded URLs inside content files
     if (sourceUrl && targetUrl && sourceUrl !== targetUrl) {
       await this.syncFiles.replaceUrlsInFiles(
         sourceUrl,
         targetUrl,
-        targetLayout.contentPath,
+        updatedTargetLayout.contentPath,
         targetExecutor,
         tracker,
         job,
@@ -515,7 +534,7 @@ export class SyncProcessor extends WorkerHost {
     await this.syncDb.flushWordPressCaches(
       targetExecutor,
       targetCreds,
-      targetLayout,
+      updatedTargetLayout,
       tracker,
       "Clone",
       urlsIdentical,
@@ -702,6 +721,14 @@ export class SyncProcessor extends WorkerHost {
         protectedUploadFileExcludes,
       );
 
+      // Re-detect WordPress layout on target after files are synced
+      const updatedTargetPushLayout = await this.layoutDetector.detectWpLayout(
+        targetExecutor,
+        targetEnv.root_path,
+        tracker,
+        "target (post-sync)",
+      );
+
       let filesSrcUrl: string | null = null;
       let filesTgtUrl: string | null = null;
       try {
@@ -719,6 +746,17 @@ export class SyncProcessor extends WorkerHost {
           "target (file-replace)",
           targetEnv.id,
         );
+
+        // Guarantee target .env / wp-config.php is synchronized with target DB credentials and URLs
+        await this.syncDb.ensureTargetEnvironmentConfig(
+          targetExecutor,
+          targetEnv,
+          updatedTargetPushLayout,
+          tgtCreds,
+          targetEnv.url ?? null,
+          tracker,
+        );
+
         filesSrcUrl = await this.syncDb.resolveWpUrl(
           sourceExecutor,
           srcCreds,
@@ -748,7 +786,7 @@ export class SyncProcessor extends WorkerHost {
         await this.syncFiles.replaceUrlsInFiles(
           filesSrcUrl,
           filesTgtUrl,
-          targetPushLayout.contentPath,
+          updatedTargetPushLayout.contentPath,
           targetExecutor,
           tracker,
           job,
@@ -758,6 +796,16 @@ export class SyncProcessor extends WorkerHost {
 
     // Flush all WordPress caches on target after any push operation
     try {
+      const pushFlushLayout =
+        scope === "files" || scope === "both"
+          ? await this.layoutDetector.detectWpLayout(
+              targetExecutor,
+              targetEnv.root_path,
+              tracker,
+              "target (cache-flush)",
+            )
+          : targetPushLayout;
+
       const pushFlushCreds = await this.syncDb.resolveCredentials(
         targetExecutor,
         targetEnv.root_path,
@@ -768,7 +816,7 @@ export class SyncProcessor extends WorkerHost {
       await this.syncDb.flushWordPressCaches(
         targetExecutor,
         pushFlushCreds,
-        targetPushLayout,
+        pushFlushLayout,
         tracker,
         "Push",
         scope === "files" || (scope === "both" && filesUrlsChanged === false),
@@ -1092,6 +1140,16 @@ export class SyncProcessor extends WorkerHost {
         pushSafeProtected,
       );
     }
+
+    // Guarantee target .env / wp-config.php is synchronized with target DB credentials
+    await this.syncDb.ensureTargetEnvironmentConfig(
+      targetExecutor,
+      targetEnv,
+      targetLayout,
+      targetCreds,
+      targetUrl,
+      tracker,
+    );
 
     return this.protectedCpt.buildProtectedUploadFileExcludes(
       targetEnv.root_path,

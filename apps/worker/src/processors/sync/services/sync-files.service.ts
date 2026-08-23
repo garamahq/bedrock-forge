@@ -22,8 +22,13 @@ export class SyncFilesService {
 
   private readonly RSYNC_EXCLUDES = [
     ".env",
+    ".env.*",
+    "web/.env",
+    "web/.env.*",
     "wp-config.php",
+    "web/wp-config.php",
     ".htaccess",
+    "web/.htaccess",
     "storage/",
     "node_modules/",
     // Builder and performance disk caches (regenerated cleanly on target)

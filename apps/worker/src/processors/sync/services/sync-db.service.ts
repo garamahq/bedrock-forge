@@ -2,6 +2,7 @@ import { Injectable, Logger } from "@nestjs/common";
 import { Job } from "bullmq";
 import { mkdir, rm, writeFile, stat } from "fs/promises";
 import { join } from "path";
+import { randomBytes } from "node:crypto";
 import { PrismaService } from "../../../prisma/prisma.service";
 import { RcloneService } from "../../../services/rclone.service";
 import { EncryptionService } from "../../../encryption/encryption.service";
@@ -1152,4 +1153,262 @@ export class SyncDbService {
       });
     }
   }
+
+  /**
+   * Ensure target environment configuration (.env for Bedrock, wp-config.php for Standard WP)
+   * is present, valid, and synchronized with target database credentials, salts, and site URLs.
+   */
+  async ensureTargetEnvironmentConfig(
+    executor: Executor,
+    targetEnv: {
+      id: bigint;
+      root_path: string;
+      url?: string | null;
+      type?: string | null;
+    },
+    targetLayout: WpLayout,
+    targetCreds: Creds,
+    targetUrl: string | null,
+    tracker: StepTracker,
+    tablePrefix = "wp_",
+  ): Promise<void> {
+    const rootPath = targetEnv.root_path.replace(/\/+$/, "");
+
+    // Check if target is Bedrock (via layout detector or presence of Bedrock markers)
+    let isBedrock = targetLayout.isBedrock;
+    if (!isBedrock) {
+      const bedrockMarkerCheck = await executor.execute(
+        `test -f ${shellQuote(`${rootPath}/config/application.php`)} || test -f ${shellQuote(`${rootPath}/web/wp-config.php`)} && echo yes || echo no`,
+      );
+      if (bedrockMarkerCheck.stdout.trim() === "yes") {
+        isBedrock = true;
+      }
+    }
+
+    if (isBedrock) {
+      await this.ensureTargetBedrockEnv(
+        executor,
+        rootPath,
+        targetEnv,
+        targetCreds,
+        targetUrl,
+        tracker,
+        tablePrefix,
+      );
+    } else {
+      await this.ensureTargetStandardWpConfig(
+        executor,
+        rootPath,
+        targetEnv,
+        targetCreds,
+        targetUrl,
+        tracker,
+        tablePrefix,
+      );
+    }
+  }
+
+  private async ensureTargetBedrockEnv(
+    executor: Executor,
+    rootPath: string,
+    targetEnv: { url?: string | null; type?: string | null },
+    targetCreds: Creds,
+    targetUrl: string | null,
+    tracker: StepTracker,
+    tablePrefix: string,
+  ): Promise<void> {
+    const envPath = `${rootPath}/.env`;
+    const checkResult = await executor.execute(
+      `test -f ${shellQuote(envPath)} && echo exists || echo missing`,
+    );
+    const envExists = checkResult.stdout.trim() === "exists";
+
+    const salt = () => randomBytes(48).toString("base64url").slice(0, 64);
+    const escapeSingleQuote = (val: string) => val.replace(/'/g, "\\'");
+    const effectiveUrl = targetUrl || targetEnv.url || "";
+    const wpEnv = targetEnv.type || "production";
+
+    if (!envExists) {
+      // Create fresh .env with full credentials, URLs, and newly generated secure salts
+      const lines = [
+        `DB_NAME='${escapeSingleQuote(targetCreds.dbName)}'`,
+        `DB_USER='${escapeSingleQuote(targetCreds.dbUser)}'`,
+        `DB_PASSWORD='${escapeSingleQuote(targetCreds.dbPassword)}'`,
+        `DB_HOST='${escapeSingleQuote(targetCreds.dbHost)}'`,
+        `DB_PREFIX='${escapeSingleQuote(tablePrefix)}'`,
+        ``,
+        `WP_ENV='${escapeSingleQuote(wpEnv)}'`,
+        `WP_HOME='${escapeSingleQuote(effectiveUrl)}'`,
+        `WP_SITEURL=\${WP_HOME}/wp`,
+        ``,
+        `AUTH_KEY='${salt()}'`,
+        `SECURE_AUTH_KEY='${salt()}'`,
+        `LOGGED_IN_KEY='${salt()}'`,
+        `NONCE_KEY='${salt()}'`,
+        `AUTH_SALT='${salt()}'`,
+        `SECURE_AUTH_SALT='${salt()}'`,
+        `LOGGED_IN_SALT='${salt()}'`,
+        `NONCE_SALT='${salt()}'`,
+      ];
+
+      await executor.pushFile({
+        remotePath: envPath,
+        content: Buffer.from(lines.join("\n") + "\n", "utf8"),
+      });
+      await executor
+        .execute(`chmod 640 ${shellQuote(envPath)}`)
+        .catch(() => {});
+
+      await tracker.track({
+        step: "Created target .env file",
+        level: "info",
+        detail: `${envPath} (DB: ${targetCreds.dbName}, User: ${targetCreds.dbUser}, URL: ${effectiveUrl})`,
+      });
+    } else {
+      // Existing .env file — read, safely merge/update DB creds, URLs, prefix, and any missing salts
+      let existingContent = "";
+      try {
+        const buf = await executor.pullFile(envPath);
+        existingContent = buf.toString("utf8");
+      } catch (e) {
+        this.logger.warn(`Could not pull existing .env: ${e}`);
+      }
+
+      let updated = existingContent;
+
+      const setOrAppendEnvKey = (key: string, value: string) => {
+        const regex = new RegExp(`^(\\s*#?\\s*${key}\\s*=).*$`, "m");
+        const formatted = `${key}='${escapeSingleQuote(value)}'`;
+        if (regex.test(updated)) {
+          updated = updated.replace(regex, formatted);
+        } else {
+          updated = updated.trimEnd() + `\n${formatted}\n`;
+        }
+      };
+
+      setOrAppendEnvKey("DB_NAME", targetCreds.dbName);
+      setOrAppendEnvKey("DB_USER", targetCreds.dbUser);
+      setOrAppendEnvKey("DB_PASSWORD", targetCreds.dbPassword);
+      setOrAppendEnvKey("DB_HOST", targetCreds.dbHost);
+      if (tablePrefix) {
+        setOrAppendEnvKey("DB_PREFIX", tablePrefix);
+      }
+      if (effectiveUrl) {
+        setOrAppendEnvKey("WP_HOME", effectiveUrl);
+        setOrAppendEnvKey("WP_SITEURL", `${effectiveUrl}/wp`);
+      }
+      if (wpEnv) {
+        setOrAppendEnvKey("WP_ENV", wpEnv);
+      }
+
+      // Ensure all 8 standard salts exist
+      const saltKeys = [
+        "AUTH_KEY",
+        "SECURE_AUTH_KEY",
+        "LOGGED_IN_KEY",
+        "NONCE_KEY",
+        "AUTH_SALT",
+        "SECURE_AUTH_SALT",
+        "LOGGED_IN_SALT",
+        "NONCE_SALT",
+      ];
+      for (const sk of saltKeys) {
+        const regex = new RegExp(`^\\s*${sk}\\s*=`, "m");
+        if (!regex.test(updated)) {
+          setOrAppendEnvKey(sk, salt());
+        }
+      }
+
+      // Unlock and write back
+      await executor
+        .execute(`chmod u+w ${shellQuote(envPath)} 2>/dev/null || true`)
+        .catch(() => {});
+      await executor.pushFile({
+        remotePath: envPath,
+        content: Buffer.from(updated.trim() + "\n", "utf8"),
+      });
+      await executor
+        .execute(`chmod 640 ${shellQuote(envPath)}`)
+        .catch(() => {});
+
+      await tracker.track({
+        step: "Updated target .env with target database credentials and site URL",
+        level: "info",
+        detail: `${envPath} (DB: ${targetCreds.dbName}, User: ${targetCreds.dbUser})`,
+      });
+    }
+  }
+
+  private async ensureTargetStandardWpConfig(
+    executor: Executor,
+    rootPath: string,
+    targetEnv: { url?: string | null },
+    targetCreds: Creds,
+    targetUrl: string | null,
+    tracker: StepTracker,
+    tablePrefix: string,
+  ): Promise<void> {
+    const wpConfigPath = `${rootPath}/wp-config.php`;
+    const checkResult = await executor.execute(
+      `test -f ${shellQuote(wpConfigPath)} && echo exists || echo missing`,
+    );
+    const configExists = checkResult.stdout.trim() === "exists";
+    const escapeSingleQuote = (val: string) => val.replace(/'/g, "\\'");
+
+    if (configExists) {
+      let content = "";
+      try {
+        const buf = await executor.pullFile(wpConfigPath);
+        content = buf.toString("utf8");
+      } catch (e) {
+        this.logger.warn(`Could not pull wp-config.php: ${e}`);
+        return;
+      }
+
+      let updated = content;
+      const updateDefine = (key: string, value: string) => {
+        const regex = new RegExp(
+          `define\\s*\\(\\s*['"]${key}['"]\\s*,\\s*['"][^'"]*['"]\\s*\\);?`,
+          "g",
+        );
+        const replacement = `define('${key}', '${escapeSingleQuote(value)}');`;
+        if (regex.test(updated)) {
+          updated = updated.replace(regex, replacement);
+        }
+      };
+
+      updateDefine("DB_NAME", targetCreds.dbName);
+      updateDefine("DB_USER", targetCreds.dbUser);
+      updateDefine("DB_PASSWORD", targetCreds.dbPassword);
+      updateDefine("DB_HOST", targetCreds.dbHost);
+
+      if (tablePrefix) {
+        const prefixRegex = /\$table_prefix\s*=\s*['"][^'"]*['"];?/;
+        if (prefixRegex.test(updated)) {
+          updated = updated.replace(
+            prefixRegex,
+            `$table_prefix = '${escapeSingleQuote(tablePrefix)}';`,
+          );
+        }
+      }
+
+      await executor
+        .execute(`chmod u+w ${shellQuote(wpConfigPath)} 2>/dev/null || true`)
+        .catch(() => {});
+      await executor.pushFile({
+        remotePath: wpConfigPath,
+        content: Buffer.from(updated, "utf8"),
+      });
+      await executor
+        .execute(`chmod 640 ${shellQuote(wpConfigPath)}`)
+        .catch(() => {});
+
+      await tracker.track({
+        step: "Updated target wp-config.php with target database credentials",
+        level: "info",
+        detail: `${wpConfigPath} (DB: ${targetCreds.dbName}, User: ${targetCreds.dbUser})`,
+      });
+    }
+  }
 }
+

@@ -204,8 +204,11 @@ function fetchUsersViaPdo(PDO $pdo, string $dbName, string $tablePrefix): array 
         $prefixStmt = $pdo->prepare($prefixQuery);
         $prefixStmt->execute(['dbName' => $dbName]);
         $prefixRow = $prefixStmt->fetch();
-        if ($prefixRow && !empty($prefixRow['prefix'])) {
-            $tablePrefix = $prefixRow['prefix'];
+        if ($prefixRow) {
+            $prefixRow = array_change_key_case($prefixRow, CASE_LOWER);
+            if (!empty($prefixRow['prefix'])) {
+                $tablePrefix = $prefixRow['prefix'];
+            }
         }
     } catch (Exception $e) {
         // Fallback to parsed table prefix
@@ -216,26 +219,41 @@ function fetchUsersViaPdo(PDO $pdo, string $dbName, string $tablePrefix): array 
     $capsKey = $tablePrefix . 'capabilities';
 
     $stmt = $pdo->prepare(
-        "SELECT u.ID, u.user_login, u.user_email, u.display_name, u.user_registered,
+        "SELECT u.ID AS id, u.user_login, u.user_email, u.display_name, u.user_registered,
                 m.meta_value AS capabilities
          FROM `{$usersTable}` u
-         LEFT JOIN `{$metaTable}` m ON m.user_id = u.ID AND m.meta_key = :capsKey
-         ORDER BY u.ID"
+         LEFT JOIN `{$metaTable}` m ON m.user_id = u.ID AND (m.meta_key = :capsKey OR m.meta_key LIKE '%capabilities')
+         ORDER BY u.ID ASC"
     );
     $stmt->execute(['capsKey' => $capsKey]);
     $rows = $stmt->fetchAll();
 
     $users = [];
-    foreach ($rows as $row) {
+    $seenIds = [];
+    foreach ($rows as $rawRow) {
+        if (!is_array($rawRow)) continue;
+        $row = array_change_key_case($rawRow, CASE_LOWER);
+        $id = (int)($row['id'] ?? 0);
+        if ($id <= 0 || isset($seenIds[$id])) {
+            continue;
+        }
+        $seenIds[$id] = true;
+
+        $login = (string)($row['user_login'] ?? '');
+        $email = (string)($row['user_email'] ?? '');
+        $display = (string)($row['display_name'] ?? '');
+        $reg = (string)($row['user_registered'] ?? '');
+
         $caps = @unserialize((string)($row['capabilities'] ?? ''));
         $roles = (is_array($caps)) ? array_keys(array_filter($caps)) : [];
+
         $users[] = [
-            'id' => (int)$row['ID'],
-            'user_login' => (string)$row['user_login'],
-            'user_email' => (string)$row['user_email'],
-            'display_name' => (string)($row['display_name'] ?: $row['user_login']),
-            'user_registered' => (string)$row['user_registered'],
-            'roles' => $roles,
+            'id' => $id,
+            'user_login' => $login,
+            'user_email' => $email,
+            'display_name' => $display !== '' ? $display : $login,
+            'user_registered' => $reg,
+            'roles' => array_values($roles),
         ];
     }
     return $users;
@@ -254,7 +272,7 @@ function fetchUsersViaMysqlCli(string $dbHost, string $dbUser, string $dbPass, s
     $metaTable = $tablePrefix . 'usermeta';
     $capsKey = $tablePrefix . 'capabilities';
 
-    $querySql = "SELECT CONCAT(u.ID, '\t', u.user_login, '\t', COALESCE(u.user_email, ''), '\t', COALESCE(u.display_name, ''), '\t', COALESCE(u.user_registered, ''), '\t', COALESCE(m.meta_value, '')) FROM `{$usersTable}` u LEFT JOIN `{$metaTable}` m ON m.user_id = u.ID AND m.meta_key = '{$capsKey}' ORDER BY u.ID;";
+    $querySql = "SELECT u.ID, COALESCE(u.user_login, ''), COALESCE(u.user_email, ''), COALESCE(u.display_name, ''), COALESCE(u.user_registered, ''), TO_BASE64(COALESCE(m.meta_value, '')) FROM `{$usersTable}` u LEFT JOIN `{$metaTable}` m ON m.user_id = u.ID AND (m.meta_key = '{$capsKey}' OR m.meta_key LIKE '%capabilities') ORDER BY u.ID ASC;";
 
     $res = tryMysqlCliQuery($dbHost, $dbUser, $dbPass, $dbName, $querySql, $errorOut);
     if ($res === false) {
@@ -262,16 +280,23 @@ function fetchUsersViaMysqlCli(string $dbHost, string $dbUser, string $dbPass, s
     }
 
     $users = [];
+    $seenIds = [];
     foreach ($res as $line) {
         $line = trim($line);
         if ($line === '') continue;
         $cols = explode("\t", $line);
         $id = (int)($cols[0] ?? 0);
+        if ($id <= 0 || isset($seenIds[$id])) {
+            continue;
+        }
+        $seenIds[$id] = true;
+
         $login = (string)($cols[1] ?? '');
         $email = (string)($cols[2] ?? '');
-        $display = (string)($cols[3] ?? $login);
+        $display = (string)($cols[3] ?? '');
         $reg = (string)($cols[4] ?? '');
-        $capsRaw = (string)($cols[5] ?? '');
+        $b64Caps = (string)($cols[5] ?? '');
+        $capsRaw = $b64Caps !== '' ? (string)@base64_decode($b64Caps) : '';
 
         $caps = @unserialize($capsRaw);
         $roles = (is_array($caps)) ? array_keys(array_filter($caps)) : [];
@@ -280,9 +305,9 @@ function fetchUsersViaMysqlCli(string $dbHost, string $dbUser, string $dbPass, s
             'id' => $id,
             'user_login' => $login,
             'user_email' => $email,
-            'display_name' => $display ?: $login,
+            'display_name' => $display !== '' ? $display : $login,
             'user_registered' => $reg,
-            'roles' => $roles,
+            'roles' => array_values($roles),
         ];
     }
     return $users;
@@ -318,16 +343,31 @@ function tryWpCli(string $docroot): ?array {
                 $decoded = json_decode(trim($wpCliOut), true);
                 if (is_array($decoded)) {
                     $users = [];
-                    foreach ($decoded as $row) {
-                        $roles = is_array($row['roles'] ?? null)
-                            ? $row['roles']
-                            : array_filter(array_map('trim', explode(',', (string)($row['roles'] ?? ''))));
+                    $seenIds = [];
+                    foreach ($decoded as $rawRow) {
+                        if (!is_array($rawRow)) continue;
+                        $row = array_change_key_case($rawRow, CASE_LOWER);
+                        $id = (int)($row['id'] ?? 0);
+                        if ($id <= 0 || isset($seenIds[$id])) {
+                            continue;
+                        }
+                        $seenIds[$id] = true;
+
+                        $rolesRaw = $row['roles'] ?? null;
+                        $roles = is_array($rolesRaw)
+                            ? $rolesRaw
+                            : array_filter(array_map('trim', explode(',', (string)($rolesRaw ?? ''))));
+                        $login = (string)($row['user_login'] ?? '');
+                        $email = (string)($row['user_email'] ?? '');
+                        $display = (string)($row['display_name'] ?? '');
+                        $reg = (string)($row['user_registered'] ?? '');
+
                         $users[] = [
-                            'id' => (int)($row['ID'] ?? $row['id'] ?? 0),
-                            'user_login' => (string)($row['user_login'] ?? ''),
-                            'user_email' => (string)($row['user_email'] ?? ''),
-                            'display_name' => (string)($row['display_name'] ?? $row['user_login'] ?? ''),
-                            'user_registered' => (string)($row['user_registered'] ?? ''),
+                            'id' => $id,
+                            'user_login' => $login,
+                            'user_email' => $email,
+                            'display_name' => $display !== '' ? $display : $login,
+                            'user_registered' => $reg,
                             'roles' => array_values($roles),
                         ];
                     }

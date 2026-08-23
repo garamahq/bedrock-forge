@@ -114,6 +114,7 @@ describe("SyncProcessor", () => {
             runUrlSearchReplace: jest.fn(),
             validateUrlReplacement: jest.fn(),
             flushWordPressCaches: jest.fn(),
+            ensureTargetEnvironmentConfig: jest.fn(),
           },
         },
         {

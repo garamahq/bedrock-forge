@@ -638,4 +638,179 @@ describe("SyncDbService", () => {
       expect(pushedSql).not.toContain("UPDATE `wp_posts`");
     });
   });
+
+  describe("ensureTargetEnvironmentConfig()", () => {
+    const creds = {
+      dbHost: "localhost",
+      dbUser: "ct_target",
+      dbPassword: "target_password_123",
+      dbName: "ct_target_db",
+    };
+
+    it("creates fresh .env with target credentials, prefix, URLs, and 8 salts when missing on Bedrock", async () => {
+      let pushedEnvContent = "";
+      const executor = {
+        execute: jest.fn().mockImplementation((cmd: string) => {
+          if (cmd.includes("test -f") && cmd.includes(".env")) {
+            return Promise.resolve({ code: 1, stdout: "missing", stderr: "" });
+          }
+          return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+        }),
+        pushFile: jest.fn().mockImplementation(({ remotePath, content }) => {
+          if (remotePath.endsWith(".env")) {
+            pushedEnvContent = Buffer.isBuffer(content)
+              ? content.toString("utf8")
+              : String(content);
+          }
+          return Promise.resolve(undefined);
+        }),
+      };
+      const tracker = makeTracker();
+
+      await service.ensureTargetEnvironmentConfig(
+        executor as any,
+        {
+          id: BigInt(1),
+          root_path: "/home/target/public_html",
+          url: "https://target.com",
+          type: "production",
+        },
+        {
+          corePath: "/home/target/public_html/web/wp",
+          contentPath: "/home/target/public_html/web/app",
+          isBedrock: true,
+        },
+        creds,
+        "https://target.com",
+        tracker,
+        "wp_custom_",
+      );
+
+      expect(pushedEnvContent).toContain("DB_NAME='ct_target_db'");
+      expect(pushedEnvContent).toContain("DB_USER='ct_target'");
+      expect(pushedEnvContent).toContain("DB_PASSWORD='target_password_123'");
+      expect(pushedEnvContent).toContain("DB_HOST='localhost'");
+      expect(pushedEnvContent).toContain("DB_PREFIX='wp_custom_'");
+      expect(pushedEnvContent).toContain("WP_ENV='production'");
+      expect(pushedEnvContent).toContain("WP_HOME='https://target.com'");
+      expect(pushedEnvContent).toContain("WP_SITEURL=${WP_HOME}/wp");
+      expect(pushedEnvContent).toContain("AUTH_KEY=");
+      expect(pushedEnvContent).toContain("SECURE_AUTH_KEY=");
+      expect(pushedEnvContent).toContain("NONCE_SALT=");
+    });
+
+    it("updates existing .env with target DB credentials while preserving custom keys and existing salts", async () => {
+      const existingEnv = [
+        "DB_NAME='old_db'",
+        "DB_USER='old_user'",
+        "DB_PASSWORD='old_pass'",
+        "DB_HOST='127.0.0.1'",
+        "CUSTOM_API_KEY='secret_12345'",
+        "AUTH_KEY='existing_auth_salt_val'",
+      ].join("\n");
+
+      let pushedEnvContent = "";
+      const executor = {
+        execute: jest.fn().mockImplementation((cmd: string) => {
+          if (cmd.includes("test -f") && cmd.includes(".env")) {
+            return Promise.resolve({ code: 0, stdout: "exists", stderr: "" });
+          }
+          return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+        }),
+        pullFile: jest.fn().mockResolvedValue(Buffer.from(existingEnv)),
+        pushFile: jest.fn().mockImplementation(({ remotePath, content }) => {
+          if (remotePath.endsWith(".env")) {
+            pushedEnvContent = Buffer.isBuffer(content)
+              ? content.toString("utf8")
+              : String(content);
+          }
+          return Promise.resolve(undefined);
+        }),
+      };
+      const tracker = makeTracker();
+
+      await service.ensureTargetEnvironmentConfig(
+        executor as any,
+        {
+          id: BigInt(2),
+          root_path: "/home/target/public_html",
+          url: "https://target.com",
+          type: "production",
+        },
+        {
+          corePath: "/home/target/public_html/web/wp",
+          contentPath: "/home/target/public_html/web/app",
+          isBedrock: true,
+        },
+        creds,
+        "https://target.com",
+        tracker,
+      );
+
+      expect(pushedEnvContent).toContain("DB_NAME='ct_target_db'");
+      expect(pushedEnvContent).toContain("DB_USER='ct_target'");
+      expect(pushedEnvContent).toContain("DB_PASSWORD='target_password_123'");
+      expect(pushedEnvContent).toContain("CUSTOM_API_KEY='secret_12345'");
+      expect(pushedEnvContent).toContain("AUTH_KEY='existing_auth_salt_val'");
+      expect(pushedEnvContent).toContain("SECURE_AUTH_KEY=");
+    });
+
+    it("updates existing wp-config.php with target credentials on Standard WP", async () => {
+      const existingConfig = [
+        "<?php",
+        "define('DB_NAME', 'old_db');",
+        "define('DB_USER', 'old_user');",
+        "define('DB_PASSWORD', 'old_pass');",
+        "define('DB_HOST', 'localhost');",
+        "$table_prefix = 'wp_';",
+      ].join("\n");
+
+      let pushedConfig = "";
+      const executor = {
+        execute: jest.fn().mockImplementation((cmd: string) => {
+          if (cmd.includes("test -f") && cmd.includes("wp-config.php")) {
+            return Promise.resolve({ code: 0, stdout: "exists", stderr: "" });
+          }
+          if (cmd.includes("application.php")) {
+            return Promise.resolve({ code: 1, stdout: "no", stderr: "" });
+          }
+          return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+        }),
+        pullFile: jest.fn().mockResolvedValue(Buffer.from(existingConfig)),
+        pushFile: jest.fn().mockImplementation(({ remotePath, content }) => {
+          pushedConfig = Buffer.isBuffer(content)
+            ? content.toString("utf8")
+            : String(content);
+          return Promise.resolve(undefined);
+        }),
+      };
+      const tracker = makeTracker();
+
+      await service.ensureTargetEnvironmentConfig(
+        executor as any,
+        {
+          id: BigInt(3),
+          root_path: "/var/www/html",
+          url: "https://standard-target.com",
+          type: "production",
+        },
+        {
+          corePath: "/var/www/html",
+          contentPath: "/var/www/html/wp-content",
+          isBedrock: false,
+        },
+        creds,
+        "https://standard-target.com",
+        tracker,
+        "wp_new_",
+      );
+
+      expect(pushedConfig).toContain("define('DB_NAME', 'ct_target_db');");
+      expect(pushedConfig).toContain("define('DB_USER', 'ct_target');");
+      expect(pushedConfig).toContain(
+        "define('DB_PASSWORD', 'target_password_123');",
+      );
+      expect(pushedConfig).toContain("$table_prefix = 'wp_new_';");
+    });
+  });
 });
