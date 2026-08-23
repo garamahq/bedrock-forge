@@ -428,6 +428,9 @@ async function restrictInternalPorts(
   }
 
   // 3. Memcached: Ensure -l 127.0.0.1
+  //    Patches both conf files *and* any systemd unit/drop-in that hardcodes
+  //    a public -l address (common on CyberPanel/Debian where ExecStart in the
+  //    base unit or a drop-in overrides the config file).
   const memcachedCheck = await run(
     exec,
     `MEM_FIXED=0; ` +
@@ -448,9 +451,20 @@ async function restrictInternalPorts(
     `if [ -f /etc/default/memcached ]; then ` +
     `  sed -i -E 's/^\\s*LISTEN=.*/LISTEN="127.0.0.1"/' /etc/default/memcached; MEM_FIXED=1; ` +
     `fi; ` +
+    `for unit_file in $(find /etc/systemd/system/memcached* /lib/systemd/system/memcached.service /usr/lib/systemd/system/memcached.service 2>/dev/null); do ` +
+    `  [ -f "$unit_file" ] || continue; ` +
+    `  if grep -qE 'ExecStart=.*-l\\s*(0\\.0\\.0\\.0|::)' "$unit_file" 2>/dev/null; then ` +
+    `    sed -i -E 's/(ExecStart=.*)-l\\s*(0\\.0\\.0\\.0|::)(\\s|$)/\\1-l 127.0.0.1\\3/' "$unit_file"; MEM_FIXED=1; ` +
+    `  elif grep -qE 'ExecStart=' "$unit_file" && ! grep -qE 'ExecStart=.*-l\\s' "$unit_file" 2>/dev/null; then ` +
+    `    sed -i -E 's|(ExecStart=\\S+)|\\1 -l 127.0.0.1|' "$unit_file"; MEM_FIXED=1; ` +
+    `  fi; ` +
+    `done; ` +
     `if [ "$MEM_FIXED" -eq 1 ]; then echo "fixed_memcached"; fi`,
   );
   if (memcachedCheck.stdout.includes("fixed_memcached")) {
+    // daemon-reload is required when systemd unit files were modified,
+    // otherwise the old ExecStart (with the public bind) is still cached.
+    await run(exec, "systemctl daemon-reload 2>/dev/null || true");
     await run(
       exec,
       "systemctl restart memcached 2>/dev/null || service memcached restart 2>/dev/null || true",

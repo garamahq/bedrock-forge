@@ -300,9 +300,16 @@ export class SecurityHardeningService {
         "INSTALL_AUDITD",
         "BLOCK_BRUTE_FORCE_IPS",
         "CLEAN_HTACCESS_REDIRECTS",
+        "RESTRICT_INTERNAL_PORTS",
       ]);
       if ([...serverActions].some((a) => actionSet.has(a))) {
         scanTypes.add("SERVER_HARDENING");
+      }
+
+      // Port restriction also needs a fresh NETWORK_AUDIT to clear stale
+      // Redis / MySQL / Memcached "listening on 0.0.0.0" findings.
+      if (actionSet.has("RESTRICT_INTERNAL_PORTS")) {
+        scanTypes.add("NETWORK_AUDIT");
       }
 
       // Malware / file cleanup → malware scan
