@@ -20,27 +20,45 @@ export function parseWpVersion(stdout: string): string {
   const cleaned = stdout.replace(/\x1b\[[0-9;]*m/g, "").trim();
   const versionLines = cleaned.split("\n").map((l) => l.trim()).filter(Boolean);
 
+  // WordPress major versions have been 4–10 historically. Any "version" outside
+  // this range is almost certainly a PHP, MySQL, or other tool version number
+  // that leaked through WP-CLI output (common on CyberPanel with lsphp).
+  const isPlausibleWpVersion = (v: string): boolean => {
+    const major = parseInt(v.split(".")[0], 10);
+    return major >= 4 && major <= 10;
+  };
+
   // Check for $wp_version = '6.5.2'; format from version.php
   for (const line of versionLines) {
     const phpMatch = line.match(/\$wp_version\s*=\s*['"]([^'"]+)['"]/);
-    if (phpMatch) return phpMatch[1].trim();
+    if (phpMatch && isPlausibleWpVersion(phpMatch[1])) return phpMatch[1].trim();
   }
 
   // Check for clean semantic version lines
   const matched = versionLines.find((l) =>
-    /^\d+\.\d+(?:\.\d+)?(?:-[a-zA-Z0-9.-]+)?$/.test(l),
+    /^\d+\.\d+(?:\.\d+)?(?:-[a-zA-Z0-9.-]+)?$/.test(l) && isPlausibleWpVersion(l),
   );
   if (matched) return matched;
 
-  // Search inside lines for semver pattern (e.g. "WordPress 6.4.3 is installed" or composer version)
+  // Search inside lines for semver pattern but guard against PHP/MySQL/tool versions
   for (const line of versionLines) {
     const semverMatch = line.match(/\b(\d+\.\d+(?:\.\d+)?(?:-[a-zA-Z0-9.-]+)?)\b/);
-    if (semverMatch && !line.toLowerCase().includes("php") && !line.toLowerCase().includes("mysql")) {
+    if (
+      semverMatch &&
+      isPlausibleWpVersion(semverMatch[1]) &&
+      !line.toLowerCase().includes("php") &&
+      !line.toLowerCase().includes("mysql") &&
+      !line.toLowerCase().includes("mariadb") &&
+      !line.toLowerCase().includes("lsphp") &&
+      !line.toLowerCase().includes("error") &&
+      !line.toLowerCase().includes("warning") &&
+      !line.toLowerCase().includes("notice")
+    ) {
       return semverMatch[1];
     }
   }
 
-  return versionLines[versionLines.length - 1] || "";
+  return "";
 }
 
 export function parseWpUpdatesJson(stdout: string): unknown[] {
@@ -469,7 +487,8 @@ export class WpActionsProcessor extends WorkerHost {
           `${rootPath}/wp-includes/version.php`,
         ];
         for (const vf of versionFiles) {
-          const catRes = await executor.execute(`grep -s "wp_version = " ${shellQuote(vf)} || true`);
+          // Use exact PHP variable assignment pattern to avoid matching partial lines
+          const catRes = await executor.execute(`grep -sE '^\\$wp_version\\s*=' ${shellQuote(vf)} || true`);
           if (catRes.stdout.trim()) {
             currentVersion = parseWpVersion(catRes.stdout);
             if (currentVersion) break;

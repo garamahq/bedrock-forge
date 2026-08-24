@@ -38,9 +38,11 @@ PHP Deprecated: Automatically populating $HTTP_RAW_POST_DATA
     expect(parseWpVersion(stdout)).toBe("6.4.3");
   });
 
-  it("falls back to the last line if no line matches standard version pattern", () => {
-    expect(parseWpVersion("some random stdout line")).toBe("some random stdout line");
+  it("returns empty string if no line matches plausible version pattern", () => {
+    expect(parseWpVersion("some random stdout line")).toBe("");
     expect(parseWpVersion("")).toBe("");
+    expect(parseWpVersion("PHP 8.3.6 (cli) (built: Apr 15 2024)")).toBe("");
+    expect(parseWpVersion("mysql  Ver 8.0.36 for Linux on x86_64")).toBe("");
   });
 });
 

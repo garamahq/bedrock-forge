@@ -301,6 +301,7 @@ export class SecurityHardeningService {
         "BLOCK_BRUTE_FORCE_IPS",
         "CLEAN_HTACCESS_REDIRECTS",
         "RESTRICT_INTERNAL_PORTS",
+        "CLEAN_SUSPICIOUS_CRONS",
       ]);
       if ([...serverActions].some((a) => actionSet.has(a))) {
         scanTypes.add("SERVER_HARDENING");
@@ -310,6 +311,11 @@ export class SecurityHardeningService {
       // Redis / MySQL / Memcached "listening on 0.0.0.0" findings.
       if (actionSet.has("RESTRICT_INTERNAL_PORTS")) {
         scanTypes.add("NETWORK_AUDIT");
+      }
+
+      // Exposed backups moved → re-run filesystem audit to clear the finding
+      if (actionSet.has("REMOVE_EXPOSED_BACKUPS")) {
+        scanTypes.add("FILESYSTEM_AUDIT");
       }
 
       // Malware / file cleanup → malware scan

@@ -27,8 +27,9 @@ type Executor = {
 async function run(
   exec: Executor,
   cmd: string,
+  opts?: { timeout?: number },
 ): Promise<{ stdout: string; stderr: string; code: number }> {
-  return exec.execute(cmd);
+  return exec.execute(cmd, opts);
 }
 
 /** Validates that a string is a well-formed IPv4 address (defense-in-depth). */
@@ -1081,6 +1082,107 @@ async function quarantineMalwareEnv(
   return ok(action, `Successfully quarantined ${quarantined} file(s) to /var/lib/bedrock-forge/quarantine`);
 }
 
+// ─── CLEAN_SUSPICIOUS_CRONS ───────────────────────────────────────────────────
+
+async function cleanSuspiciousCrons(
+  exec: Executor,
+): Promise<HardeningActionResult> {
+  const action = "CLEAN_SUSPICIOUS_CRONS";
+
+  // Remove cron lines matching the same patterns that runCronAudit flags as
+  // suspicious (curl/wget piped to shell, /tmp/ execution, base64 -d, /dev/shm/).
+  // Operates on all user crontabs and system cron files. Backs up modified files
+  // before editing and logs every removed entry so admins can audit the changes.
+  const result = await run(
+    exec,
+    `REMOVED_COUNT=0; REMOVED_FROM=""; ` +
+    `PATTERN='(curl |wget ).*(\\|[[:space:]]*(sh|bash))|/tmp/[a-zA-Z]|/dev/shm/|base64[[:space:]]+-d'; ` +
+    // Clean user crontabs
+    `for user in $(cut -d: -f1 /etc/passwd 2>/dev/null); do ` +
+    `  CRON=$(crontab -u "$user" -l 2>/dev/null) || continue; ` +
+    `  CLEAN=$(echo "$CRON" | grep -vE "$PATTERN" 2>/dev/null); ` +
+    `  if [ "$CRON" != "$CLEAN" ]; then ` +
+    `    echo "$CLEAN" | crontab -u "$user" - 2>/dev/null; ` +
+    `    REMOVED_COUNT=$((REMOVED_COUNT+1)); REMOVED_FROM="$REMOVED_FROM crontab:$user"; ` +
+    `  fi; ` +
+    `done; ` +
+    // Clean system cron files
+    `for cron_file in /etc/crontab $(find /etc/cron.d -maxdepth 1 -type f 2>/dev/null); do ` +
+    `  [ -f "$cron_file" ] || continue; ` +
+    `  CRON=$(cat "$cron_file" 2>/dev/null); ` +
+    `  CLEAN=$(echo "$CRON" | grep -vE "$PATTERN" 2>/dev/null); ` +
+    `  if [ "$CRON" != "$CLEAN" ]; then ` +
+    `    cp -p "$cron_file" "\${cron_file}.forge-bak.$(date +%s)" 2>/dev/null; ` +
+    `    printf '%s\n' "$CLEAN" > "$cron_file"; ` +
+    `    REMOVED_COUNT=$((REMOVED_COUNT+1)); REMOVED_FROM="$REMOVED_FROM $cron_file"; ` +
+    `  fi; ` +
+    `done; ` +
+    `if [ "$REMOVED_COUNT" -gt 0 ]; then echo "removed:$REMOVED_FROM"; fi`,
+    { timeout: 60000 },
+  );
+
+  if (result.stdout.includes("removed:")) {
+    const from = result.stdout
+      .split("\n")
+      .find((l) => l.startsWith("removed:"))
+      ?.replace("removed:", "")
+      .trim() ?? "";
+    return ok(action, `Suspicious cron entries removed from:${from}`);
+  }
+
+  return skip(action, "No suspicious cron entries found");
+}
+
+// ─── REMOVE_EXPOSED_BACKUPS ───────────────────────────────────────────────────
+
+async function removeExposedBackups(
+  exec: Executor,
+): Promise<HardeningActionResult> {
+  const action = "REMOVE_EXPOSED_BACKUPS";
+  const quarantineDir = "/var/lib/bedrock-forge/backups-quarantine";
+
+  // Move (not delete) SQL dumps from web-accessible paths to quarantine so the
+  // admin can retrieve them if needed. Works for both Bedrock (web/) and
+  // standard WordPress (public_html/) layouts.
+  const result = await run(
+    exec,
+    `mkdir -p ${quarantineDir} && ` +
+    `MOVED=0; MOVED_FILES=""; TS=$(date +%Y%m%d_%H%M%S); ` +
+    `FILES=$( ` +
+    `  find /home/*/public_html/web /home/*/public_html/app /var/www/*/web /var/www/*/public ` +
+    `    -maxdepth 3 -type f \\( -name "*.sql" -o -name "*.sql.gz" -o -name "*.sql.tar" -o -name "*.sql.zip" \\) ` +
+    `    2>/dev/null; ` +
+    `  for d in /home/*/public_html; do ` +
+    `    [ -d "$d" ] && [ ! -d "$d/web" ] && ` +
+    `    find "$d" -maxdepth 2 -type f ` +
+    `      \\( -name "*.sql" -o -name "*.sql.gz" -o -name "*.sql.tar" -o -name "*.sql.zip" \\) ` +
+    `      2>/dev/null; ` +
+    `  done ` +
+    `); ` +
+    `if [ -z "$FILES" ]; then echo "no_files"; exit 0; fi; ` +
+    `while IFS= read -r f; do ` +
+    `  [ -f "$f" ] || continue; ` +
+    `  DEST="${quarantineDir}/$(basename "$f").$TS"; ` +
+    `  mv "$f" "$DEST" 2>/dev/null && MOVED=$((MOVED+1)) && MOVED_FILES="$MOVED_FILES,$f"; ` +
+    `done <<< "$FILES"; ` +
+    `if [ "$MOVED" -gt 0 ]; then echo "moved:$MOVED:$MOVED_FILES"; else echo "no_files"; fi`,
+    { timeout: 30000 },
+  );
+
+  if (result.stdout.includes("moved:")) {
+    const line = result.stdout.split("\n").find((l) => l.startsWith("moved:")) ?? "";
+    const parts = line.split(":");
+    const count = parts[1] ?? "?";
+    const files = (parts[2] ?? "").replace(/^,/, "");
+    return ok(
+      action,
+      `Moved ${count} SQL dump file(s) to ${quarantineDir}: ${files}`,
+    );
+  }
+
+  return skip(action, "No exposed SQL backup files found in web-accessible directories");
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 export async function applyServerHardeningActions(
@@ -1129,6 +1231,12 @@ export async function applyServerHardeningActions(
           break;
         case "QUARANTINE_MALWARE":
           results.push(await quarantineMalwareServer(exec, malwareFiles));
+          break;
+        case "CLEAN_SUSPICIOUS_CRONS":
+          results.push(await cleanSuspiciousCrons(exec));
+          break;
+        case "REMOVE_EXPOSED_BACKUPS":
+          results.push(await removeExposedBackups(exec));
           break;
         default: {
           const _exhaustive: never = action;

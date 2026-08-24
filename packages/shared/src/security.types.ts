@@ -208,7 +208,9 @@ export type ServerHardeningActionType =
   | "DELETE_PHP_UPLOAD_FILES" // rm PHP files in /home/*/public_html/*/uploads/
   | "CLEAN_HTACCESS_REDIRECTS" // remove hardcoded external-domain RewriteRule lines
   | "RESTRICT_INTERNAL_PORTS" // bind Redis, MySQL, Memcached to localhost & deny in firewall
-  | "QUARANTINE_MALWARE"; // move detected malware files to a quarantine directory
+  | "QUARANTINE_MALWARE" // move detected malware files to a quarantine directory
+  | "CLEAN_SUSPICIOUS_CRONS" // remove cron entries matching malware persistence patterns
+  | "REMOVE_EXPOSED_BACKUPS"; // move SQL dumps out of web-accessible directories
 
 /**
  * Environment-scoped (WordPress) hardening actions.
@@ -239,6 +241,8 @@ export const SERVER_HARDENING_ACTION_TYPES: ServerHardeningActionType[] = [
   "RESTRICT_INTERNAL_PORTS",
   "CLEAN_HTACCESS_REDIRECTS",
   "QUARANTINE_MALWARE",
+  "CLEAN_SUSPICIOUS_CRONS",
+  "REMOVE_EXPOSED_BACKUPS",
 ];
 
 export const ENVIRONMENT_HARDENING_ACTION_TYPES: EnvironmentHardeningActionType[] =
