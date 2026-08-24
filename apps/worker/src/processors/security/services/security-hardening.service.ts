@@ -391,9 +391,29 @@ export class SecurityHardeningService {
       if (ackKeys.has(ackKey)) {
         continue;
       }
-      if (f.category === "MALWARE" || f.category === "SUSPICIOUS_FILES" || f.category === "REVERSE_SHELL") {
-        const meta = f.metadata || {};
-        const matched = meta.matched_files || meta.files || meta.infected_files || [];
+      const meta = f.metadata || {};
+      if (meta.is_malware === false) {
+        continue;
+      }
+      const titleLower = (f.title || "").toLowerCase();
+      if (titleLower.includes("modified in the last") || titleLower.includes("recently modified")) {
+        continue;
+      }
+      // Only quarantine files from critical/high malware findings, reverse shells, or known webshell categories
+      const isMalwareCategory =
+        f.category === "MALWARE" ||
+        f.category === "REVERSE_SHELL" ||
+        (f.category === "SUSPICIOUS_FILES" && (
+          f.severity === "critical" ||
+          titleLower.includes("uploads") ||
+          titleLower.includes("tmp") ||
+          titleLower.includes("hidden") ||
+          titleLower.includes("backdoor") ||
+          titleLower.includes("pattern")
+        ));
+
+      if (isMalwareCategory) {
+        const matched = meta.matched_files || meta.infected_files || (f.severity === "critical" ? meta.files : []);
         if (Array.isArray(matched)) {
           for (const file of matched) {
             if (typeof file === "string") files.add(file);
@@ -439,9 +459,28 @@ export class SecurityHardeningService {
         if (ackKeys.has(ackKey)) {
           continue;
         }
-        if (f.category === "MALWARE" || f.category === "SUSPICIOUS_FILES" || f.category === "REVERSE_SHELL") {
-          const meta = f.metadata || {};
-          const matched = meta.matched_files || meta.files || meta.infected_files || [];
+        const meta = f.metadata || {};
+        if (meta.is_malware === false) {
+          continue;
+        }
+        const titleLower = (f.title || "").toLowerCase();
+        if (titleLower.includes("modified in the last") || titleLower.includes("recently modified")) {
+          continue;
+        }
+        const isMalwareCategory =
+          f.category === "MALWARE" ||
+          f.category === "REVERSE_SHELL" ||
+          (f.category === "SUSPICIOUS_FILES" && (
+            f.severity === "critical" ||
+            titleLower.includes("uploads") ||
+            titleLower.includes("tmp") ||
+            titleLower.includes("hidden") ||
+            titleLower.includes("backdoor") ||
+            titleLower.includes("pattern")
+          ));
+
+        if (isMalwareCategory) {
+          const matched = meta.matched_files || meta.infected_files || (f.severity === "critical" ? meta.files : []);
           if (Array.isArray(matched)) {
             for (const file of matched) {
               if (typeof file === "string") files.add(file);

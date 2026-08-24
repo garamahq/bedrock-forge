@@ -978,6 +978,39 @@ async function updateAllPlugins(
 
 // ─── Malware Quarantine ──────────────────────────────────────────────────────
 
+/**
+ * Checks if a file path is a critical WordPress core or vendor file.
+ * Core files must never be removed by automated quarantine to prevent breaking site availability.
+ */
+function isProtectedWordPressPath(file: string): boolean {
+  const normalized = file.replace(/\\/g, "/");
+  const criticalFiles = [
+    "index.php",
+    "wp-config.php",
+    "wp-settings.php",
+    "wp-load.php",
+    "wp-blog-header.php",
+    "wp-cron.php",
+    "wp-login.php",
+    "wp-comments-post.php",
+    "wp-activate.php",
+    "wp-signup.php",
+  ];
+  const base = normalized.split("/").pop() || "";
+  if (criticalFiles.includes(base)) return true;
+
+  // Protect all files in wp-includes, wp-admin, and vendor directories
+  if (
+    normalized.includes("/wp-includes/") ||
+    normalized.includes("/wp-admin/") ||
+    normalized.includes("/vendor/")
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 async function quarantineMalwareServer(
   exec: Executor,
   malwareFiles: string[],
@@ -988,13 +1021,19 @@ async function quarantineMalwareServer(
     return skip(action, "No malware or suspicious files identified in previous scans to quarantine");
   }
 
+  // Filter out protected core files to prevent site disruption
+  const actionableFiles = malwareFiles.filter((f) => !isProtectedWordPressPath(f));
+  if (actionableFiles.length === 0) {
+    return skip(action, "Identified files are protected WordPress core or system files; core files cannot be moved to quarantine (use Core Reinstall if integrity failed)");
+  }
+
   // Ensure quarantine directory exists
   await run(exec, "mkdir -p /var/lib/bedrock-forge/quarantine");
 
   let quarantined = 0;
   const failedFiles: string[] = [];
 
-  for (const file of malwareFiles) {
+  for (const file of actionableFiles) {
     const qFile = `'${file.replace(/'/g, "'\\''")}'`;
     // Check if file exists
     const check = await run(exec, `test -f ${qFile}`);
@@ -1036,11 +1075,13 @@ async function quarantineMalwareEnv(
   const normalizedRoot = webRoot.endsWith('/') ? webRoot : webRoot + '/';
 
   const envMalwareFiles = malwareFiles.filter(
-    (file) => file.startsWith(normalizedRoot) || file.startsWith(webRoot)
+    (file) =>
+      (file.startsWith(normalizedRoot) || file.startsWith(webRoot)) &&
+      !isProtectedWordPressPath(file)
   );
 
   if (envMalwareFiles.length === 0) {
-    return skip(action, "No malware or suspicious files identified in previous scans within this environment to quarantine");
+    return skip(action, "No actionable malware files identified in this environment to quarantine (protected core files are excluded)");
   }
 
   // Ensure quarantine directory exists

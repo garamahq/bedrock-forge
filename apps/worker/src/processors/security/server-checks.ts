@@ -768,7 +768,7 @@ export async function runMalwareScan(
 
   for (const { name, pattern } of suspiciousPatterns) {
     const { stdout: matches } = await exec.execute(
-      `grep -rl --exclude-dir=vendor --exclude-dir=wp-includes -E "${pattern}" /home/*/public_html --include="*.php" 2>/dev/null | head -20 || true`,
+      `grep -rl --exclude-dir=vendor --exclude-dir=wp-includes --exclude-dir=wp-admin -E "${pattern}" /home/*/public_html --include="*.php" 2>/dev/null | head -20 || true`,
       { timeout: 60000 },
     );
     const files = matches
@@ -819,7 +819,7 @@ export async function runMalwareScan(
     );
   }
 
-  // 5. Recently modified PHP files (last 7 days)
+  // 5. Recently modified PHP files (last 7 days) — informational audit metric (not actionable malware)
   const { stdout: recentFiles } = await exec.execute(
     `find /home/*/public_html -name "*.php" -newer /home -mtime -7 -type f 2>/dev/null | head -50 || true`,
     { timeout: 30000 },
@@ -832,13 +832,13 @@ export async function runMalwareScan(
     findings.push(
       makeFinding(
         "medium",
-        "SUSPICIOUS_FILES",
+        "SYSTEM_HEALTH",
         `${recentPhp.length} PHP files modified in the last 7 days`,
-        "A large number of recently modified PHP files may indicate a compromise or mass injection.",
+        "A large number of recently modified PHP files may indicate recent updates, deployments, or potential unauthorized changes.",
         {
           remediation:
-            "Diff these files against a clean backup to detect injected code.",
-          metadata: { files: recentPhp.slice(0, 30) },
+            "Review recently modified files against version control or recent deployment logs.",
+          metadata: { recent_files: recentPhp.slice(0, 30), count: recentPhp.length, is_malware: false },
         },
       ),
     );
@@ -846,10 +846,10 @@ export async function runMalwareScan(
     findings.push(
       makeFinding(
         "info",
-        "SUSPICIOUS_FILES",
+        "SYSTEM_HEALTH",
         `${recentPhp.length} PHP file(s) modified in the last 7 days`,
         "Review recently modified files to confirm changes are expected.",
-        { metadata: { files: recentPhp } },
+        { metadata: { recent_files: recentPhp, count: recentPhp.length, is_malware: false } },
       ),
     );
   }
