@@ -375,22 +375,32 @@ async function restrictInternalPorts(
   const action = "RESTRICT_INTERNAL_PORTS";
   const changes: string[] = [];
 
-  // 1. Redis: Ensure bind 127.0.0.1 across all possible config paths
+  // 1. Redis: Ensure bind 127.0.0.1 across all possible config paths.
+  //    Also covers /usr/local/lsws/conf (CyberPanel/OpenLiteSpeed path) and
+  //    patches inline --bind arguments in systemd ExecStart lines, which
+  //    config-file edits cannot fix when the flag is baked into the unit.
   const redisCheck = await run(
     exec,
     `REDIS_FIXED=0; ` +
-    `for conf in $(find /etc/redis /etc -maxdepth 2 -name "*redis*.conf" -o -name "redis.conf" 2>/dev/null); do ` +
-    `  if [ -f "$conf" ]; then ` +
-    `    if grep -qE '^\\s*#?\\s*bind\\s+' "$conf"; then ` +
-    `      sed -i -E 's/^\\s*#?\\s*bind\\s+.*/bind 127.0.0.1/' "$conf"; REDIS_FIXED=1; ` +
-    `    else ` +
-    `      echo "bind 127.0.0.1" >> "$conf"; REDIS_FIXED=1; ` +
-    `    fi; ` +
+    `for conf in $(find /etc/redis /etc /usr/local/lsws/conf -maxdepth 3 -name "*redis*.conf" -o -name "redis.conf" 2>/dev/null); do ` +
+    `  [ -f "$conf" ] || continue; ` +
+    `  if grep -qE '^\\s*#?\\s*bind\\s+' "$conf"; then ` +
+    `    sed -i -E 's/^\\s*#?\\s*bind\\s+.*/bind 127.0.0.1/' "$conf"; REDIS_FIXED=1; ` +
+    `  else ` +
+    `    echo "bind 127.0.0.1" >> "$conf"; REDIS_FIXED=1; ` +
+    `  fi; ` +
+    `done; ` +
+    `for unit_file in $(find /etc/systemd/system/redis* /lib/systemd/system/redis-server.service /usr/lib/systemd/system/redis-server.service /lib/systemd/system/redis.service /usr/lib/systemd/system/redis.service 2>/dev/null); do ` +
+    `  [ -f "$unit_file" ] || continue; ` +
+    `  if grep -qE 'ExecStart=.*--bind\\s*(0\\.0\\.0\\.0|::)' "$unit_file" 2>/dev/null; then ` +
+    `    sed -i -E 's/(ExecStart=.*)--bind\\s*(0\\.0\\.0\\.0|::)(\\s|$)/\\1--bind 127.0.0.1\\3/' "$unit_file"; REDIS_FIXED=1; ` +
     `  fi; ` +
     `done; ` +
     `if [ "$REDIS_FIXED" -eq 1 ]; then echo "fixed_redis"; fi`,
   );
   if (redisCheck.stdout.includes("fixed_redis")) {
+    // daemon-reload required when systemd unit files were patched
+    await run(exec, "systemctl daemon-reload 2>/dev/null || true");
     await run(
       exec,
       "systemctl restart redis redis-server lsphp-redis 2>/dev/null || service redis restart 2>/dev/null || service redis-server restart 2>/dev/null || true",
@@ -472,7 +482,10 @@ async function restrictInternalPorts(
     changes.push("Bound Memcached (11211) to localhost (127.0.0.1)");
   }
 
-  // 4. Firewall defense-in-depth (deny 3306, 6379, 11211 in UFW / iptables)
+  // 4. Firewall defense-in-depth (deny 3306, 6379, 11211 in UFW / iptables).
+  //    This ALWAYS runs — even if the config-bind steps above were skipped or
+  //    silently reverted by CyberPanel.  UFW is the last-resort guarantee that
+  //    external traffic cannot reach these ports regardless of bind state.
   const ufwStatus = await run(exec, "ufw status 2>/dev/null || true");
   if (ufwStatus.stdout.includes("Status: active")) {
     await run(
@@ -481,7 +494,11 @@ async function restrictInternalPorts(
       "ufw deny proto tcp to any port 6379 comment 'Forge secure Redis' 2>/dev/null; " +
       "ufw deny proto tcp to any port 11211 comment 'Forge secure Memcached' 2>/dev/null || true",
     );
-    changes.push("Enforced UFW firewall rules blocking ports 3306, 6379, and 11211 from public interfaces");
+    // Only add to changes list if we haven't already noted a config-level fix,
+    // to avoid duplicating the UFW note when bind also succeeded.
+    if (!changes.some((c) => c.includes("UFW"))) {
+      changes.push("Enforced UFW firewall rules blocking ports 3306, 6379, and 11211 from public interfaces");
+    }
   } else {
     // Enforce via iptables if UFW is inactive
     await run(
@@ -490,11 +507,13 @@ async function restrictInternalPorts(
       "iptables -C INPUT -p tcp ! -i lo --dport 6379 -j DROP 2>/dev/null || iptables -I INPUT -p tcp ! -i lo --dport 6379 -j DROP 2>/dev/null; " +
       "iptables -C INPUT -p tcp ! -i lo --dport 11211 -j DROP 2>/dev/null || iptables -I INPUT -p tcp ! -i lo --dport 11211 -j DROP 2>/dev/null || true",
     );
-    changes.push("Enforced iptables firewall rules blocking ports 3306, 6379, and 11211 from public network interfaces");
+    if (!changes.some((c) => c.includes("iptables"))) {
+      changes.push("Enforced iptables firewall rules blocking ports 3306, 6379, and 11211 from public network interfaces");
+    }
   }
 
   if (changes.length === 0) {
-    return skip(action, "Internal database and cache services (MySQL, Redis, Memcached) are already restricted to localhost");
+    return skip(action, "Internal database and cache services (MySQL, Redis, Memcached) are already restricted to localhost and firewall rules are enforced");
   }
 
   return ok(action, changes.join("; "));

@@ -1318,17 +1318,53 @@ export async function runNetworkAudit(exec: Executor): Promise<SecurityFinding[]
   }
 
   if (exposedDbPorts.length > 0) {
+    // Cross-check UFW deny rules for each exposed port.
+    // When UFW is active and blocking a port, the external exposure risk is
+    // significantly lower — the process binds internally but external traffic
+    // is dropped at the firewall. Report as LOW instead of CRITICAL/HIGH to
+    // avoid alarm fatigue and reflect the actual threat level accurately.
+    const { stdout: ufwRaw } = await exec.execute(
+      `ufw status 2>/dev/null || true`,
+      { timeout: 8000 },
+    );
+    const ufwActive = ufwRaw.includes("Status: active");
+    const ufwBlockedPorts = new Set<number>();
+    if (ufwActive) {
+      for (const port of Object.keys(sensitivePorts).map(Number)) {
+        // UFW status shows rules like "3306  DENY IN  Anywhere" or "3306/tcp  DENY  Anywhere"
+        if (new RegExp(`\\b${port}\\b.*DENY`, "i").test(ufwRaw)) {
+          ufwBlockedPorts.add(port);
+        }
+      }
+    }
+
     for (const db of exposedDbPorts) {
+      const isUfwBlocked = ufwBlockedPorts.has(db.port);
+      const baseSeverity = db.port === 6379 || db.port === 11211 ? "critical" : "high";
+      const severity = isUfwBlocked ? "low" : baseSeverity;
+
+      const title = isUfwBlocked
+        ? `${db.name} (port ${db.port}) bound to 0.0.0.0 but blocked by UFW firewall`
+        : `${db.name} (port ${db.port}) listening on public network interface (0.0.0.0)`;
+
+      const description = isUfwBlocked
+        ? `${db.name} is bound to all interfaces internally (0.0.0.0) but UFW has an active DENY rule blocking external access on port ${db.port}. The service is not reachable from the internet. For full hardening, update the service configuration to bind only to 127.0.0.1.`
+        : `The database/cache service is bound to all network interfaces. Unless strictly protected by a firewall, it may be exposed to unauthorized network access or brute-force attacks.`;
+
+      const remediation = isUfwBlocked
+        ? `UFW is protecting this port. For complete hardening, also update the ${db.name} bind-address to 127.0.0.1 in its configuration file to restrict the bind at the process level.`
+        : `Configure ${db.name} bind-address to 127.0.0.1 in its configuration file, or restrict access via UFW firewall.`;
+
       findings.push(
         makeFinding(
-          db.port === 6379 || db.port === 11211 ? "critical" : "high",
+          severity,
           "LISTENING_PORTS",
-          `${db.name} (port ${db.port}) listening on public network interface (0.0.0.0)`,
-          `The database/cache service is bound to all network interfaces. Unless strictly protected by a firewall, it may be exposed to unauthorized network access or brute-force attacks.`,
+          title,
+          description,
           {
-            remediation: `Configure ${db.name} bind-address to 127.0.0.1 in its configuration file, or restrict access via UFW firewall.`,
+            remediation,
             resource: `Port ${db.port}`,
-            metadata: { service: db.name, port: db.port, bind: db.addr },
+            metadata: { service: db.name, port: db.port, bind: db.addr, ufw_blocked: isUfwBlocked },
           },
         ),
       );
