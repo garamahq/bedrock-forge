@@ -489,9 +489,9 @@ export class RemoteOpsService {
   }
 
   private getSafeRoots(env: { root_path: string; backup_path: string | null }) {
-    const downloadsPath = `${
-      env.backup_path || `${env.root_path}/.forge-backups`
-    }/downloads`;
+    const backupsPath = env.backup_path || `${env.root_path}/.forge-backups`;
+    const downloadsPath = `${backupsPath}/downloads`;
+    const snapshotsPath = `${backupsPath}/db-snapshots`;
     return [
       { key: "root", label: "Site Root", path: env.root_path },
       {
@@ -500,10 +500,9 @@ export class RemoteOpsService {
         path: `${env.root_path}/web/app/uploads`,
       },
       { key: "logs", label: "Logs", path: `${env.root_path}/storage/logs` },
+      { key: "snapshots", label: "DB Snapshots", path: snapshotsPath },
       { key: "downloads", label: "Downloads", path: downloadsPath },
-      ...(env.backup_path
-        ? [{ key: "backups", label: "Backups", path: env.backup_path }]
-        : []),
+      { key: "backups", label: "Backups", path: backupsPath },
     ];
   }
 

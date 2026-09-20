@@ -18,6 +18,8 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { api } from "@/lib/api-client";
+import { cn } from "@/lib/utils";
+import { formatBytes } from "./backups/utils";
 import { toast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -259,16 +261,23 @@ export function RemoteOpsTab({
   });
 
   const downloadFileMutation = useMutation({
-    mutationFn: () =>
-      api.get<{
+    mutationFn: (targetPath?: string) => {
+      const p = targetPath || openFilePath;
+      if (!p) throw new Error("No file selected for download");
+      return api.get<{
         filename: string;
         content: string;
         encoding: "base64";
       }>(
-        `/environments/${selectedEnvId}/files/download?path=${encodeURIComponent(openFilePath ?? "")}`,
-      ),
+        `/environments/${selectedEnvId}/files/download?path=${encodeURIComponent(p)}`,
+      );
+    },
     onSuccess: (data) => {
-      const bytes = Uint8Array.from(atob(data.content), (c) => c.charCodeAt(0));
+      const binary = atob(data.content);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
       const blob = new Blob([bytes]);
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
@@ -631,9 +640,12 @@ export function RemoteOpsTab({
                 </div>
               ) : filesQuery.data?.items?.length ? (
                 filesQuery.data.items.map((item) => (
-                  <button
+                  <div
                     key={item.path}
-                    className="flex w-full items-center justify-between gap-3 border-b px-3 py-2 text-left text-sm hover:bg-muted last:border-b-0"
+                    className={cn(
+                      "group flex w-full items-center justify-between gap-2 border-b px-3 py-2 text-left text-sm hover:bg-muted/70 transition-colors last:border-b-0 cursor-pointer",
+                      openFilePath === item.path && "bg-muted font-medium",
+                    )}
                     onClick={() =>
                       item.type === "directory"
                         ? setFilePath(item.path)
@@ -642,16 +654,32 @@ export function RemoteOpsTab({
                   >
                     <span className="flex min-w-0 items-center gap-2">
                       {item.type === "directory" ? (
-                        <Folder className="h-4 w-4 text-amber-600" />
+                        <Folder className="h-4 w-4 text-amber-600 shrink-0" />
                       ) : (
-                        <File className="h-4 w-4 text-muted-foreground" />
+                        <File className="h-4 w-4 text-muted-foreground shrink-0" />
                       )}
                       <span className="truncate">{item.name}</span>
                     </span>
-                    <span className="text-xs text-muted-foreground">
-                      {item.type === "file" ? `${item.size}b` : ""}
-                    </span>
-                  </button>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="text-xs text-muted-foreground">
+                        {item.type === "file" ? formatBytes(item.size) : ""}
+                      </span>
+                      {item.type === "file" && (
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-background"
+                          title={`Download ${item.name}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            downloadFileMutation.mutate(item.path);
+                          }}
+                        >
+                          <Download className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
+                        </Button>
+                      )}
+                    </div>
+                  </div>
                 ))
               ) : (
                 <div className="p-3 text-sm text-muted-foreground">
@@ -670,14 +698,14 @@ export function RemoteOpsTab({
                   size="sm"
                   variant={tailing ? "secondary" : "outline"}
                   onClick={() => setTailing((v) => !v)}
-                  disabled={!openFilePath}
+                  disabled={!openFilePath || fileReadQuery.isError}
                 >
                   Tail
                 </Button>
                 <Button
                   size="sm"
                   variant="outline"
-                  onClick={() => downloadFileMutation.mutate()}
+                  onClick={() => downloadFileMutation.mutate(openFilePath ?? undefined)}
                   disabled={!openFilePath || downloadFileMutation.isPending}
                 >
                   <Download className="h-4 w-4 mr-1.5" />
@@ -689,6 +717,7 @@ export function RemoteOpsTab({
                   disabled={
                     !openFilePath ||
                     !fileReadQuery.data ||
+                    fileReadQuery.isError ||
                     saveFileMutation.isPending
                   }
                 >
@@ -701,17 +730,44 @@ export function RemoteOpsTab({
                 </Button>
               </div>
             </div>
-            <Textarea
-              className="min-h-[440px] font-mono text-xs"
-              value={
-                tailing
-                  ? (tailQuery.data?.lines.join("\n") ?? fileContent)
-                  : fileContent
-              }
-              onChange={(event) => setFileContent(event.target.value)}
-              spellCheck={false}
-              disabled={!openFilePath || fileReadQuery.isLoading || tailing}
-            />
+            {fileReadQuery.isError ? (
+              <div className="min-h-[440px] flex flex-col items-center justify-center rounded-md border border-dashed p-8 text-center space-y-4 bg-muted/20">
+                <div className="p-3 bg-muted rounded-full">
+                  <Archive className="h-8 w-8 text-muted-foreground" />
+                </div>
+                <div className="space-y-1">
+                  <p className="font-semibold text-sm">Binary or Large File</p>
+                  <p className="text-xs text-muted-foreground max-w-sm">
+                    {fileReadQuery.error instanceof Error
+                      ? fileReadQuery.error.message
+                      : "This file cannot be displayed in the text editor. You can download it directly."}
+                  </p>
+                </div>
+                <Button
+                  onClick={() => downloadFileMutation.mutate(openFilePath ?? undefined)}
+                  disabled={downloadFileMutation.isPending}
+                >
+                  {downloadFileMutation.isPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin mr-1.5" />
+                  ) : (
+                    <Download className="h-4 w-4 mr-1.5" />
+                  )}
+                  Download File
+                </Button>
+              </div>
+            ) : (
+              <Textarea
+                className="min-h-[440px] font-mono text-xs"
+                value={
+                  tailing
+                    ? (tailQuery.data?.lines.join("\n") ?? fileContent)
+                    : fileContent
+                }
+                onChange={(event) => setFileContent(event.target.value)}
+                spellCheck={false}
+                disabled={!openFilePath || fileReadQuery.isLoading || tailing}
+              />
+            )}
             {tailing && tailQuery.data?.fetched_at && (
               <p className="text-xs text-muted-foreground">
                 Last tail refresh:{" "}
