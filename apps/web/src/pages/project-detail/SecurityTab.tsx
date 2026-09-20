@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Shield,
@@ -17,6 +18,7 @@ import {
   Terminal,
   AlertTriangle,
   Settings,
+  ExternalLink,
 } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { toast } from "@/hooks/use-toast";
@@ -86,9 +88,24 @@ export function SecurityTab({
   environments: Environment[];
 }) {
   const qc = useQueryClient();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const envParam = searchParams.get("env");
+  const initialEnvId =
+    envParam && environments.some((e) => e.id === Number(envParam))
+      ? Number(envParam)
+      : (environments[0]?.id ?? null);
+
   const [selectedEnvId, setSelectedEnvId] = useState<number | null>(
-    environments.length > 0 ? environments[0].id : null,
+    initialEnvId,
   );
+
+  // Keep in sync with URL search params
+  useEffect(() => {
+    const envId = Number(searchParams.get("env"));
+    if (envId && environments.some((e) => e.id === envId)) {
+      setSelectedEnvId(envId);
+    }
+  }, [searchParams, environments]);
 
   // Selected hardening actions to apply
   const [selectedHardening, setSelectedHardening] = useState<string[]>(
@@ -313,6 +330,64 @@ export function SecurityTab({
     },
   });
 
+  // 9. Secure Guard Mutations
+  const [secureGuardPreset, setSecureGuardPreset] = useState<
+    "beginner" | "balanced" | "maximum" | "custom"
+  >("balanced");
+
+  const installSecureGuardMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedEnvId) throw new Error("No environment selected");
+      return api.post(
+        `/projects/${projectId}/environments/${selectedEnvId}/secure-guard/install`,
+        { preset: secureGuardPreset, deployWatchdog: true },
+      );
+    },
+    onSuccess: (data: any) => {
+      toast({
+        title: "Secure Guard Installation Queued",
+        description: `Installation job #${data.jobId} is in progress.`,
+      });
+      qc.invalidateQueries({
+        queryKey: ["environment-findings", selectedEnvId],
+      });
+      qc.invalidateQueries({ queryKey: ["security-scans"] });
+    },
+    onError: (err: any) => {
+      toast({
+        title: "Installation Failed",
+        description: err.response?.data?.message || err.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  const deployWatchdogMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedEnvId) throw new Error("No environment selected");
+      return api.post(
+        `/projects/${projectId}/environments/${selectedEnvId}/secure-guard/watchdog`,
+        {},
+      );
+    },
+    onSuccess: (data: any) => {
+      toast({
+        title: "Watchdog MU-Plugin Queued",
+        description: `Deployment job #${data.jobId} is in progress.`,
+      });
+      qc.invalidateQueries({
+        queryKey: ["environment-findings", selectedEnvId],
+      });
+    },
+    onError: (err: any) => {
+      toast({
+        title: "Watchdog Deployment Failed",
+        description: err.response?.data?.message || err.message,
+        variant: "destructive",
+      });
+    },
+  });
+
   const toggleHardening = (id: string) => {
     setSelectedHardening((prev) =>
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
@@ -445,9 +520,15 @@ export function SecurityTab({
           <Select
             value={selectedEnvId ? String(selectedEnvId) : ""}
             onValueChange={(v) => {
-              setSelectedEnvId(Number(v));
+              const id = Number(v);
+              setSelectedEnvId(id);
               setHardenExecId(null);
               setHardenDone(false);
+              setSearchParams((prev) => {
+                const next = new URLSearchParams(prev);
+                next.set("env", String(id));
+                return next;
+              });
             }}
           >
             <SelectTrigger className="w-64 bg-background">
@@ -584,39 +665,119 @@ export function SecurityTab({
             </CardContent>
           </Card>
 
-          {/* Educational plugin comparison card */}
-          <Card className="border-border/50 bg-gradient-to-br from-background to-muted/20">
+          {/* Secure Guard Official Plugin Card */}
+          <Card className="border-border/50 bg-gradient-to-br from-background to-muted/20 flex flex-col justify-between">
             <CardHeader className="pb-2">
-              <CardTitle className="text-xs font-bold uppercase tracking-widest text-muted-foreground flex items-center gap-1.5">
-                <Info className="h-3.5 w-3.5 text-primary" />
-                Plugin vs. Server Shield
-              </CardTitle>
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-xs font-bold uppercase tracking-widest text-primary flex items-center gap-1.5">
+                  <ShieldCheck className="h-4 w-4" />
+                  Secure Guard Integration
+                </CardTitle>
+                <a
+                  href="https://github.com/garamahq/wp-secure-guard"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-[11px] text-muted-foreground hover:text-foreground flex items-center gap-1"
+                >
+                  garamahq/wp-secure-guard
+                  <ExternalLink className="h-3 w-3" />
+                </a>
+              </div>
+              <CardDescription className="text-xs">
+                Official default security plugin for Bedrock Forge environments
+              </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3 pt-1 text-xs">
-              <p className="text-muted-foreground leading-relaxed">
-                WordPress security plugins like{" "}
-                <strong className="text-foreground">wp-secure-guard</strong> are
-                effective at the PHP application layer, but they cannot defend
-                your environment if a hacker accesses files directly.
-              </p>
-              <div className="border-t pt-2 space-y-1.5">
-                <p className="font-semibold text-foreground flex items-center gap-1">
-                  <Check className="h-3 w-3 text-success" />
-                  Block direct PHP execution in uploads
-                </p>
-                <p className="font-semibold text-foreground flex items-center gap-1">
-                  <Check className="h-3 w-3 text-success" />
-                  Prevent direct reading of .env secrets
-                </p>
-                <p className="font-semibold text-foreground flex items-center gap-1">
-                  <Check className="h-3 w-3 text-success" />
-                  Enforce HTTP security headers at Nginx
-                </p>
+              <div className="rounded-lg bg-muted/40 p-3 border border-border/40 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Plugin Status:</span>
+                  {findingsRes?.data.some(
+                    (f: FindingRow) =>
+                      f.category === "SECURE_GUARD" &&
+                      f.title.toLowerCase().includes("not active"),
+                  ) ? (
+                    <Badge variant="warning" className="text-[10px]">
+                      Not Active
+                    </Badge>
+                  ) : (
+                    <Badge variant="success" className="text-[10px]">
+                      Active & Protected
+                    </Badge>
+                  )}
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Watchdog MU-Plugin:</span>
+                  {findingsRes?.data.some(
+                    (f: FindingRow) =>
+                      f.category === "SECURE_GUARD" &&
+                      f.title.toLowerCase().includes("watchdog"),
+                  ) ? (
+                    <Badge variant="secondary" className="text-[10px]">
+                      Not Deployed
+                    </Badge>
+                  ) : (
+                    <Badge variant="success" className="text-[10px]">
+                      Deployed & Enforcing
+                    </Badge>
+                  )}
+                </div>
               </div>
-              <p className="text-[10px] text-muted-foreground italic leading-tight">
-                Bedrock Forge hardens your web server configurations so attacks
-                are dropped before reaching PHP.
-              </p>
+
+              {/* Actions & Preset */}
+              <div className="space-y-2 pt-1">
+                <div className="flex items-center gap-2">
+                  <Label className="text-[11px] shrink-0 text-muted-foreground">
+                    Preset:
+                  </Label>
+                  <Select
+                    value={secureGuardPreset}
+                    onValueChange={(val: any) => setSecureGuardPreset(val)}
+                  >
+                    <SelectTrigger className="h-8 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="beginner">Beginner (Permissive)</SelectItem>
+                      <SelectItem value="balanced">
+                        Balanced (Recommended)
+                      </SelectItem>
+                      <SelectItem value="maximum">Maximum (Strict JWT)</SelectItem>
+                      <SelectItem value="custom">Custom</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="flex flex-wrap gap-2 pt-1">
+                  <Button
+                    size="sm"
+                    className="h-8 text-xs flex-1 gap-1.5"
+                    onClick={() => installSecureGuardMutation.mutate()}
+                    disabled={installSecureGuardMutation.isPending}
+                  >
+                    {installSecureGuardMutation.isPending ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Shield className="h-3.5 w-3.5" />
+                    )}
+                    Install / Update Plugin
+                  </Button>
+
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-8 text-xs gap-1.5"
+                    onClick={() => deployWatchdogMutation.mutate()}
+                    disabled={deployWatchdogMutation.isPending}
+                  >
+                    {deployWatchdogMutation.isPending ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <ShieldCheck className="h-3.5 w-3.5" />
+                    )}
+                    Deploy Watchdog
+                  </Button>
+                </div>
+              </div>
             </CardContent>
           </Card>
         </div>

@@ -258,6 +258,12 @@ function NotificationBell() {
 export function Header({ onOpenSearch }: { onOpenSearch?: () => void }) {
   const { user, logout } = useAuthStore();
   const { sidebarCollapsed, toggleSidebar } = useUiStore();
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const location = useLocation();
+
+  useEffect(() => {
+    setMobileOpen(false);
+  }, [location.pathname]);
 
   const handleLogout = async () => {
     try {
@@ -272,18 +278,21 @@ export function Header({ onOpenSearch }: { onOpenSearch?: () => void }) {
     <header className="h-14 border-b flex items-center justify-between px-4 bg-card shrink-0 gap-4">
       <div className="flex items-center gap-3">
         {/* Mobile sidebar trigger */}
-        <Sheet>
+        <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
           <SheetTrigger asChild>
             <Button variant="ghost" size="icon" className="h-8 w-8 lg:hidden">
               <Menu className="h-4 w-4" />
               <span className="sr-only">Open menu</span>
             </Button>
           </SheetTrigger>
-          <SheetContent side="left" className="p-0 w-72">
+          <SheetContent side="left" className="p-0 w-72 max-w-[85vw]">
             <SheetHeader className="sr-only">
               <SheetTitle>Navigation</SheetTitle>
             </SheetHeader>
-            <SidebarInner collapsed={false} />
+            <SidebarInner
+              collapsed={false}
+              onNavigate={() => setMobileOpen(false)}
+            />
           </SheetContent>
         </Sheet>
 

@@ -9,6 +9,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Environment } from "./types";
+import { WpCliConsoleCard } from "./components/WpCliConsoleCard";
+import { DbSearchReplaceCard } from "./components/DbSearchReplaceCard";
+import { DbSnapshotCard } from "./components/DbSnapshotCard";
 import { QuickFixActionsCard } from "./components/QuickFixActionsCard";
 import { WpDebugCard } from "./components/WpDebugCard";
 import { MaintenanceModeCard } from "./components/MaintenanceModeCard";
@@ -30,6 +33,13 @@ export function ToolsTab({ environments }: { environments: Environment[] }) {
   const [selectedEnvId, setSelectedEnvId] = useState<number | null>(
     validInitialEnv,
   );
+
+  useEffect(() => {
+    const envId = Number(searchParams.get("env"));
+    if (envId && environments.some((e) => e.id === envId)) {
+      setSelectedEnvId(envId);
+    }
+  }, [searchParams, environments]);
 
   useEffect(() => {
     if (selectedEnvId) {
@@ -58,36 +68,17 @@ export function ToolsTab({ environments }: { environments: Environment[] }) {
 
   return (
     <div className="space-y-6">
-      {/* Environment Selector */}
-      <div className="flex items-center gap-3">
-        <Label className="text-sm font-medium shrink-0">Environment:</Label>
-        <Select
-          value={String(selectedEnvId ?? "")}
-          onValueChange={(v) => setSelectedEnvId(Number(v))}
-        >
-          <SelectTrigger className="w-56">
-            <SelectValue placeholder="Select environment" />
-          </SelectTrigger>
-          <SelectContent>
-            {environments.map((e) => (
-              <SelectItem key={e.id} value={String(e.id)}>
-                <span className="capitalize">{e.type}</span>
-                <span className="text-muted-foreground ml-1 text-xs">
-                  — {e.server.name}
-                </span>
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        {selectedEnv?.root_path && (
-          <span className="text-xs text-muted-foreground font-mono">
-            {selectedEnv.root_path}
-          </span>
-        )}
-      </div>
+      {/* Interactive WP-CLI Developer Console */}
+      <WpCliConsoleCard selectedEnvId={selectedEnvId} />
+
+      {/* Database Search & Replace Tool */}
+      <DbSearchReplaceCard selectedEnvId={selectedEnvId} />
 
       {/* Quick Fix Actions */}
       <QuickFixActionsCard selectedEnvId={selectedEnvId} />
+
+      {/* Instant DB Snapshot */}
+      <DbSnapshotCard selectedEnvId={selectedEnvId} />
 
       {/* Debug Mode */}
       <WpDebugCard selectedEnvId={selectedEnvId} selectedEnv={selectedEnv} />
@@ -111,3 +102,4 @@ export function ToolsTab({ environments }: { environments: Environment[] }) {
 }
 
 export default ToolsTab;
+

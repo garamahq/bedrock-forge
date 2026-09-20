@@ -8,6 +8,8 @@ import {
   Download,
   File,
   Folder,
+  FilePlus,
+  FolderPlus,
   GitCompare,
   Loader2,
   NotebookPen,
@@ -19,6 +21,14 @@ import { api } from "@/lib/api-client";
 import { toast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+  DialogDescription,
+} from "@/components/ui/dialog";
 import {
   Card,
   CardContent,
@@ -111,11 +121,20 @@ export function RemoteOpsTab({
   const qc = useQueryClient();
 
   useEffect(() => {
+    const envId = Number(searchParams.get("env"));
+    if (envId && environments.some((e) => e.id === envId)) {
+      setSelectedEnvId(envId);
+    }
+  }, [searchParams, environments]);
+
+  useEffect(() => {
     if (!selectedEnvId) return;
     setSearchParams(
       (prev) => {
         const next = new URLSearchParams(prev);
-        next.set("env", String(selectedEnvId));
+        if (next.get("env") !== String(selectedEnvId)) {
+          next.set("env", String(selectedEnvId));
+        }
         return next;
       },
       { replace: true },
@@ -175,6 +194,10 @@ export function RemoteOpsTab({
   });
 
   const [filePath, setFilePath] = useState<string | undefined>();
+  const [touchDialogOpen, setTouchDialogOpen] = useState(false);
+  const [touchType, setTouchType] = useState<"file" | "directory">("file");
+  const [touchName, setTouchName] = useState("");
+
   const filesQuery = useQuery<FileListResponse>({
     queryKey: ["remote-files", selectedEnvId, filePath],
     queryFn: () =>
@@ -309,6 +332,35 @@ export function RemoteOpsTab({
     if (parts.length <= 1) return undefined;
     return `/${parts.slice(0, -1).join("/")}`;
   }, [currentPath]);
+
+  const touchMutation = useMutation({
+    mutationFn: () => {
+      if (!selectedEnvId || !touchName.trim()) throw new Error("Name required");
+      const target = currentPath
+        ? `${currentPath.replace(/\/+$/, "")}/${touchName.trim()}`
+        : touchName.trim();
+      return api.post(`/environments/${selectedEnvId}/files/touch`, {
+        path: target,
+        type: touchType,
+      });
+    },
+    onSuccess: () => {
+      toast({
+        title: touchType === "directory" ? "Directory Created" : "File Created",
+        description: touchName,
+      });
+      setTouchDialogOpen(false);
+      setTouchName("");
+      void filesQuery.refetch();
+    },
+    onError: (err: any) => {
+      toast({
+        title: "Creation Failed",
+        description: err?.message || "Failed to create remote path",
+        variant: "destructive",
+      });
+    },
+  });
 
   if (!environments.length) {
     return (
@@ -524,14 +576,40 @@ export function RemoteOpsTab({
                   size="icon"
                   variant="outline"
                   onClick={() => void filesQuery.refetch()}
+                  title="Refresh files"
                 >
                   <RefreshCw className="h-4 w-4" />
                 </Button>
                 <Button
                   size="icon"
                   variant="outline"
+                  onClick={() => {
+                    setTouchType("file");
+                    setTouchName("");
+                    setTouchDialogOpen(true);
+                  }}
+                  title="New File"
+                >
+                  <FilePlus className="h-4 w-4 text-primary" />
+                </Button>
+                <Button
+                  size="icon"
+                  variant="outline"
+                  onClick={() => {
+                    setTouchType("directory");
+                    setTouchName("");
+                    setTouchDialogOpen(true);
+                  }}
+                  title="New Directory"
+                >
+                  <FolderPlus className="h-4 w-4 text-amber-500" />
+                </Button>
+                <Button
+                  size="icon"
+                  variant="outline"
                   onClick={() => archiveUploadsMutation.mutate()}
                   disabled={!selectedEnvId || archiveUploadsMutation.isPending}
+                  title="Archive uploads"
                 >
                   <Archive className="h-4 w-4" />
                 </Button>
@@ -664,6 +742,54 @@ export function RemoteOpsTab({
         isPending={saveFileMutation.isPending}
         onConfirm={() => saveFileMutation.mutate()}
       />
+
+      {/* Create File / Directory Dialog */}
+      <Dialog open={touchDialogOpen} onOpenChange={setTouchDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {touchType === "directory" ? "Create New Directory" : "Create New File"}
+            </DialogTitle>
+            <DialogDescription>
+              Create a new {touchType} in{" "}
+              <code className="font-mono text-xs">{currentPath || "root"}</code>
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <Input
+              value={touchName}
+              onChange={(e) => setTouchName(e.target.value)}
+              placeholder={touchType === "directory" ? "new-folder" : "filename.txt"}
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  touchMutation.mutate();
+                }
+              }}
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setTouchDialogOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => touchMutation.mutate()}
+              disabled={!touchName.trim() || touchMutation.isPending}
+            >
+              {touchMutation.isPending && (
+                <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" />
+              )}
+              Create {touchType === "directory" ? "Directory" : "File"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

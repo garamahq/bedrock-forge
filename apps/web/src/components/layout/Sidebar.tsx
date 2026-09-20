@@ -135,12 +135,14 @@ function NavItem({
   label,
   icon: Icon,
   collapsed,
+  onNavigate,
 }: {
   to: string;
   label: string;
   icon: React.ElementType;
   collapsed: boolean;
   minRole?: string;
+  onNavigate?: () => void;
 }) {
   const location = useLocation();
   const isActive = to === "/" ? location.pathname === "/" : location.pathname.startsWith(to);
@@ -148,6 +150,7 @@ function NavItem({
   const link = (
     <NavLink
       to={to}
+      onClick={onNavigate}
       className={cn(
         "flex items-center text-sm font-medium transition-colors relative group w-full",
         collapsed ? "justify-center px-0 py-3 rounded-none" : "rounded-md gap-3 px-3 py-2",
@@ -175,9 +178,10 @@ function NavItem({
 
 interface SidebarInnerProps {
   collapsed?: boolean;
+  onNavigate?: () => void;
 }
 
-export function SidebarInner({ collapsed = false }: SidebarInnerProps) {
+export function SidebarInner({ collapsed = false, onNavigate }: SidebarInnerProps) {
   const user = useAuthStore((s) => s.user);
   const { darkMode, toggleDarkMode } = useUiStore();
   const initials = user?.name
@@ -249,7 +253,12 @@ export function SidebarInner({ collapsed = false }: SidebarInnerProps) {
                 )}
                 <div className="space-y-0.5">
                   {group.items.map((item) => (
-                    <NavItem key={item.to} {...item} collapsed={collapsed} />
+                    <NavItem
+                      key={item.to}
+                      {...item}
+                      collapsed={collapsed}
+                      onNavigate={onNavigate}
+                    />
                   ))}
                 </div>
               </div>

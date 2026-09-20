@@ -28,6 +28,7 @@ import {
   XCircle,
   Plus,
   Trash2,
+  GitBranch,
 } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
@@ -47,6 +48,8 @@ import { ThemesTab } from "./project-detail/ThemesTab";
 import { WpCoreTab } from "./project-detail/WpCoreTab";
 import { RemoteOpsTab } from "./project-detail/RemoteOpsTab";
 import { SecurityTab } from "./project-detail/SecurityTab";
+import { GitDeployTab } from "./project-detail/GitDeployTab";
+import { EnvironmentQuickBar } from "./project-detail/EnvironmentQuickBar";
 import { ProjectFormDialog } from "./ProjectsPage";
 import { ResourceActivityFeed } from "@/components/ResourceActivityFeed";
 import { ArchiveDialog, RestoreDialog } from "@/components/ProjectArchiveDialogs";
@@ -87,6 +90,11 @@ interface Environment {
   root_path?: string;
   backup_path?: string;
   google_drive_folder_id: string | null;
+  git_remote_url?: string | null;
+  git_branch?: string | null;
+  git_current_commit?: string | null;
+  git_last_deployed_at?: string | null;
+  deploy_webhook_token?: string | null;
   server: Server;
 }
 
@@ -106,6 +114,7 @@ interface Project {
   created_at: string;
   notes?: string | null;
   links?: ProjectLink[] | null;
+  github_repo?: string | null;
 }
 
 function ProjectHeader({
@@ -141,12 +150,18 @@ function ProjectHeader({
             Inactive
           </Badge>
         );
-      default:
+      case "archived":
         return (
           <Badge
             variant="secondary"
-            className="font-semibold shadow-sm text-xs px-2.5 py-1 capitalize"
+            className="font-semibold shadow-sm text-xs px-2.5 py-1 capitalize bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300"
           >
+            Archived
+          </Badge>
+        );
+      default:
+        return (
+          <Badge variant="outline" className="font-semibold text-xs px-2.5 py-1 capitalize">
             {status}
           </Badge>
         );
@@ -168,7 +183,7 @@ function ProjectHeader({
       <div className="flex flex-wrap items-start gap-4 justify-between border-b pb-4">
         <div>
           <div className="flex items-center gap-3 flex-wrap">
-            <h1 className="text-4xl font-extrabold tracking-tight bg-gradient-to-r from-foreground to-foreground/75 bg-clip-text text-transparent">
+            <h1 className="text-2xl sm:text-3xl lg:text-4xl font-extrabold tracking-tight bg-gradient-to-r from-foreground to-foreground/75 bg-clip-text text-transparent break-words">
               {project.name}
             </h1>
             {getStatusBadge(project.status)}
@@ -466,6 +481,13 @@ export function ProjectDetailPage() {
   }
 
   const environments = project.environments ?? [];
+  const envParam = searchParams.get("env");
+  const initialEnvId = envParam ? Number(envParam) : null;
+  const currentEnvId =
+    environments.find((e) => e.id === initialEnvId)?.id ??
+    (environments.find((e) => e.type === "production")?.id ??
+      environments[0]?.id ??
+      null);
 
   return (
     <div className="container mx-auto py-8 px-4 max-w-full space-y-6">
@@ -768,6 +790,22 @@ export function ProjectDetailPage() {
         </div>
       </div>
 
+      {/* Unified Environment Quick Command Bar */}
+      {environments.length > 0 && (
+        <EnvironmentQuickBar
+          environments={environments}
+          selectedEnvId={currentEnvId}
+          onSelectEnv={(envId) => {
+            setSearchParams((prev) => {
+              const next = new URLSearchParams(prev);
+              next.set("env", String(envId));
+              return next;
+            });
+          }}
+          githubRepo={project.github_repo}
+        />
+      )}
+
       {/* Tabs Container - takes full width now */}
       <div className="w-full">
         <Tabs
@@ -781,10 +819,10 @@ export function ProjectDetailPage() {
             });
           }}
         >
-        <TabsList className="flex-wrap h-auto gap-1 bg-muted/60 p-1 border border-border/40 rounded-xl shadow-sm backdrop-blur-sm">
+        <TabsList className="flex flex-nowrap overflow-x-auto no-scrollbar whitespace-nowrap h-auto gap-1 bg-muted/60 p-1.5 border border-border/40 rounded-xl shadow-sm backdrop-blur-sm max-w-full justify-start">
           <TabsTrigger
             value="environments"
-            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm"
+            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
           >
             <Globe className="h-3.5 w-3.5 opacity-70" />
             Environments
@@ -795,78 +833,85 @@ export function ProjectDetailPage() {
             )}
           </TabsTrigger>
           <TabsTrigger
+            value="deploy"
+            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
+          >
+            <GitBranch className="h-3.5 w-3.5 opacity-70" />
+            Git & Deploy
+          </TabsTrigger>
+          <TabsTrigger
             value="backups"
-            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm"
+            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
           >
             <History className="h-3.5 w-3.5 opacity-70" />
             Backups
           </TabsTrigger>
           <TabsTrigger
             value="plugins"
-            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm"
+            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
           >
             <Puzzle className="h-3.5 w-3.5 opacity-70" />
             Plugins
           </TabsTrigger>
           <TabsTrigger
             value="sync"
-            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm"
+            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
           >
             <RefreshCw className="h-3.5 w-3.5 opacity-70" />
             Sync
           </TabsTrigger>
           <TabsTrigger
             value="restore"
-            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm"
+            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
           >
             <Undo2 className="h-3.5 w-3.5 opacity-70" />
             Restore
           </TabsTrigger>
           <TabsTrigger
             value="tools"
-            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm"
+            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
           >
             <Wrench className="h-3.5 w-3.5 opacity-70" />
             Tools
           </TabsTrigger>
           <TabsTrigger
             value="drift"
-            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm"
+            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
           >
             <GitCompare className="h-3.5 w-3.5 opacity-70" />
             Drift
           </TabsTrigger>
           <TabsTrigger
             value="themes"
-            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm"
+            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
           >
             <Palette className="h-3.5 w-3.5 opacity-70" />
             Themes
           </TabsTrigger>
           <TabsTrigger
             value="files-config"
-            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm"
+            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
           >
             <FileCog className="h-3.5 w-3.5 opacity-70" />
             Files & Config
           </TabsTrigger>
           <TabsTrigger
             value="wp-core"
-            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm"
+            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
           >
             <Cpu className="h-3.5 w-3.5 opacity-70" />
             WP Core
           </TabsTrigger>
           <TabsTrigger
             value="security"
-            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm"
+            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
           >
             <Shield className="h-3.5 w-3.5 opacity-70" />
             Security
           </TabsTrigger>
           <TabsTrigger
             value="activity"
-            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm"
+            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
           >
             <ListChecks className="h-3.5 w-3.5 opacity-70" />
             Activity
@@ -877,6 +922,16 @@ export function ProjectDetailPage() {
         <TabsContent value="environments">
           {activatedTabs.has("environments") && (
             <EnvironmentsTab projectId={projectId} />
+          )}
+        </TabsContent>
+
+        <TabsContent value="deploy">
+          {activatedTabs.has("deploy") && (
+            <GitDeployTab
+              projectId={projectId}
+              environments={environments}
+              defaultRepo={project?.github_repo}
+            />
           )}
         </TabsContent>
 
