@@ -56,6 +56,7 @@ export const JOB_TYPES = {
   PROJECT_CREATE_BEDROCK: "project:create-bedrock",
   PROJECT_ARCHIVE: "project:archive",
   PROJECT_RESTORE: "project:restore",
+  PROJECT_GIT_DEPLOY: "project:git-deploy",
   ENVIRONMENT_DECOMMISSION: "environment:decommission",
 
   // Notifications
@@ -74,6 +75,8 @@ export const JOB_TYPES = {
   WP_CORE_CHECK: "wp:core-check",
   WP_CORE_UPDATE: "wp:core-update",
   WP_MAINTENANCE_MODE: "wp:maintenance-mode",
+  WP_SECURE_GUARD_INSTALL: "wp:secure-guard-install",
+  WP_SECURE_GUARD_WATCHDOG: "wp:secure-guard-watchdog",
 
   // Theme scans
   THEME_SCAN_RUN: "theme-scan:run",

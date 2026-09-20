@@ -493,4 +493,127 @@ export interface WpOrgSearchResult {
   homepage: string;
 }
 
+// ─── Project & Environment Canonical Types ─────────────────────────────────────
 
+export interface ProjectLink {
+  label: string;
+  url?: string;
+  type?: "link" | "text";
+  value?: string;
+}
+
+export interface ProjectEnvironment {
+  id: number;
+  project_id?: number;
+  server_id: number;
+  type: string;
+  url: string;
+  root_path: string;
+  backup_path?: string | null;
+  google_drive_folder_id?: string | null;
+  protected_tables?: string[];
+  sql_protection_queries?: string[];
+  protected_post_types?: string[];
+  is_baseline?: boolean;
+  is_multisite?: boolean;
+  multisite_url?: string | null;
+  server?: {
+    id: number;
+    name: string;
+    ip_address: string;
+    status: string;
+    ssh_port?: number;
+    ssh_user?: string;
+  };
+  git_remote_url?: string | null;
+  git_branch?: string | null;
+  git_current_commit?: string | null;
+  git_last_deployed_at?: string | null;
+  deploy_webhook_token?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface Project {
+  id: number;
+  name: string;
+  client_id: number;
+  client?: {
+    id: number;
+    name: string;
+    email?: string | null;
+    phone?: string | null;
+  };
+  hosting_package_id?: number | null;
+  support_package_id?: number | null;
+  hosting_package?: {
+    id: number;
+    name: string;
+    price_monthly?: number | string;
+  } | null;
+  support_package?: {
+    id: number;
+    name: string;
+    price_monthly?: number | string;
+  } | null;
+  status: "active" | "inactive" | "archived";
+  notes?: string | null;
+  links?: ProjectLink[] | null;
+  github_repo?: string | null;
+  created_at?: string;
+  updated_at?: string;
+  environments?: ProjectEnvironment[];
+}
+
+// ─── Git Deploy Payloads ───────────────────────────────────────────────────────
+
+export const GitDeployPayloadSchema = z.object({
+  environmentId: z.number().int().positive(),
+  jobExecutionId: z.number().int().positive(),
+  branch: z.string().optional(),
+  commitSha: z.string().optional(),
+  runComposer: z.boolean().default(true),
+  updateDb: z.boolean().default(true),
+  flushCache: z.boolean().default(true),
+});
+export type GitDeployPayload = z.infer<typeof GitDeployPayloadSchema>;
+
+// ─── Secure Guard Payloads ────────────────────────────────────────────────────
+
+export const SecureGuardInstallPayloadSchema = z.object({
+  environmentId: z.number().int().positive(),
+  jobExecutionId: z.number().int().positive(),
+  preset: z.enum(["beginner", "balanced", "maximum", "custom"]).default("balanced"),
+  deployWatchdog: z.boolean().default(true),
+});
+export type SecureGuardInstallPayload = z.infer<typeof SecureGuardInstallPayloadSchema>;
+
+export const SecureGuardWatchdogPayloadSchema = z.object({
+  environmentId: z.number().int().positive(),
+  jobExecutionId: z.number().int().positive(),
+  action: z.enum(["deploy", "remove", "verify"]).default("deploy"),
+});
+export type SecureGuardWatchdogPayload = z.infer<typeof SecureGuardWatchdogPayloadSchema>;
+
+// ─── WP-CLI & DB Tool Payloads ────────────────────────────────────────────────
+
+export const WpCliRunPayloadSchema = z.object({
+  environmentId: z.number().int().positive(),
+  command: z.string().min(1).max(500),
+});
+export type WpCliRunPayload = z.infer<typeof WpCliRunPayloadSchema>;
+
+export const WpSearchReplacePayloadSchema = z.object({
+  environmentId: z.number().int().positive(),
+  search: z.string().min(1),
+  replace: z.string(),
+  dryRun: z.boolean().default(true),
+  skipTransients: z.boolean().default(true),
+  tables: z.string().optional(),
+});
+export type WpSearchReplacePayload = z.infer<typeof WpSearchReplacePayloadSchema>;
+
+export const WpDbExportPayloadSchema = z.object({
+  environmentId: z.number().int().positive(),
+});
+export type WpDbExportPayload = z.infer<typeof WpDbExportPayloadSchema>;

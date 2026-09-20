@@ -163,14 +163,14 @@ async function seedCustomPlugins() {
     where: { slug: "wp-secure-guard" },
     update: {
       name: "WP Secure Guard",
-      repo_url: "https://github.com/satusdev/wp-secure-guard.git",
+      repo_url: "https://github.com/garamahq/wp-secure-guard.git",
       repo_path: ".",
       type: "plugin",
     },
     create: {
       name: "WP Secure Guard",
       slug: "wp-secure-guard",
-      repo_url: "https://github.com/satusdev/wp-secure-guard.git",
+      repo_url: "https://github.com/garamahq/wp-secure-guard.git",
       repo_path: ".",
       type: "plugin",
     },

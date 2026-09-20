@@ -223,6 +223,7 @@ model Project {
   status             ProjectStatus @default(active)
   notes              String?  @db.Text
   links              Json?
+  github_repo        String?
   created_at         DateTime @default(now()) @db.Timestamptz()
   updated_at         DateTime @updatedAt @db.Timestamptz()
 
@@ -259,6 +260,11 @@ model Environment {
   is_baseline       Boolean  @default(false) // marked as the canonical reference env for drift detection
   is_multisite      Boolean  @default(false) // WordPress Multisite installation
   multisite_url     String?  // Primary site URL used for WP-CLI --url flag on multisite
+  git_remote_url    String?
+  git_branch        String?  @default("main")
+  git_current_commit String?
+  git_last_deployed_at DateTime? @db.Timestamptz()
+  deploy_webhook_token String?
   created_at        DateTime @default(now()) @db.Timestamptz()
   updated_at        DateTime @updatedAt @db.Timestamptz()
 

@@ -49,7 +49,8 @@ export type SecurityFindingCategory =
   | "INACTIVE_THEMES"
   | "CONFIG_DRIFT"
   | "BASE_DRIFT"
-  | "INCIDENT";
+  | "INCIDENT"
+  | "SECURE_GUARD";
 
 export interface SecurityFinding {
   id: string;
