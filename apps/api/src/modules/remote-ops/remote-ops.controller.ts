@@ -28,6 +28,7 @@ import {
   ReadRemoteFileQueryDto,
   RemotePathQueryDto,
   TailRemoteFileQueryDto,
+  TouchRemotePathDto,
   UpdateResourceNoteDto,
   WriteEnvFileDto,
   WriteRemoteFileDto,
@@ -108,6 +109,14 @@ export class RemoteOpsController {
     @Body() dto: WriteRemoteFileDto,
   ) {
     return this.svc.writeFile(id, dto);
+  }
+
+  @Post("environments/:id/files/touch")
+  touchPath(
+    @Param("id", ParseIntPipe) id: number,
+    @Body() dto: TouchRemotePathDto,
+  ) {
+    return this.svc.touchPath(id, dto);
   }
 
   @Get("resource-notes/:resourceType/:resourceId")

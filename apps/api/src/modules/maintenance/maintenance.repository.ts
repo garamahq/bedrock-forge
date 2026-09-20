@@ -68,4 +68,16 @@ export class MaintenanceRepository {
       },
     });
   }
+
+  async findMonitor(id: bigint) {
+    return this.prisma.monitor.findUnique({ where: { id } });
+  }
+
+  async findBackupSchedule(id: bigint) {
+    return this.prisma.backupSchedule.findUnique({ where: { id } });
+  }
+
+  async findPluginUpdateSchedule(id: bigint) {
+    return this.prisma.pluginUpdateSchedule.findUnique({ where: { id } });
+  }
 }

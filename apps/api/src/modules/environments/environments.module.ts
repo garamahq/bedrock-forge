@@ -3,6 +3,7 @@ import { BullModule } from "@nestjs/bullmq";
 import { QUEUES } from "@bedrock-forge/shared";
 import { EnvironmentsController } from "./environments.controller";
 import { EnvironmentsListController } from "./environments-list.controller";
+import { DeployWebhookController } from "./deploy-webhook.controller";
 import { EnvironmentsService } from "./environments.service";
 import { EnvironmentsRepository } from "./environments.repository";
 import { ServersModule } from "../servers/servers.module";
@@ -14,7 +15,10 @@ import { PluginUpdateSchedulesModule } from "../plugin-update-schedules/plugin-u
 
 @Module({
   imports: [
-    BullModule.registerQueue({ name: QUEUES.PROJECTS }),
+    BullModule.registerQueue(
+      { name: QUEUES.PROJECTS },
+      { name: QUEUES.SECURITY },
+    ),
     ServersModule,
     MonitorsModule,
     DomainsModule,
@@ -22,7 +26,11 @@ import { PluginUpdateSchedulesModule } from "../plugin-update-schedules/plugin-u
     forwardRef(() => BackupsModule),
     PluginUpdateSchedulesModule,
   ],
-  controllers: [EnvironmentsController, EnvironmentsListController],
+  controllers: [
+    EnvironmentsController,
+    EnvironmentsListController,
+    DeployWebhookController,
+  ],
   providers: [EnvironmentsService, EnvironmentsRepository],
   exports: [EnvironmentsService],
 })

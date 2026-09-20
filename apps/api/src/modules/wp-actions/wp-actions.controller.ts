@@ -21,12 +21,34 @@ import {
   WpLogsQueryDto,
   WpMaintenanceModeDto,
 } from "./dto/wp-actions.dto";
+import { WpCliRunDto, WpSearchReplaceDto } from "./dto/wp-cli.dto";
 
 @Controller("environments/:id/wp-actions")
 @UseGuards(AuthGuard("jwt"), RolesGuard)
 @Roles(ROLES.MANAGER)
 export class WpActionsController {
   constructor(private readonly svc: WpActionsService) {}
+
+  /** Execute an interactive/preset WP-CLI command remotely */
+  @Post("cli")
+  cli(@Param("id", ParseIntPipe) id: number, @Body() dto: WpCliRunDto) {
+    return this.svc.runCli(id, dto);
+  }
+
+  /** Run a guided wp search-replace with dry-run support */
+  @Post("search-replace")
+  searchReplace(
+    @Param("id", ParseIntPipe) id: number,
+    @Body() dto: WpSearchReplaceDto,
+  ) {
+    return this.svc.runSearchReplace(id, dto);
+  }
+
+  /** 1-click snapshot of the database via wp db export */
+  @Post("db-export")
+  dbExport(@Param("id", ParseIntPipe) id: number) {
+    return this.svc.exportDb(id);
+  }
 
   /** Enqueue a WordPress quick-fix action (flush rewrite, clear cache, etc.) */
   @Post("fix")

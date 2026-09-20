@@ -1,4 +1,5 @@
 import { Injectable } from "@nestjs/common";
+import { Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { EncryptionService } from "../../common/encryption/encryption.service";
 import {
@@ -227,6 +228,79 @@ export class EnvironmentsRepository {
   async countEnvironmentsForProject(projectId: bigint): Promise<number> {
     return this.prisma.environment.count({
       where: { project_id: projectId },
+    });
+  }
+
+  async createEnvironment(data: any) {
+    return this.prisma.environment.create({
+      data,
+      include: {
+        server: { select: { id: true, name: true, ip_address: true, status: true } },
+      },
+    });
+  }
+
+  async createJobExecution(data: Prisma.JobExecutionUncheckedCreateInput) {
+    return this.prisma.jobExecution.create({ data });
+  }
+
+  async updateJobExecution(
+    id: bigint,
+    data: Prisma.JobExecutionUncheckedUpdateInput,
+  ) {
+    return this.prisma.jobExecution.update({
+      where: { id },
+      data,
+    });
+  }
+
+  async getSchedulesForEnvironment(envId: bigint) {
+    const [backupSchedules, pluginUpdateSchedules, monitors] = await Promise.all([
+      this.prisma.backupSchedule.findMany({ where: { environment_id: envId } }),
+      this.prisma.pluginUpdateSchedule.findMany({ where: { environment_id: envId } }),
+      this.prisma.monitor.findMany({ where: { environment_id: envId } }),
+    ]);
+    return { backupSchedules, pluginUpdateSchedules, monitors };
+  }
+
+  async disableEnvironmentSchedules(envId: bigint) {
+    return this.prisma.$transaction([
+      this.prisma.monitor.updateMany({
+        where: { environment_id: envId },
+        data: { enabled: false },
+      }),
+      this.prisma.backupSchedule.updateMany({
+        where: { environment_id: envId },
+        data: { enabled: false },
+      }),
+      this.prisma.pluginUpdateSchedule.updateMany({
+        where: { environment_id: envId },
+        data: { enabled: false },
+      }),
+      this.prisma.cleanupSchedule.updateMany({
+        where: { environment_id: envId },
+        data: { enabled: false },
+      }),
+      this.prisma.securityScanSchedule.updateMany({
+        where: { environment_id: envId },
+        data: { enabled: false },
+      }),
+    ]);
+  }
+
+  async updateGitDeployment(
+    envId: bigint,
+    data: {
+      git_current_commit?: string;
+      git_last_deployed_at?: Date;
+      git_remote_url?: string;
+      git_branch?: string;
+      deploy_webhook_token?: string;
+    },
+  ) {
+    return this.prisma.environment.update({
+      where: { id: envId },
+      data,
     });
   }
 }

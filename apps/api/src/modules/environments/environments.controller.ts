@@ -3,6 +3,7 @@ import {
   Get,
   Post,
   Put,
+  Patch,
   Delete,
   Param,
   Body,
@@ -23,6 +24,11 @@ import {
   UpsertDbCredentialsDto,
   CreateEnvironmentFullDto,
 } from "./dto/environment.dto";
+import {
+  DeployEnvironmentDto,
+  UpdateEnvironmentGitDto,
+} from "./dto/git-deploy.dto";
+import { InstallSecureGuardDto } from "./dto/secure-guard.dto";
 import { ScanServerForEnvDto } from "./dto/scan-server-for-env.dto";
 import { WpQuickLoginDto } from "./dto/wp-quick-login.dto";
 
@@ -152,5 +158,68 @@ export class EnvironmentsController {
   ) {
     await this.svc.assertBelongsToProject(id, projectId);
     return this.svc.createWpQuickLogin(id, dto);
+  }
+
+  @Post(":id/deploy")
+  @Roles(ROLES.MANAGER)
+  async deploy(
+    @Param("projectId", ParseIntPipe) projectId: number,
+    @Param("id", ParseIntPipe) id: number,
+    @Body() dto: DeployEnvironmentDto,
+  ) {
+    await this.svc.assertBelongsToProject(id, projectId);
+    return this.svc.deployGit(id, dto);
+  }
+
+  @Patch(":id/git")
+  @Roles(ROLES.MANAGER)
+  async updateGitSettings(
+    @Param("projectId", ParseIntPipe) projectId: number,
+    @Param("id", ParseIntPipe) id: number,
+    @Body() dto: UpdateEnvironmentGitDto,
+  ) {
+    await this.svc.assertBelongsToProject(id, projectId);
+    return this.svc.updateGitSettings(id, dto);
+  }
+
+  @Post(":id/git/webhook-token")
+  @Roles(ROLES.MANAGER)
+  async generateDeployWebhookToken(
+    @Param("projectId", ParseIntPipe) projectId: number,
+    @Param("id", ParseIntPipe) id: number,
+  ) {
+    await this.svc.assertBelongsToProject(id, projectId);
+    return this.svc.generateDeployWebhookToken(id);
+  }
+
+  @Get(":id/git/deploy-key")
+  @Roles(ROLES.MANAGER)
+  async getDeployKey(
+    @Param("projectId", ParseIntPipe) projectId: number,
+    @Param("id", ParseIntPipe) id: number,
+  ) {
+    await this.svc.assertBelongsToProject(id, projectId);
+    return this.svc.getServerDeployKey(id);
+  }
+
+  @Post(":id/secure-guard/install")
+  @Roles(ROLES.MANAGER)
+  async installSecureGuard(
+    @Param("projectId", ParseIntPipe) projectId: number,
+    @Param("id", ParseIntPipe) id: number,
+    @Body() dto: InstallSecureGuardDto,
+  ) {
+    await this.svc.assertBelongsToProject(id, projectId);
+    return this.svc.installSecureGuard(id, dto);
+  }
+
+  @Post(":id/secure-guard/watchdog")
+  @Roles(ROLES.MANAGER)
+  async deploySecureGuardWatchdog(
+    @Param("projectId", ParseIntPipe) projectId: number,
+    @Param("id", ParseIntPipe) id: number,
+  ) {
+    await this.svc.assertBelongsToProject(id, projectId);
+    return this.svc.deploySecureGuardWatchdog(id);
   }
 }

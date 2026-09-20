@@ -201,6 +201,11 @@ export class AppModule implements NestModule {
         { path: "/auth/logout", method: RequestMethod.POST },
         { path: "api/auth/logout", method: RequestMethod.POST },
         { path: "/api/auth/logout", method: RequestMethod.POST },
+        // Webhooks (deploy webhook token/HMAC authenticated, dynamic GitHub IPs)
+        { path: "webhooks/deploy/:envId", method: RequestMethod.POST },
+        { path: "/webhooks/deploy/:envId", method: RequestMethod.POST },
+        { path: "api/webhooks/deploy/:envId", method: RequestMethod.POST },
+        { path: "/api/webhooks/deploy/:envId", method: RequestMethod.POST },
       )
       .forRoutes("*");
   }

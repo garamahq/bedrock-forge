@@ -117,3 +117,13 @@ export class CreateEnvTemplateDto {
   @IsObject()
   defaults?: Record<string, unknown>;
 }
+
+export class TouchRemotePathDto {
+  @IsString()
+  @MinLength(1)
+  path!: string;
+
+  @IsIn(["file", "directory"])
+  type!: "file" | "directory";
+}
+

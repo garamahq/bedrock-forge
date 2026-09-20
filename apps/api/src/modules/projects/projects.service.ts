@@ -23,7 +23,6 @@ import { DomainsService } from "../domains/domains.service";
 import { MonitorsService } from "../monitors/monitors.service";
 import { BackupSchedulesService } from "../backups/backup-schedules.service";
 import { PluginUpdateSchedulesService } from "../plugin-update-schedules/plugin-update-schedules.service";
-import { PrismaService } from "../../prisma/prisma.service";
 
 @Injectable()
 export class ProjectsService {
@@ -36,7 +35,6 @@ export class ProjectsService {
     private readonly monitorsService: MonitorsService,
     private readonly backupSchedulesService: BackupSchedulesService,
     private readonly pluginUpdateSchedulesService: PluginUpdateSchedulesService,
-    private readonly prisma: PrismaService,
   ) {}
 
   findAll(query: QueryProjectsDto) {
@@ -60,6 +58,7 @@ export class ProjectsService {
       ...(dto.status && { status: dto.status }),
       notes: dto.notes,
       links: dto.links,
+      ...(dto.github_repo !== undefined && { github_repo: dto.github_repo }),
     });
   }
 
@@ -79,6 +78,7 @@ export class ProjectsService {
       ...(dto.status !== undefined && { status: dto.status }),
       ...(dto.notes !== undefined && { notes: dto.notes }),
       ...(dto.links !== undefined && { links: dto.links }),
+      ...(dto.github_repo !== undefined && { github_repo: dto.github_repo }),
     });
   }
 
@@ -91,40 +91,12 @@ export class ProjectsService {
 
       // 2. Disable monitors and cron schedules for all environments in this project
       const envIds = envs.map((e) => e.id);
-      const backupSchedules = await this.prisma.backupSchedule.findMany({
-        where: { environment_id: { in: envIds } },
-      });
-      const pluginUpdateSchedules = await this.prisma.pluginUpdateSchedule.findMany({
-        where: { environment_id: { in: envIds } },
-      });
+      const { backupSchedules, pluginUpdateSchedules, monitors } =
+        await this.repo.getSchedulesForEnvironments(envIds);
 
-      await this.prisma.$transaction([
-        this.prisma.monitor.updateMany({
-          where: { environment_id: { in: envIds } },
-          data: { enabled: false },
-        }),
-        this.prisma.backupSchedule.updateMany({
-          where: { environment_id: { in: envIds } },
-          data: { enabled: false },
-        }),
-        this.prisma.pluginUpdateSchedule.updateMany({
-          where: { environment_id: { in: envIds } },
-          data: { enabled: false },
-        }),
-        this.prisma.cleanupSchedule.updateMany({
-          where: { environment_id: { in: envIds } },
-          data: { enabled: false },
-        }),
-        this.prisma.securityScanSchedule.updateMany({
-          where: { environment_id: { in: envIds } },
-          data: { enabled: false },
-        }),
-      ]);
+      await this.repo.disableEnvironmentSchedules(envIds);
 
       // Unregister repeatable jobs from BullMQ
-      const monitors = await this.prisma.monitor.findMany({
-        where: { environment_id: { in: envIds } },
-      });
       for (const monitor of monitors) {
         await this.monitorsService.unregisterRepeatable(monitor);
       }
@@ -137,20 +109,18 @@ export class ProjectsService {
 
       // 3. Create job execution for tracking decommissioning
       const firstEnv = envs[0];
-      const jobExecution = await this.prisma.jobExecution.create({
-        data: {
-          queue_name: QUEUES.PROJECTS,
-          bull_job_id: "0",
-          job_type: JOB_TYPES.PROJECT_ARCHIVE,
-          environment_id: firstEnv ? firstEnv.id : undefined,
-          server_id: firstEnv ? firstEnv.server.id : undefined,
-          status: "queued",
-          payload: {
-            projectId: id,
-            createBackup: false,
-            deleteFromCyberpanel: true,
-            deleteProject: true,
-          },
+      const jobExecution = await this.repo.createJobExecution({
+        queue_name: QUEUES.PROJECTS,
+        bull_job_id: "0",
+        job_type: JOB_TYPES.PROJECT_ARCHIVE,
+        environment_id: firstEnv ? firstEnv.id : undefined,
+        server_id: firstEnv ? firstEnv.server.id : undefined,
+        status: "queued",
+        payload: {
+          projectId: id,
+          createBackup: false,
+          deleteFromCyberpanel: true,
+          deleteProject: true,
         },
       });
 
@@ -386,41 +356,12 @@ export class ProjectsService {
     // 2. Disable monitors and cron schedules for all environments in this project
     const envIds = envs.map((e) => e.id);
     if (envIds.length > 0) {
-      // Fetch schedules first to get their IDs
-      const backupSchedules = await this.prisma.backupSchedule.findMany({
-        where: { environment_id: { in: envIds } },
-      });
-      const pluginUpdateSchedules = await this.prisma.pluginUpdateSchedule.findMany({
-        where: { environment_id: { in: envIds } },
-      });
+      const { backupSchedules, pluginUpdateSchedules, monitors } =
+        await this.repo.getSchedulesForEnvironments(envIds);
 
-      await this.prisma.$transaction([
-        this.prisma.monitor.updateMany({
-          where: { environment_id: { in: envIds } },
-          data: { enabled: false },
-        }),
-        this.prisma.backupSchedule.updateMany({
-          where: { environment_id: { in: envIds } },
-          data: { enabled: false },
-        }),
-        this.prisma.pluginUpdateSchedule.updateMany({
-          where: { environment_id: { in: envIds } },
-          data: { enabled: false },
-        }),
-        this.prisma.cleanupSchedule.updateMany({
-          where: { environment_id: { in: envIds } },
-          data: { enabled: false },
-        }),
-        this.prisma.securityScanSchedule.updateMany({
-          where: { environment_id: { in: envIds } },
-          data: { enabled: false },
-        }),
-      ]);
+      await this.repo.disableEnvironmentSchedules(envIds);
 
       // Unregister repeatable jobs from BullMQ
-      const monitors = await this.prisma.monitor.findMany({
-        where: { environment_id: { in: envIds } },
-      });
       for (const monitor of monitors) {
         await this.monitorsService.unregisterRepeatable(monitor);
       }
@@ -433,19 +374,17 @@ export class ProjectsService {
     }
 
     // 3. Create job execution for tracking
-    const jobExecution = await this.prisma.jobExecution.create({
-      data: {
-        queue_name: QUEUES.PROJECTS,
-        bull_job_id: "0",
-        job_type: JOB_TYPES.PROJECT_ARCHIVE,
-        environment_id: firstEnv ? firstEnv.id : undefined,
-        server_id: firstEnv ? firstEnv.server.id : undefined,
-        status: "queued",
-        payload: {
-          projectId: id,
-          createBackup: dto.createBackup ?? true,
-          deleteFromCyberpanel: dto.deleteFromCyberpanel ?? true,
-        },
+    const jobExecution = await this.repo.createJobExecution({
+      queue_name: QUEUES.PROJECTS,
+      bull_job_id: "0",
+      job_type: JOB_TYPES.PROJECT_ARCHIVE,
+      environment_id: firstEnv ? firstEnv.id : undefined,
+      server_id: firstEnv ? firstEnv.server.id : undefined,
+      status: "queued",
+      payload: {
+        projectId: id,
+        createBackup: dto.createBackup ?? true,
+        deleteFromCyberpanel: dto.deleteFromCyberpanel ?? true,
       },
     });
 
@@ -487,15 +426,10 @@ export class ProjectsService {
     // 2. Enable monitors back
     const envIds = envs.map((e) => e.id);
     if (envIds.length > 0) {
-      await this.prisma.monitor.updateMany({
-        where: { environment_id: { in: envIds } },
-        data: { enabled: true },
-      });
+      await this.repo.enableEnvironmentMonitors(envIds);
 
       // Register repeatable jobs back
-      const monitors = await this.prisma.monitor.findMany({
-        where: { environment_id: { in: envIds } },
-      });
+      const { monitors } = await this.repo.getSchedulesForEnvironments(envIds);
       for (const m of monitors) {
         if (m.enabled) {
           await this.monitorsService.registerRepeatable(m);
@@ -504,18 +438,16 @@ export class ProjectsService {
     }
 
     // 3. Create job execution for tracking
-    const jobExecution = await this.prisma.jobExecution.create({
-      data: {
-        queue_name: QUEUES.PROJECTS,
-        bull_job_id: "0",
-        job_type: JOB_TYPES.PROJECT_RESTORE,
-        environment_id: firstEnv ? firstEnv.id : undefined,
-        server_id: firstEnv ? firstEnv.server.id : undefined,
-        status: "queued",
-        payload: {
-          projectId: id,
-          environmentBackups: dto.environmentBackups ?? {},
-        },
+    const jobExecution = await this.repo.createJobExecution({
+      queue_name: QUEUES.PROJECTS,
+      bull_job_id: "0",
+      job_type: JOB_TYPES.PROJECT_RESTORE,
+      environment_id: firstEnv ? firstEnv.id : undefined,
+      server_id: firstEnv ? firstEnv.server.id : undefined,
+      status: "queued",
+      payload: {
+        projectId: id,
+        environmentBackups: dto.environmentBackups ?? {},
       },
     });
 

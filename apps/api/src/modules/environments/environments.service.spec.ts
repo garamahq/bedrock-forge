@@ -9,6 +9,7 @@ import { DomainsService } from "../domains/domains.service";
 import { PrismaService } from "../../prisma/prisma.service";
 import { BackupSchedulesService } from "../backups/backup-schedules.service";
 import { PluginUpdateSchedulesService } from "../plugin-update-schedules/plugin-update-schedules.service";
+import { JOB_TYPES } from "@bedrock-forge/shared";
 
 jest.mock("@bedrock-forge/remote-executor", () => ({
   createRemoteExecutor: jest.fn(),
@@ -32,6 +33,15 @@ function makeRepo() {
     upsertDbCredentials: jest.fn(),
     findProjectWithHostingPackage: jest.fn().mockResolvedValue(null),
     countEnvironmentsForProject: jest.fn().mockResolvedValue(0),
+    createJobExecution: jest.fn().mockResolvedValue({ id: BigInt(1) }),
+    updateJobExecution: jest.fn().mockResolvedValue({}),
+    getSchedulesForEnvironment: jest.fn().mockResolvedValue({
+      backupSchedules: [],
+      pluginUpdateSchedules: [],
+      monitors: [],
+    }),
+    disableEnvironmentSchedules: jest.fn().mockResolvedValue([]),
+    updateGitDeployment: jest.fn().mockResolvedValue({}),
   };
 }
 
@@ -115,6 +125,10 @@ describe("EnvironmentsService", () => {
         },
         {
           provide: "BullQueue_projects",
+          useValue: { add: jest.fn().mockResolvedValue({ id: "1" }) },
+        },
+        {
+          provide: "BullQueue_security",
           useValue: { add: jest.fn().mockResolvedValue({ id: "1" }) },
         },
       ],
@@ -518,6 +532,154 @@ describe("EnvironmentsService", () => {
       await expect(svc.getWpUsers(1)).rejects.toThrow(
         "wp-users returned invalid JSON",
       );
+    });
+  });
+
+  // ── Git Deployment & Webhooks ──────────────────────────────────────────────
+
+  describe("Git Deployment & Webhooks", () => {
+    const mockEnvWithGit = {
+      id: BigInt(1),
+      type: "production",
+      root_path: "/home/example.com/public_html",
+      git_branch: "main",
+      deploy_webhook_token: "secret-token-123456",
+      server: { id: BigInt(5), name: "Server 5" },
+    };
+
+    it("deployGit creates a job execution and enqueues to projectsQueue", async () => {
+      repo.findById.mockResolvedValue(mockEnvWithGit);
+
+      const result = await svc.deployGit(1, {
+        branch: "main",
+        commitSha: "abc1234",
+      });
+
+      expect(result).toHaveProperty("jobExecutionId");
+      expect(repo.createJobExecution).toHaveBeenCalledWith(
+        expect.objectContaining({
+          job_type: JOB_TYPES.PROJECT_GIT_DEPLOY,
+        }),
+      );
+    });
+
+    it("updateGitSettings updates git branch and remote url in repo", async () => {
+      repo.findById.mockResolvedValue(mockEnvWithGit);
+
+      await svc.updateGitSettings(1, {
+        git_branch: "develop",
+        git_remote_url: "https://github.com/owner/repo.git",
+      });
+
+      expect(repo.updateGitDeployment).toHaveBeenCalledWith(
+        BigInt(1),
+        expect.objectContaining({
+          git_branch: "develop",
+          git_remote_url: "https://github.com/owner/repo.git",
+        }),
+      );
+    });
+
+    it("generateDeployWebhookToken generates a hex token and persists it", async () => {
+      repo.findById.mockResolvedValue(mockEnvWithGit);
+
+      const res = await svc.generateDeployWebhookToken(1);
+
+      expect(res.token).toHaveLength(48);
+      expect(repo.updateGitDeployment).toHaveBeenCalledWith(
+        BigInt(1),
+        expect.objectContaining({
+          deploy_webhook_token: res.token,
+        }),
+      );
+    });
+
+    it("triggerDeployWebhook returns pong on GitHub ping event", async () => {
+      repo.findById.mockResolvedValue(mockEnvWithGit);
+
+      const res = await svc.triggerDeployWebhook(1, {
+        token: "secret-token-123456",
+        event: "ping",
+      });
+
+      expect(res).toEqual({
+        message: "pong",
+        environmentId: 1,
+        branch: "main",
+        status: "ok",
+      });
+    });
+
+    it("triggerDeployWebhook skips when pushed ref does not match environment branch", async () => {
+      repo.findById.mockResolvedValue(mockEnvWithGit);
+
+      const res = await svc.triggerDeployWebhook(1, {
+        token: "secret-token-123456",
+        event: "push",
+        body: {
+          ref: "refs/heads/feature-branch",
+        },
+      });
+
+      expect(res).toEqual({
+        status: "skipped",
+        reason: expect.stringContaining("does not match configured environment branch"),
+        pushedBranch: "feature-branch",
+        configuredBranch: "main",
+      });
+    });
+
+    it("triggerDeployWebhook queues deploy when pushed ref matches branch", async () => {
+      repo.findById.mockResolvedValue(mockEnvWithGit);
+
+      const res = await svc.triggerDeployWebhook(1, {
+        token: "secret-token-123456",
+        event: "push",
+        body: {
+          ref: "refs/heads/main",
+          after: "deadbeef00112233",
+        },
+      });
+
+      expect(res).toHaveProperty("jobExecutionId");
+    });
+
+    it("triggerDeployWebhook throws UnauthorizedException on invalid token", async () => {
+      repo.findById.mockResolvedValue(mockEnvWithGit);
+
+      await expect(
+        svc.triggerDeployWebhook(1, {
+          token: "wrong-token",
+        }),
+      ).rejects.toThrow("Invalid deploy webhook token or signature");
+    });
+
+    it("getServerDeployKey returns existing server public SSH key", async () => {
+      repo.findById.mockResolvedValue(mockEnvWithGit);
+      serversService.getServerSshConfig.mockResolvedValue({
+        host: "1.2.3.4",
+        port: 22,
+        username: "root",
+        privateKey: "fake",
+      });
+
+      (createRemoteExecutor as jest.Mock).mockReturnValue({
+        execute: jest.fn().mockImplementation(async (cmd: string) => {
+          if (cmd.includes("cat ~/.ssh/id_ed25519.pub")) {
+            return {
+              code: 0,
+              stdout: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB... test@server",
+              stderr: "",
+            };
+          }
+          return { code: 0, stdout: "", stderr: "" };
+        }),
+      });
+
+      const res = await svc.getServerDeployKey(1);
+
+      expect(res.publicKey).toContain("ssh-ed25519");
+      expect(res.isGenerated).toBe(false);
     });
   });
 });

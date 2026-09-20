@@ -12,6 +12,7 @@ export class WpActionsRepository {
       select: {
         id: true,
         root_path: true,
+        backup_path: true,
         server: {
           select: {
             id: true,

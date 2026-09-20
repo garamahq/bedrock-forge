@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException } from "@nestjs/common";
+import { Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { EncryptionService } from "../../common/encryption/encryption.service";
 import { PaginationQuery } from "@bedrock-forge/shared";
@@ -12,6 +13,7 @@ interface CreateProjectData {
   status?: string;
   notes?: string;
   links?: any;
+  github_repo?: string;
 }
 
 interface UpdateProjectData {
@@ -22,6 +24,7 @@ interface UpdateProjectData {
   status?: string;
   notes?: string;
   links?: any;
+  github_repo?: string;
 }
 
 interface ImportProjectData {
@@ -159,6 +162,7 @@ export class ProjectsRepository {
         ...(data.status && { status: data.status as never }),
         notes: data.notes,
         links: data.links,
+        ...(data.github_repo !== undefined && { github_repo: data.github_repo }),
       },
       include: PROJECT_LIST_INCLUDE,
     });
@@ -179,12 +183,58 @@ export class ProjectsRepository {
         ...(data.status !== undefined && { status: data.status as never }),
         ...(data.notes !== undefined && { notes: data.notes }),
         ...(data.links !== undefined && { links: data.links }),
+        ...(data.github_repo !== undefined && { github_repo: data.github_repo }),
       },
     });
   }
 
   async remove(id: bigint) {
     return this.prisma.project.delete({ where: { id } });
+  }
+
+  async getSchedulesForEnvironments(envIds: bigint[]) {
+    const [backupSchedules, pluginUpdateSchedules, monitors] = await Promise.all([
+      this.prisma.backupSchedule.findMany({ where: { environment_id: { in: envIds } } }),
+      this.prisma.pluginUpdateSchedule.findMany({ where: { environment_id: { in: envIds } } }),
+      this.prisma.monitor.findMany({ where: { environment_id: { in: envIds } } }),
+    ]);
+    return { backupSchedules, pluginUpdateSchedules, monitors };
+  }
+
+  async disableEnvironmentSchedules(envIds: bigint[]) {
+    return this.prisma.$transaction([
+      this.prisma.monitor.updateMany({
+        where: { environment_id: { in: envIds } },
+        data: { enabled: false },
+      }),
+      this.prisma.backupSchedule.updateMany({
+        where: { environment_id: { in: envIds } },
+        data: { enabled: false },
+      }),
+      this.prisma.pluginUpdateSchedule.updateMany({
+        where: { environment_id: { in: envIds } },
+        data: { enabled: false },
+      }),
+      this.prisma.cleanupSchedule.updateMany({
+        where: { environment_id: { in: envIds } },
+        data: { enabled: false },
+      }),
+      this.prisma.securityScanSchedule.updateMany({
+        where: { environment_id: { in: envIds } },
+        data: { enabled: false },
+      }),
+    ]);
+  }
+
+  async enableEnvironmentMonitors(envIds: bigint[]) {
+    return this.prisma.monitor.updateMany({
+      where: { environment_id: { in: envIds } },
+      data: { enabled: true },
+    });
+  }
+
+  async createJobExecution(data: Prisma.JobExecutionUncheckedCreateInput) {
+    return this.prisma.jobExecution.create({ data });
   }
 
   /**

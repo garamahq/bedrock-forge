@@ -7,20 +7,16 @@ import { join } from "path";
 import { MaintenanceRepository } from "./maintenance.repository";
 import { CleanupSchedulesRepository } from "../cleanup-schedules/cleanup-schedules.repository";
 import { WpActionsService } from "../wp-actions/wp-actions.service";
-import { PrismaService } from "../../prisma/prisma.service";
 import { QUEUES } from "@bedrock-forge/shared";
 
 const STAGING_DIR = "/tmp/forge-backups";
 const ORPHAN_TTL_MS = 24 * 60 * 60 * 1_000;
 
 /**
- * MaintenanceService
- *
- * Runs nightly cleanup jobs to prevent unbounded table growth:
- * - Expired / revoked refresh tokens
- * - Notification logs older than 90 days
- * - Audit logs older than 180 days
- * - Completed/failed JobExecution records older than 90 days
+ * MaintenanceService runs background health tasks:
+ * - Nightly (02:00 UTC): marks interrupted jobs as failed, purges expired refresh tokens
+ * - Weekly (Sunday 03:00 UTC): deletes old audit logs, job executions, notification logs (> 90 days)
+ * - Hourly (at :45): audits repeatable BullMQ jobs against DB and removes orphaned jobs
  *
  * Also:
  * - On startup: sweeps crash-orphaned backup staging directories
@@ -34,7 +30,6 @@ export class MaintenanceService implements OnApplicationBootstrap {
     private readonly repo: MaintenanceRepository,
     private readonly cleanupRepo: CleanupSchedulesRepository,
     private readonly wpActions: WpActionsService,
-    private readonly prisma: PrismaService,
     @InjectQueue(QUEUES.MONITORS) private readonly monitorsQueue: Queue,
     @InjectQueue(QUEUES.BACKUPS) private readonly backupsQueue: Queue,
     @InjectQueue(QUEUES.PLUGIN_UPDATES) private readonly pluginUpdatesQueue: Queue,
@@ -187,9 +182,7 @@ export class MaintenanceService implements OnApplicationBootstrap {
         if (!match) continue;
         const monitorId = BigInt(match[1]);
 
-        const dbMonitor = await this.prisma.monitor.findUnique({
-          where: { id: monitorId },
-        });
+        const dbMonitor = await this.repo.findMonitor(monitorId);
 
         if (!dbMonitor || !dbMonitor.enabled) {
           this.logger.warn(
@@ -213,9 +206,7 @@ export class MaintenanceService implements OnApplicationBootstrap {
         if (!match) continue;
         const scheduleId = BigInt(match[1]);
 
-        const dbSchedule = await this.prisma.backupSchedule.findUnique({
-          where: { id: scheduleId },
-        });
+        const dbSchedule = await this.repo.findBackupSchedule(scheduleId);
 
         if (!dbSchedule || !dbSchedule.enabled) {
           this.logger.warn(
@@ -239,9 +230,7 @@ export class MaintenanceService implements OnApplicationBootstrap {
         if (!match) continue;
         const scheduleId = BigInt(match[1]);
 
-        const dbSchedule = await this.prisma.pluginUpdateSchedule.findUnique({
-          where: { id: scheduleId },
-        });
+        const dbSchedule = await this.repo.findPluginUpdateSchedule(scheduleId);
 
         if (!dbSchedule || !dbSchedule.enabled) {
           this.logger.warn(

@@ -20,6 +20,15 @@ function makeRepo() {
     remove: jest.fn(),
     importFromServer: jest.fn(),
     importBulk: jest.fn(),
+    getSchedulesForEnvironments: jest.fn().mockResolvedValue({
+      backupSchedules: [],
+      pluginUpdateSchedules: [],
+      monitors: [],
+    }),
+    disableEnvironmentSchedules: jest.fn().mockResolvedValue([]),
+    enableEnvironmentMonitors: jest.fn().mockResolvedValue([]),
+    createJobExecution: jest.fn().mockResolvedValue({ id: BigInt(99) }),
+    updateBullJobId: jest.fn().mockResolvedValue({}),
   };
 }
 

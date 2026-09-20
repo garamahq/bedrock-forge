@@ -20,6 +20,7 @@ export class CreateProjectDto {
   @IsOptional() @IsIn(["active", "inactive", "archived"]) status?: string;
   @IsOptional() @IsString() notes?: string;
   @IsOptional() links?: any;
+  @IsOptional() @IsString() github_repo?: string;
 }
 
 export class UpdateProjectDto extends PartialType(CreateProjectDto) {}

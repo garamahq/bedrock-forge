@@ -5,7 +5,7 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { createHash } from "crypto";
-import { basename } from "path";
+import { basename, dirname } from "path";
 import { Prisma } from "@prisma/client";
 import { createRemoteExecutor } from "@bedrock-forge/remote-executor";
 import { RemoteOpsRepository } from "./remote-ops.repository";
@@ -13,6 +13,7 @@ import { ServersService } from "../servers/servers.service";
 import {
   CreateEnvTemplateDto,
   CreateResourceNoteDto,
+  TouchRemotePathDto,
   UpdateResourceNoteDto,
   WriteEnvFileDto,
   WriteRemoteFileDto,
@@ -207,14 +208,45 @@ export class RemoteOpsService {
     return this.writeSafeTextFile(envId, dto);
   }
 
+  async touchPath(envId: number, dto: TouchRemotePathDto) {
+    const { executor, safePath } = await this.resolveSafePath(envId, dto.path);
+    const cmd =
+      dto.type === "directory"
+        ? `mkdir -p ${q(safePath)}`
+        : `mkdir -p ${q(dirname(safePath))} && touch ${q(safePath)}`;
+    const result = await executor.execute(cmd, { timeout: 10_000 });
+    if (result.code !== 0) {
+      throw new BadRequestException(
+        result.stderr || `Unable to create ${dto.type}`,
+      );
+    }
+    return { success: true, path: safePath, type: dto.type };
+  }
+
   async downloadFile(envId: number, path: string) {
-    const file = await this.readSafeTextFile(envId, path, 2 * 1024 * 1024);
+    const { executor, safePath } = await this.resolveSafePath(envId, path);
+    const stat = await executor.execute(
+      `test -f ${q(safePath)} && stat -c '%s' ${q(safePath)} || echo missing`,
+      { timeout: 10_000 },
+    );
+    if (stat.stdout.trim() === "missing") {
+      throw new NotFoundException(`${safePath} does not exist`);
+    }
+    const size = Number(stat.stdout.trim());
+    const maxDownloadBytes = 100 * 1024 * 1024; // 100 MB maximum for downloads
+    if (!Number.isFinite(size) || size > maxDownloadBytes) {
+      throw new BadRequestException(
+        `File is too large to download (${size} bytes, max ${maxDownloadBytes})`,
+      );
+    }
+    const buf = await executor.pullFile(safePath);
     return {
-      path: file.path,
-      filename: basename(file.path),
+      path: safePath,
+      filename: basename(safePath),
       encoding: "base64",
-      content: Buffer.from(file.content, "utf8").toString("base64"),
-      checksum: file.checksum,
+      content: buf.toString("base64"),
+      sizeBytes: buf.length,
+      checksum: checksum(buf),
     };
   }
 
@@ -591,7 +623,7 @@ function maskSecret(value: string): string {
   return `${unquoted.slice(0, 2)}****${unquoted.slice(-2)}`;
 }
 
-function checksum(content: string): string {
+function checksum(content: string | Buffer): string {
   return createHash("sha256").update(content).digest("hex");
 }
 

@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  UnauthorizedException,
   Inject,
   InternalServerErrorException,
   Injectable,
@@ -14,6 +15,11 @@ import {
   UpsertDbCredentialsDto,
   CreateEnvironmentFullDto,
 } from "./dto/environment.dto";
+import {
+  DeployEnvironmentDto,
+  UpdateEnvironmentGitDto,
+} from "./dto/git-deploy.dto";
+import { InstallSecureGuardDto } from "./dto/secure-guard.dto";
 import { WpQuickLoginDto } from "./dto/wp-quick-login.dto";
 import { ServersService } from "../servers/servers.service";
 import {
@@ -23,15 +29,21 @@ import {
 } from "@bedrock-forge/remote-executor";
 import { MonitorsService } from "../monitors/monitors.service";
 import { DomainsService } from "../domains/domains.service";
-import { PrismaService } from "../../prisma/prisma.service";
 import { InjectQueue } from "@nestjs/bullmq";
 import { Queue } from "bullmq";
 import { QUEUES, JOB_TYPES, DEFAULT_JOB_OPTIONS } from "@bedrock-forge/shared";
 import { BackupSchedulesService } from "../backups/backup-schedules.service";
 import { PluginUpdateSchedulesService } from "../plugin-update-schedules/plugin-update-schedules.service";
-import { randomBytes } from "crypto";
+import { randomBytes, createHmac, timingSafeEqual } from "crypto";
 import { readFileSync } from "fs";
 import { join } from "path";
+
+export interface DeployWebhookOptions {
+  token?: string;
+  signature?: string;
+  event?: string;
+  body?: Record<string, unknown>;
+}
 
 export interface WpUser {
   id: number;
@@ -51,12 +63,12 @@ export class EnvironmentsService {
     private readonly serversService: ServersService,
     private readonly monitorsService: MonitorsService,
     private readonly domainsService: DomainsService,
-    private readonly prisma: PrismaService,
     @Inject(forwardRef(() => BackupSchedulesService))
     private readonly backupSchedulesService: BackupSchedulesService,
     @Inject(forwardRef(() => PluginUpdateSchedulesService))
     private readonly pluginUpdateSchedulesService: PluginUpdateSchedulesService,
     @InjectQueue(QUEUES.PROJECTS) private readonly projectsQueue: Queue,
+    @InjectQueue(QUEUES.SECURITY) private readonly securityQueue: Queue,
   ) {}
 
   existsById(id: bigint): Promise<boolean> {
@@ -169,38 +181,34 @@ export class EnvironmentsService {
     const dbHost = dto.db_host?.trim() || "localhost";
 
     // 1. Create the Environment in the database (Prisma)
-    const env = await this.prisma.environment.create({
-      data: {
-        project_id: BigInt(projectId),
-        server_id: BigInt(server_id),
-        type: envType,
-        url: siteUrl,
-        root_path: rootPath,
-      },
+    const env = await this.repo.createEnvironment({
+      project_id: BigInt(projectId),
+      server_id: BigInt(server_id),
+      type: envType,
+      url: siteUrl,
+      root_path: rootPath,
     });
 
     // 2. Create the Job Execution record
-    const jobExecution = await this.prisma.jobExecution.create({
-      data: {
-        queue_name: QUEUES.PROJECTS,
-        bull_job_id: "0",
-        job_type: JOB_TYPES.PROJECT_CREATE_BEDROCK,
-        environment_id: env.id,
-        server_id: BigInt(server_id),
-        status: "queued",
-        payload: {
-          environmentId: Number(env.id),
-          cyberpanel: {
-            domain,
-            dbName,
-            dbUser,
-            dbPassword,
-            dbHost,
-            phpVersion,
-            adminEmail: admin_email,
-          },
-          sourceEnvironmentId: dto.source_environment_id,
+    const jobExecution = await this.repo.createJobExecution({
+      queue_name: QUEUES.PROJECTS,
+      bull_job_id: "0",
+      job_type: JOB_TYPES.PROJECT_CREATE_BEDROCK,
+      environment_id: env.id,
+      server_id: BigInt(server_id),
+      status: "queued",
+      payload: {
+        environmentId: Number(env.id),
+        cyberpanel: {
+          domain,
+          dbName,
+          dbUser,
+          dbPassword,
+          dbHost,
+          phpVersion,
+          adminEmail: admin_email,
         },
+        sourceEnvironmentId: dto.source_environment_id,
       },
     });
 
@@ -225,9 +233,8 @@ export class EnvironmentsService {
     );
 
     // 4. Back-fill the bull_job_id
-    await this.prisma.jobExecution.update({
-      where: { id: jobExecution.id },
-      data: { bull_job_id: String(job.id) },
+    await this.repo.updateJobExecution(jobExecution.id, {
+      bull_job_id: String(job.id),
     });
 
     return {
@@ -246,41 +253,13 @@ export class EnvironmentsService {
     const env = await this.findOne(id);
 
     // 1. Fetch schedules to delete/disable them cleanly
-    const backupSchedules = await this.prisma.backupSchedule.findMany({
-      where: { environment_id: BigInt(id) },
-    });
-    const pluginUpdateSchedules = await this.prisma.pluginUpdateSchedule.findMany({
-      where: { environment_id: BigInt(id) },
-    });
+    const { backupSchedules, pluginUpdateSchedules, monitors } =
+      await this.repo.getSchedulesForEnvironment(BigInt(id));
 
     // 2. Disable/clear monitor and cron schedules
-    await this.prisma.$transaction([
-      this.prisma.monitor.updateMany({
-        where: { environment_id: BigInt(id) },
-        data: { enabled: false },
-      }),
-      this.prisma.backupSchedule.updateMany({
-        where: { environment_id: BigInt(id) },
-        data: { enabled: false },
-      }),
-      this.prisma.pluginUpdateSchedule.updateMany({
-        where: { environment_id: BigInt(id) },
-        data: { enabled: false },
-      }),
-      this.prisma.cleanupSchedule.updateMany({
-        where: { environment_id: BigInt(id) },
-        data: { enabled: false },
-      }),
-      this.prisma.securityScanSchedule.updateMany({
-        where: { environment_id: BigInt(id) },
-        data: { enabled: false },
-      }),
-    ]);
+    await this.repo.disableEnvironmentSchedules(BigInt(id));
 
     // 3. Unregister repeatable jobs from BullMQ
-    const monitors = await this.prisma.monitor.findMany({
-      where: { environment_id: BigInt(id) },
-    });
     for (const monitor of monitors) {
       await this.monitorsService.unregisterRepeatable(monitor);
     }
@@ -292,18 +271,16 @@ export class EnvironmentsService {
     }
 
     // 4. Create job execution for decommissioning tracking
-    const jobExecution = await this.prisma.jobExecution.create({
-      data: {
-        queue_name: QUEUES.PROJECTS,
-        bull_job_id: "0",
-        job_type: JOB_TYPES.ENVIRONMENT_DECOMMISSION,
-        environment_id: BigInt(id),
-        server_id: env.server_id,
-        status: "queued",
-        payload: {
-          environmentId: id,
-          deleteFromCyberpanel: true,
-        },
+    const jobExecution = await this.repo.createJobExecution({
+      queue_name: QUEUES.PROJECTS,
+      bull_job_id: "0",
+      job_type: JOB_TYPES.ENVIRONMENT_DECOMMISSION,
+      environment_id: BigInt(id),
+      server_id: env.server_id,
+      status: "queued",
+      payload: {
+        environmentId: id,
+        deleteFromCyberpanel: true,
       },
     });
 
@@ -319,9 +296,8 @@ export class EnvironmentsService {
     );
 
     // Update job execution with bull job id
-    await this.prisma.jobExecution.update({
-      where: { id: jobExecution.id },
-      data: { bull_job_id: String(job.id) },
+    await this.repo.updateJobExecution(jobExecution.id, {
+      bull_job_id: String(job.id),
     });
 
     return {
@@ -695,6 +671,264 @@ export class EnvironmentsService {
   async listTags(envId: number) {
     await this.findOne(envId);
     return this.repo.listTags(BigInt(envId));
+  }
+
+  // ── Git & Deployment ──────────────────────────────────────────────────────
+
+  async deployGit(id: number, dto: DeployEnvironmentDto) {
+    const env = await this.repo.findById(BigInt(id));
+    if (!env) throw new NotFoundException(`Environment ${id} not found`);
+
+    const jobExecution = await this.repo.createJobExecution({
+      queue_name: QUEUES.PROJECTS,
+      bull_job_id: "0",
+      job_type: JOB_TYPES.PROJECT_GIT_DEPLOY,
+      environment_id: BigInt(id),
+      server_id: env.server.id,
+      status: "queued",
+      payload: {
+        environmentId: id,
+        branch: dto.branch || env.git_branch || "main",
+        commitSha: dto.commitSha,
+        runComposer: dto.runComposer ?? true,
+        updateDb: dto.updateDb ?? true,
+        flushCache: dto.flushCache ?? true,
+      },
+    });
+
+    const job = await this.projectsQueue.add(
+      JOB_TYPES.PROJECT_GIT_DEPLOY,
+      {
+        environmentId: id,
+        jobExecutionId: Number(jobExecution.id),
+        branch: dto.branch || env.git_branch || "main",
+        commitSha: dto.commitSha,
+        runComposer: dto.runComposer ?? true,
+        updateDb: dto.updateDb ?? true,
+        flushCache: dto.flushCache ?? true,
+      },
+      DEFAULT_JOB_OPTIONS,
+    );
+
+    await this.repo.updateJobExecution(jobExecution.id, {
+      bull_job_id: String(job.id),
+    });
+
+    return {
+      environmentId: id,
+      jobExecutionId: Number(jobExecution.id),
+      jobId: String(job.id),
+    };
+  }
+
+  async updateGitSettings(id: number, dto: UpdateEnvironmentGitDto) {
+    await this.findOne(id);
+    return this.repo.updateGitDeployment(BigInt(id), dto);
+  }
+
+  async generateDeployWebhookToken(id: number) {
+    await this.findOne(id);
+    const token = randomBytes(24).toString("hex");
+    await this.repo.updateGitDeployment(BigInt(id), {
+      deploy_webhook_token: token,
+    });
+    return { token };
+  }
+
+  async triggerDeployWebhook(
+    id: number,
+    opts: string | DeployWebhookOptions,
+  ) {
+    const env = await this.repo.findById(BigInt(id));
+    if (!env) throw new NotFoundException(`Environment ${id} not found`);
+
+    const options: DeployWebhookOptions =
+      typeof opts === "string" ? { token: opts } : opts;
+
+    if (!env.deploy_webhook_token) {
+      throw new BadRequestException("Deploy webhook token is not configured on this environment");
+    }
+
+    // 1. Authenticate via token or HMAC SHA256 signature
+    let authenticated = false;
+    if (options.token && options.token === env.deploy_webhook_token) {
+      authenticated = true;
+    } else if (options.signature && options.body) {
+      try {
+        const expectedSig =
+          "sha256=" +
+          createHmac("sha256", env.deploy_webhook_token)
+            .update(JSON.stringify(options.body))
+            .digest("hex");
+        if (
+          expectedSig.length === options.signature.length &&
+          timingSafeEqual(
+            Buffer.from(expectedSig),
+            Buffer.from(options.signature),
+          )
+        ) {
+          authenticated = true;
+        }
+      } catch {
+        authenticated = false;
+      }
+    }
+
+    if (!authenticated) {
+      throw new UnauthorizedException("Invalid deploy webhook token or signature");
+    }
+
+    // 2. Handle GitHub ping event
+    if (options.event === "ping") {
+      return {
+        message: "pong",
+        environmentId: id,
+        branch: env.git_branch || "main",
+        status: "ok",
+      };
+    }
+
+    // 3. Branch filtering: verify pushed ref matches configured branch
+    const configuredBranch = env.git_branch || "main";
+    const ref =
+      typeof options.body?.ref === "string" ? options.body.ref : undefined;
+    if (ref && ref.startsWith("refs/heads/")) {
+      const pushedBranch = ref.replace("refs/heads/", "");
+      if (pushedBranch !== configuredBranch) {
+        return {
+          status: "skipped",
+          reason: `Pushed branch "${pushedBranch}" does not match configured environment branch "${configuredBranch}"`,
+          pushedBranch,
+          configuredBranch,
+        };
+      }
+    }
+
+    // 4. Extract commit SHA if present
+    const commitSha =
+      typeof options.body?.after === "string" &&
+      options.body.after !== "0000000000000000000000000000000000000000"
+        ? options.body.after
+        : undefined;
+
+    return this.deployGit(id, {
+      branch: configuredBranch,
+      commitSha,
+    });
+  }
+
+  async getServerDeployKey(
+    id: number,
+  ): Promise<{ publicKey: string; keyType: string; isGenerated: boolean }> {
+    const env = await this.repo.findById(BigInt(id));
+    if (!env) throw new NotFoundException(`Environment ${id} not found`);
+
+    const executor = createRemoteExecutor(
+      await this.serversService.getServerSshConfig(Number(env.server.id)),
+    );
+
+    // Check for existing public key (ed25519 first, then rsa)
+    const checkRes = await executor.execute(
+      "test -f ~/.ssh/id_ed25519.pub && cat ~/.ssh/id_ed25519.pub || (test -f ~/.ssh/id_rsa.pub && cat ~/.ssh/id_rsa.pub || echo 'none')",
+    );
+    const existing = checkRes.stdout.trim();
+
+    if (existing && existing !== "none" && existing.startsWith("ssh-")) {
+      const keyType = existing.split(" ")[0] || "ssh-ed25519";
+      return { publicKey: existing, keyType, isGenerated: false };
+    }
+
+    // Generate new ed25519 key if none exists
+    const genRes = await executor.execute(
+      'mkdir -p ~/.ssh && chmod 700 ~/.ssh && ssh-keygen -t ed25519 -C "bedrock-forge-deploy" -N "" -f ~/.ssh/id_ed25519 && cat ~/.ssh/id_ed25519.pub',
+    );
+    const newKey = genRes.stdout.trim().split("\n").pop() || "";
+    if (newKey && newKey.startsWith("ssh-")) {
+      const keyType = newKey.split(" ")[0] || "ssh-ed25519";
+      return { publicKey: newKey, keyType, isGenerated: true };
+    }
+
+    throw new BadRequestException("Failed to read or generate server SSH deploy key");
+  }
+
+  // ── Secure Guard ──────────────────────────────────────────────────────────
+
+  async installSecureGuard(id: number, dto: InstallSecureGuardDto) {
+    const env = await this.repo.findById(BigInt(id));
+    if (!env) throw new NotFoundException(`Environment ${id} not found`);
+
+    const jobExecution = await this.repo.createJobExecution({
+      queue_name: QUEUES.SECURITY,
+      bull_job_id: "0",
+      job_type: JOB_TYPES.WP_SECURE_GUARD_INSTALL,
+      environment_id: BigInt(id),
+      server_id: env.server.id,
+      status: "queued",
+      payload: {
+        environmentId: id,
+        preset: dto.preset ?? "balanced",
+        deployWatchdog: dto.deployWatchdog ?? true,
+      },
+    });
+
+    const job = await this.securityQueue.add(
+      JOB_TYPES.WP_SECURE_GUARD_INSTALL,
+      {
+        environmentId: id,
+        jobExecutionId: Number(jobExecution.id),
+        preset: dto.preset ?? "balanced",
+        deployWatchdog: dto.deployWatchdog ?? true,
+      },
+      DEFAULT_JOB_OPTIONS,
+    );
+
+    await this.repo.updateJobExecution(jobExecution.id, {
+      bull_job_id: String(job.id),
+    });
+
+    return {
+      environmentId: id,
+      jobExecutionId: Number(jobExecution.id),
+      jobId: String(job.id),
+    };
+  }
+
+  async deploySecureGuardWatchdog(id: number) {
+    const env = await this.repo.findById(BigInt(id));
+    if (!env) throw new NotFoundException(`Environment ${id} not found`);
+
+    const jobExecution = await this.repo.createJobExecution({
+      queue_name: QUEUES.SECURITY,
+      bull_job_id: "0",
+      job_type: JOB_TYPES.WP_SECURE_GUARD_WATCHDOG,
+      environment_id: BigInt(id),
+      server_id: env.server.id,
+      status: "queued",
+      payload: {
+        environmentId: id,
+        action: "deploy",
+      },
+    });
+
+    const job = await this.securityQueue.add(
+      JOB_TYPES.WP_SECURE_GUARD_WATCHDOG,
+      {
+        environmentId: id,
+        jobExecutionId: Number(jobExecution.id),
+        action: "deploy",
+      },
+      DEFAULT_JOB_OPTIONS,
+    );
+
+    await this.repo.updateJobExecution(jobExecution.id, {
+      bull_job_id: String(job.id),
+    });
+
+    return {
+      environmentId: id,
+      jobExecutionId: Number(jobExecution.id),
+      jobId: String(job.id),
+    };
   }
 }
 

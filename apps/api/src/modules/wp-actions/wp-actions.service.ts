@@ -16,6 +16,7 @@ import {
   WpLogsQueryDto,
   WpMaintenanceModeDto,
 } from "./dto/wp-actions.dto";
+import { WpCliRunDto, WpSearchReplaceDto } from "./dto/wp-cli.dto";
 import { readFileSync } from "fs";
 import { join } from "path";
 
@@ -227,6 +228,126 @@ export class WpActionsService {
       enabled: fileCheck.stdout.trim() === "active",
       output: output || fileCheck.stdout.trim(),
       source: "file",
+    };
+  }
+
+  async runCli(envId: number, dto: WpCliRunDto) {
+    const { executor, env } = await this.connectToEnv(envId);
+    const wpPath = await this.resolveWpPathForStatus(
+      executor,
+      env.root_path ?? "",
+    );
+
+    // Normalize command: if user typed "wp cache flush", strip leading "wp "
+    let cleanCmd = dto.command.trim();
+    if (cleanCmd.startsWith("wp ")) {
+      cleanCmd = cleanCmd.slice(3).trim();
+    }
+
+    // Disallow dangerous or shell escape tokens
+    if (/[;&|`$<>]/.test(cleanCmd) || /\beval-file\b/i.test(cleanCmd)) {
+      throw new BadRequestException(
+        "Command contains forbidden tokens or operations.",
+      );
+    }
+
+    const start = Date.now();
+    const cmd = `wp ${cleanCmd} --path=${shellQuote(wpPath)} --allow-root`;
+    const result = await executor.execute(cmd, { timeout: 35_000 });
+    const durationMs = Date.now() - start;
+
+    return {
+      command: `wp ${cleanCmd}`,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      exitCode: result.code,
+      durationMs,
+    };
+  }
+
+  async runSearchReplace(envId: number, dto: WpSearchReplaceDto) {
+    const { executor, env } = await this.connectToEnv(envId);
+    const wpPath = await this.resolveWpPathForStatus(
+      executor,
+      env.root_path ?? "",
+    );
+
+    const parts = [
+      "wp",
+      "search-replace",
+      shellQuote(dto.search),
+      shellQuote(dto.replace),
+    ];
+
+    if (dto.tables?.trim()) {
+      const tablesList = dto.tables
+        .trim()
+        .split(/\s+/)
+        .map((t) => shellQuote(t))
+        .join(" ");
+      parts.push(tablesList);
+    }
+
+    if (dto.dry_run ?? true) {
+      parts.push("--dry-run");
+    }
+
+    if (dto.skip_transients ?? true) {
+      parts.push("--skip-transients");
+    }
+
+    parts.push("--report");
+    parts.push(`--path=${shellQuote(wpPath)}`);
+    parts.push("--allow-root");
+
+    const start = Date.now();
+    const cmd = parts.join(" ");
+    const result = await executor.execute(cmd, { timeout: 60_000 });
+    const durationMs = Date.now() - start;
+
+    return {
+      command: `wp search-replace ${dto.search} ${dto.replace} ${dto.dry_run ?? true ? "(dry-run)" : ""}`,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      exitCode: result.code,
+      durationMs,
+      dryRun: dto.dry_run ?? true,
+    };
+  }
+
+  async exportDb(envId: number) {
+    const { executor, env } = await this.connectToEnv(envId);
+    const wpPath = await this.resolveWpPathForStatus(
+      executor,
+      env.root_path ?? "",
+    );
+
+    const baseBackupDir = env.backup_path || `${env.root_path}/.forge-backups`;
+    const snapshotDir = `${baseBackupDir}/db-snapshots`;
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const filename = `db-snapshot-${timestamp}.sql`;
+    const targetPath = `${snapshotDir}/${filename}`;
+
+    const start = Date.now();
+    const cmd = `mkdir -p ${shellQuote(snapshotDir)} && wp db export ${shellQuote(targetPath)} --path=${shellQuote(wpPath)} --allow-root`;
+    const result = await executor.execute(cmd, { timeout: 60_000 });
+    const durationMs = Date.now() - start;
+
+    if (result.code !== 0) {
+      throw new BadRequestException(result.stderr || "Database export failed");
+    }
+
+    const statResult = await executor.execute(
+      `stat -c '%s' ${shellQuote(targetPath)} 2>/dev/null || echo 0`,
+    );
+    const sizeBytes = parseInt(statResult.stdout.trim(), 10) || 0;
+
+    return {
+      success: true,
+      filename,
+      path: targetPath,
+      sizeBytes,
+      durationMs,
     };
   }
 
