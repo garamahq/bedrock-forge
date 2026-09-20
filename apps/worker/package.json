@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "lint": "tsc --noEmit",
     "start": "node dist/main.js",
     "dev": "ts-node -r tsconfig-paths/register src/main.ts",
     "test": "jest --passWithNoTests"

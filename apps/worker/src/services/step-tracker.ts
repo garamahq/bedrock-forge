@@ -140,7 +140,7 @@ export class StepTracker {
     step: string,
     command: string,
     result: ExecuteResult,
-    durationMs: number,
+    durationMs: number = 0,
   ): Promise<void> {
     const level = result.code !== 0 ? "error" : "info";
     await this.track({

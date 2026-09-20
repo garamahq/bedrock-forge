@@ -8,6 +8,7 @@ import { SecuritySchedulerService } from "./services/security-scheduler.service"
 import { SecurityHardeningService } from "./services/security-hardening.service";
 import { SecurityDataRetentionService } from "./services/security-data-retention.service";
 import { SecurityBaselineService } from "./services/security-baseline.service";
+import { SecuritySecureGuardService } from "./services/security-secure-guard.service";
 import { QUEUES, JOB_TYPES } from "@bedrock-forge/shared";
 
 const TICK_JOB_ID = "security-schedule-tick";
@@ -38,6 +39,7 @@ export class SecurityScanProcessor
     private readonly hardening: SecurityHardeningService,
     private readonly retention: SecurityDataRetentionService,
     private readonly baselineService: SecurityBaselineService,
+    private readonly secureGuard: SecuritySecureGuardService,
     @InjectQueue(QUEUES.SECURITY) private readonly securityQueue: Queue,
   ) {
     super();
@@ -123,6 +125,10 @@ export class SecurityScanProcessor
         };
         return this.baselineService.compareBaseline(targetType, targetId);
       }
+      case JOB_TYPES.WP_SECURE_GUARD_INSTALL:
+        return this.secureGuard.installSecureGuard(job);
+      case JOB_TYPES.WP_SECURE_GUARD_WATCHDOG:
+        return this.secureGuard.deployWatchdog(job);
       default:
         this.logger.warn(`Unknown security job type: ${job.name}`);
     }

@@ -1123,5 +1123,61 @@ export async function runPluginAudit(
     }
   }
 
+  // 6. Bedrock Forge Official Security Plugin: Secure Guard (garamahq/wp-secure-guard)
+  const secureGuardPlugin = pluginsList.find(
+    (p) =>
+      p.name === "wp-secure-guard" ||
+      p.name === "secure-guard" ||
+      p.name.includes("secure-guard"),
+  );
+
+  if (!secureGuardPlugin || secureGuardPlugin.status !== "active") {
+    findings.push(
+      makeFinding(
+        "medium",
+        "SECURE_GUARD",
+        "Forge default security plugin (wp-secure-guard) is not active",
+        "Secure Guard provides zero-trust REST API protection, JWT rate limiting, and tamper watchdog for Bedrock Forge environments.",
+        {
+          remediation:
+            "Install and activate garamahq/wp-secure-guard via the Forge Security tab.",
+          resource: "wp-secure-guard",
+          metadata: {
+            installed: !!secureGuardPlugin,
+            status: secureGuardPlugin?.status ?? "not_installed",
+          },
+        },
+      ),
+    );
+  } else {
+    // Check Watchdog MU-plugin deployment
+    let watchdogFound = false;
+    for (const muDir of muDirs) {
+      const { stdout: wdCheck } = await exec.execute(
+        `test -f ${q(muDir + "/secure-guard-watchdog.php")} && echo found || echo missing`,
+      );
+      if (wdCheck.trim() === "found") {
+        watchdogFound = true;
+        break;
+      }
+    }
+
+    if (!watchdogFound) {
+      findings.push(
+        makeFinding(
+          "low",
+          "SECURE_GUARD",
+          "Secure Guard Watchdog MU-plugin is not deployed",
+          "The Watchdog MU-plugin enables early boot tamper detection and emergency lockdown enforcement before standard plugins execute.",
+          {
+            remediation:
+              "Deploy the Watchdog MU-plugin using the Forge Security dashboard.",
+            resource: "secure-guard-watchdog.php",
+          },
+        ),
+      );
+    }
+  }
+
   return findings;
 }

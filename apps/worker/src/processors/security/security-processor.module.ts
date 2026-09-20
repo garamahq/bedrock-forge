@@ -14,6 +14,7 @@ import { SecurityIncidentCorrelationService } from "./services/security-incident
 import { SecurityAlertRuleEngineService } from "./services/security-alert-rule-engine.service";
 import { SecurityRemediationSafetyService } from "./services/security-remediation-safety.service";
 import { SecurityAgentlessWatcherService } from "./services/security-agentless-watcher.service";
+import { SecuritySecureGuardService } from "./services/security-secure-guard.service";
 
 @Module({
   imports: [
@@ -40,6 +41,7 @@ import { SecurityAgentlessWatcherService } from "./services/security-agentless-w
     SecurityAlertRuleEngineService,
     SecurityRemediationSafetyService,
     SecurityAgentlessWatcherService,
+    SecuritySecureGuardService,
   ],
 })
 export class SecurityProcessorModule {}

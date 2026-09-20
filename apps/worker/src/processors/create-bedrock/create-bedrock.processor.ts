@@ -13,9 +13,11 @@ import {
   ProjectArchivePayloadSchema,
   ProjectRestorePayloadSchema,
   EnvironmentDecommissionPayloadSchema,
+  GitDeployPayloadSchema,
   BACKUP_JOB_OPTIONS,
 } from "@bedrock-forge/shared";
 import { callCpApi, CpCreds, escapeMysql } from "../../utils/cyberpanel-http";
+import { StepTracker } from "../../services/step-tracker";
 import {
   shellQuote,
   flipProtocol,
@@ -23,6 +25,7 @@ import {
   createRemoteMyCnf,
   cleanupRemoteMyCnf,
   WpCliBuilder,
+  detectSiteOwnerAndGroup,
 } from "../../utils/processor-utils";
 
 // concurrency=1: Bedrock provisioning runs composer, git clone, SSH commands.
@@ -51,6 +54,9 @@ export class CreateBedrockProcessor extends WorkerHost {
     }
     if (job.name === JOB_TYPES.ENVIRONMENT_DECOMMISSION) {
       return this.handleEnvironmentDecommission(job);
+    }
+    if (job.name === JOB_TYPES.PROJECT_GIT_DEPLOY) {
+      return this.handleGitDeploy(job);
     }
   }
 
@@ -472,6 +478,34 @@ export class CreateBedrockProcessor extends WorkerHost {
           dbHost,
         );
       }
+
+      // Configure Bedrock OpenLiteSpeed vhost docRoot & htaccess redirect & .env permissions
+      if (domain) {
+        const vhostPath = `/usr/local/lsws/conf/vhosts/${domain}/vhost.conf`;
+        const vhostCheck = await executor.execute(
+          `test -f ${shellQuote(vhostPath)} && echo yes || echo no`,
+        );
+        if (vhostCheck.stdout.trim() === "yes") {
+          // Update docRoot to $VH_ROOT/public_html/web if currently pointing to public_html
+          await executor.execute(
+            `sed -i 's|docRoot[[:space:]]*$VH_ROOT/public_html$|docRoot                   $VH_ROOT/public_html/web|g' ${shellQuote(vhostPath)} || true`,
+          );
+          // Gracefully reload OpenLiteSpeed
+          await executor.execute(
+            `touch /tmp/lshttpd/bak_cmd 2>/dev/null || systemctl reload lsws 2>/dev/null || true`,
+          );
+        }
+      }
+
+      // Secure .env and create root rewrite fallback
+      const siteRoot =
+        env.root_path ?? `/home/${domain ?? "site"}/public_html`;
+      await executor.execute(
+        `chmod 600 ${shellQuote(siteRoot + "/.env")} 2>/dev/null || true`,
+      );
+      await executor.execute(
+        `if [ ! -f ${shellQuote(siteRoot + "/.htaccess")} ]; then cat << 'EOF' > ${shellQuote(siteRoot + "/.htaccess")}\n<IfModule mod_rewrite.c>\nRewriteEngine On\nRewriteRule ^(.*)$ web/\\$1 [L]\n</IfModule>\nEOF\nfi`,
+      );
 
       // Fix ownership: public_html itself → user:nogroup (750), contents → user:user
       await fixCyberPanelOwnership(executor, env.root_path);
@@ -1132,6 +1166,216 @@ export class CreateBedrockProcessor extends WorkerHost {
         },
       });
 
+      throw err;
+    }
+  }
+
+  private async handleGitDeploy(job: Job) {
+    const data = GitDeployPayloadSchema.parse(job.data);
+    const {
+      environmentId,
+      jobExecutionId,
+      branch,
+      commitSha,
+      runComposer = true,
+      updateDb = true,
+      flushCache = true,
+    } = data;
+
+    const tracker = await StepTracker.start(
+      this.prisma,
+      jobExecutionId,
+      this.logger,
+      job,
+    );
+
+    try {
+      const env = await this.prisma.environment.findUniqueOrThrow({
+        where: { id: BigInt(environmentId) },
+        include: { server: true, project: true },
+      });
+
+      let gitRemoteUrl = env.git_remote_url || "";
+      if (!gitRemoteUrl && env.project?.github_repo) {
+        gitRemoteUrl = env.project.github_repo.startsWith("http")
+          ? env.project.github_repo
+          : `https://github.com/${env.project.github_repo}.git`;
+      }
+
+      const targetBranch = branch || env.git_branch || "main";
+      const rootPath = env.root_path?.replace(/\/+$/, "");
+      if (!rootPath) throw new Error("Environment root_path is missing");
+
+      await tracker.track({
+        step: "Initializing Git deployment",
+        level: "info",
+        detail: `Deploying branch "${targetBranch}" to ${rootPath}`,
+      });
+
+      const executor = createRemoteExecutor(
+        await this.sshKey.getSshConfig(env.server),
+      );
+
+      // 1. Verify Git availability on server
+      const gitCheck = await executor.execute(
+        "command -v git && echo found || echo missing",
+      );
+      if (gitCheck.stdout.trim().includes("missing")) {
+        throw new Error("Git is not installed on the remote server.");
+      }
+
+      // Ensure Git does not fail on ownership checks across users (CVE-2022-24765)
+      await executor.execute(
+        `git config --global --add safe.directory ${shellQuote(rootPath)} 2>/dev/null || true`,
+      );
+
+      // 2. Check if rootPath is a Git repository
+      const isGitRepo = await executor.execute(
+        `test -d ${shellQuote(rootPath + "/.git")} && echo yes || echo no`,
+      );
+
+      if (isGitRepo.stdout.trim() !== "yes") {
+        if (!gitRemoteUrl) {
+          throw new Error(
+            "Directory is not a Git repository and no Git remote URL is configured.",
+          );
+        }
+        await tracker.track({
+          step: "Initializing Git repository",
+          level: "info",
+          detail: `Setting remote origin to ${gitRemoteUrl}`,
+        });
+        await executor.execute(
+          `cd ${shellQuote(rootPath)} && git init && git remote add origin ${shellQuote(gitRemoteUrl)}`,
+        );
+      } else if (gitRemoteUrl) {
+        await executor.execute(
+          `cd ${shellQuote(rootPath)} && git remote set-url origin ${shellQuote(gitRemoteUrl)} 2>/dev/null || git remote add origin ${shellQuote(gitRemoteUrl)} 2>/dev/null || true`,
+        );
+      }
+
+      // 3. Fetch and pull target branch or checkout specific commit
+      await tracker.track({
+        step: "Fetching latest changes",
+        level: "info",
+        detail: `Fetching origin/${targetBranch}`,
+      });
+
+      const fetchRes = await executor.execute(
+        `cd ${shellQuote(rootPath)} && git fetch origin ${shellQuote(targetBranch)}`,
+      );
+      await tracker.trackCommand(
+        "Fetch origin",
+        `git fetch origin ${targetBranch}`,
+        fetchRes,
+      );
+
+      let checkoutCmd: string;
+      if (commitSha) {
+        checkoutCmd = `cd ${shellQuote(rootPath)} && git checkout ${shellQuote(commitSha)} && git reset --hard ${shellQuote(commitSha)}`;
+      } else {
+        checkoutCmd = `cd ${shellQuote(rootPath)} && git checkout -B ${shellQuote(targetBranch)} origin/${shellQuote(targetBranch)} && git reset --hard origin/${shellQuote(targetBranch)}`;
+      }
+
+      const checkoutRes = await executor.execute(checkoutCmd);
+      await tracker.trackCommand("Checkout code", checkoutCmd, checkoutRes);
+
+      // Read current deployed commit SHA & message
+      const revRes = await executor.execute(
+        `cd ${shellQuote(rootPath)} && git rev-parse HEAD`,
+      );
+      const deployedSha = revRes.stdout.trim();
+
+      const logRes = await executor.execute(
+        `cd ${shellQuote(rootPath)} && git log -1 --pretty=%B`,
+      );
+      const commitMsg = logRes.stdout.trim().split("\n")[0] || "";
+
+      await tracker.track({
+        step: "Code deployed",
+        level: "info",
+        detail: `Commit: ${deployedSha.slice(0, 7)} — ${commitMsg}`,
+      });
+
+      // 4. Run Composer if enabled
+      if (runComposer) {
+        const composerFileCheck = await executor.execute(
+          `test -f ${shellQuote(rootPath + "/composer.json")} && echo found || echo missing`,
+        );
+        if (composerFileCheck.stdout.trim() === "found") {
+          await tracker.track({
+            step: "Running composer install",
+            level: "info",
+            detail: "composer install --no-dev --optimize-autoloader --no-interaction",
+          });
+          const compRes = await executor.execute(
+            `cd ${shellQuote(rootPath)} && composer install --no-dev --optimize-autoloader --no-interaction 2>&1`,
+          );
+          await tracker.trackCommand(
+            "Composer install",
+            "composer install --no-dev",
+            compRes,
+          );
+        }
+      }
+
+      // 5. Run WP Core update-db & flush caches
+      const wpCli = await WpCliBuilder.create(executor, rootPath);
+      if (updateDb) {
+        await tracker.track({
+          step: "Running database migrations",
+          level: "info",
+          detail: "wp core update-db",
+        });
+        const dbRes = await executor.execute(
+          wpCli.buildCommand("core update-db"),
+        );
+        await tracker.trackCommand("WP DB update", "wp core update-db", dbRes);
+      }
+
+      if (flushCache) {
+        await tracker.track({
+          step: "Flushing caches and rewrites",
+          level: "info",
+        });
+        await executor
+          .execute(wpCli.buildCommand("cache flush"))
+          .catch(() => {});
+        await executor
+          .execute(wpCli.buildCommand("rewrite flush"))
+          .catch(() => {});
+      }
+
+      // 6. Fix file permissions & ownership
+      const { owner, webGroup } = await detectSiteOwnerAndGroup(
+        executor,
+        rootPath,
+      );
+      if (owner) {
+        await executor.execute(
+          `chown -R ${owner}:${webGroup} ${shellQuote(rootPath)} 2>/dev/null || true`,
+        );
+      }
+
+      // 7. Update database record for Environment
+      await this.prisma.environment.update({
+        where: { id: BigInt(environmentId) },
+        data: {
+          git_current_commit: deployedSha,
+          git_last_deployed_at: new Date(),
+          ...(env.git_remote_url
+            ? {}
+            : gitRemoteUrl
+              ? { git_remote_url: gitRemoteUrl }
+              : {}),
+          ...(env.git_branch ? {} : { git_branch: targetBranch }),
+        },
+      });
+
+      await tracker.complete({ progress: 100 });
+      return { success: true, commit: deployedSha, message: commitMsg };
+    } catch (err) {
+      await tracker.fail(err, "Git deployment");
       throw err;
     }
   }
