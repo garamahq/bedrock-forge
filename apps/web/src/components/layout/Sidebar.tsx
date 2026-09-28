@@ -110,7 +110,7 @@ const NAV_GROUPS: NavGroup[] = [
       },
       {
         to: "/problems",
-        label: "Problems",
+        label: "Work Queue",
         icon: AlertTriangle,
         minRole: "maintainer",
       },

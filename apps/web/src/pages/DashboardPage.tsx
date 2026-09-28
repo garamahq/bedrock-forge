@@ -581,6 +581,11 @@ export function DashboardPage() {
                 <p className="text-sm">No attention items currently reported</p>
               </div>
             )}
+            <div className="flex justify-end pt-1">
+              <Button asChild variant="outline" size="sm">
+                <Link to="/problems">Open work queue</Link>
+              </Button>
+            </div>
           </CardContent>
         </Card>
 
