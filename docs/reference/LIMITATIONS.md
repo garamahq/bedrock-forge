@@ -16,12 +16,14 @@ SSH.
 - No payment processing.
 - Billing tracks invoices only; it does not charge cards or integrate with
   Stripe, PayPal, or accounting systems.
-- No invoice PDF export.
 - No tax engine.
 
 ## Authentication and Access
 
 - No SSO.
+- No self-service password recovery. The installer does not reset an existing
+  administrator, so retain the generated password and create a second
+  administrator for account recovery.
 - MFA exists for user sessions where implemented in the app, but full enterprise
   identity-provider integration is not part of the current scope.
 - Role-based access exists, but organization/workspace isolation is not a
@@ -29,12 +31,15 @@ SSH.
 
 ## Notifications
 
-- Slack and in-app notification records are the primary delivery paths.
-- No email, Discord, Telegram, or generic webhook notification delivery.
+- Slack and in-app notifications are available, alongside Google Chat and
+  configurable generic webhook delivery.
+- Email, Discord, and Telegram delivery are not currently supported.
 
 ## Backups and Restore
 
-- No incremental backups. Backups are full snapshots by selected scope.
+- Incremental backups include a database dump and use remote rsync hard-link
+  snapshots for files. They require `rsync` on the managed server and extra
+  remote disk space for the cache directory beside the WordPress document root.
 - No cross-server restore from an existing backup record. Restores target the
   originating environment.
 - Google Drive is the only remote backup target wired into the backup UI.

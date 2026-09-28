@@ -36,7 +36,7 @@ sites over SSH.
 | Database           | PostgreSQL 16                                    |
 | Queue              | BullMQ + Redis 7                                 |
 | Remote execution   | ssh2 (connection pool)                           |
-| Frontend framework | React 19 + Vite 5                                |
+| Frontend framework | React 19 + Vite 6                                |
 | UI components      | shadcn/ui + Tailwind CSS 4                       |
 | Server state       | TanStack Query v5                                |
 | Client state       | Zustand (UI/session only — never server data)    |
@@ -82,16 +82,12 @@ bedrock-forge/
 │   │   │   ├── prisma/         # PrismaService
 │   │   │   └── main.ts
 │   │   └── package.json
-│   ├── web/                    # React 19 + Vite 5 dashboard
+│   ├── web/                    # React 19 + Vite 6 dashboard
 │   │   ├── src/
-│   │   │   ├── features/       # Feature-scoped code
-│   │   │   │   ├── auth/
-│   │   │   │   ├── dashboard/
-│   │   │   │   ├── clients/
-│   │   │   │   ├── servers/
+│   │   │   ├── pages/          # Route pages and colocated feature modules
+│   │   │   │   ├── project-detail/
 │   │   │   │   ├── projects/
-│   │   │   │   ├── backups/
-│   │   │   │   ├── monitors/
+│   │   │   │   ├── security/
 │   │   │   │   └── settings/
 │   │   │   ├── components/
 │   │   │   │   ├── ui/         # shadcn primitives (owned, not a package)
@@ -312,31 +308,16 @@ the combined `forge` container when either runtime is unavailable.
 **Layout:** Fixed left sidebar (240px) + main content area. Sidebar collapses to
 icon-only on md breakpoint.
 
-**Sidebar navigation (16 items — role-gated):**
+**Sidebar navigation:** 21 destinations grouped into Overview, Management,
+Operations, Billing & Admin, and System Admin. Items are hidden below their
+required role level.
 
-1. Dashboard
-2. Clients
-3. Servers
-4. Projects
-5. Backups
-6. Domains
-7. Monitors
-8. Activity _(job execution feed)_
-9. Security _(manager+)_
-10. Settings
-11. Packages _(manager+)_
-12. Invoices _(manager+)_
-13. Reports _(admin only)_
-14. Notifications _(admin only)_
-15. Users & Roles _(admin only)_
-16. Audit Logs _(admin only)_
+**Dashboard home:** Active projects, managed servers, average monitor uptime,
+and domains expiring within 30 days; real 24-hour operation counts; environment
+health; attention items; running jobs; and recent completed activity.
 
-**Dashboard home:** 4 big stat cards (active projects, recent backups, average
-uptime, server count) + quick action buttons + recent job activity feed (live
-via WebSocket).
-
-**Project detail:** Tabbed view for Environments, Backups, Plugins, Sync,
-Restore, Tools, Drift, Themes, and WP Core.
+**Project detail:** Tabs cover Environments, Backups, Sync, Restore, Plugins,
+Themes, WP Core, Tools, Remote Ops and Files, Drift, Git Deploy, and Security.
 
 **Live updates:** Backup progress bars, toast notifications for job
 completion/failure, activity feed — all via WebSocket subscription with TanStack

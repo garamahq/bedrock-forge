@@ -54,23 +54,29 @@ cd bedrock-forge
 4. Runs `docker compose up -d`
 5. Polls `http://localhost:3001/health` until the API is ready (up to 90
    seconds)
-6. Seeds the database: roles, admin user, sample tags, starter packages
+6. Seeds the database: roles, initial admin user, sample tags, starter packages
+
+During seeding, the installer generates an initial admin password and displays
+it once after setup completes. Existing admin accounts are left unchanged on
+subsequent runs. Save the password before closing the terminal.
 
 After completion the terminal prints:
 
 ```
 URL:      http://localhost:3002
 Email:    admin@bedrockforge.local
-Password: admin123
+Initial password: <randomly generated; displayed once>
 ```
 
 Navigate to **http://localhost:3002** in your browser to view the login screen:
 
 ### Login Screen
+
 ![Login Page](../assets/login.png)
 
-> [!WARNING]
-> **Change the admin password immediately after first login** via Settings -> Users to secure your installation.
+Change your password after first login in **Settings → Account**. Create a
+second administrator in **Users & Roles** so the team can recover access if the
+primary account becomes unavailable.
 
 ---
 
@@ -121,7 +127,10 @@ docker compose build
 docker compose up -d
 
 # Wait for the API to be healthy, then seed:
-docker compose exec forge node prisma/seed.js
+export ADMIN_BOOTSTRAP_PASSWORD="$(openssl rand -hex 24)"
+docker compose exec -e ADMIN_BOOTSTRAP_PASSWORD forge node prisma/seed.js
+printf 'Admin password: %s\n' "$ADMIN_BOOTSTRAP_PASSWORD"
+unset ADMIN_BOOTSTRAP_PASSWORD
 ```
 
 ---
@@ -189,8 +198,6 @@ setting up manually.
 | `GDRIVE_CLIENT_SECRET` | Google Drive OAuth 2.0 client secret                           |          | optional              |
 | `GDRIVE_TOKEN`         | rclone-formatted JSON token for Google Drive auth              |          | optional              |
 | `GDRIVE_FOLDER_ID`     | Default Google Drive folder ID for backup uploads              |          | optional              |
-| `VITE_DEV_EMAIL`       | Pre-fill login email in development mode                       |          | dev only              |
-| `VITE_DEV_PASSWORD`    | Pre-fill login password in development mode                    |          | dev only              |
 
 ### Generating the Encryption Key Manually
 

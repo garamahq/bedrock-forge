@@ -53,8 +53,11 @@ pnpm db:generate
 # Run migrations
 pnpm db:migrate
 
-# Seed the database
+# Set the initial admin password, then seed the database
+export ADMIN_BOOTSTRAP_PASSWORD="$(openssl rand -hex 24)"
 pnpm db:seed
+printf 'Admin password: %s\n' "$ADMIN_BOOTSTRAP_PASSWORD"
+unset ADMIN_BOOTSTRAP_PASSWORD
 
 # Start all apps with hot reload
 pnpm dev
@@ -69,6 +72,20 @@ This starts three processes concurrently (via Turborepo):
 | `apps/web`    | `:5173` | Vite dev server, proxies `/api` and `/ws` to `:3000` |
 
 Open **http://localhost:5173** for the dashboard.
+
+### Daily verification
+
+Run the same lint, type-check, build, and test gates used across the workspace
+with one command before opening a pull request:
+
+```bash
+pnpm verify
+```
+
+The workspace task graph builds required dependencies before linting and tests,
+so this command avoids repeating a separate full build. For a focused change,
+run the matching app command first (for example,
+`pnpm --filter @bedrock-forge/api test`) and run `pnpm verify` before submitting.
 
 ---
 
@@ -364,7 +381,7 @@ pnpm db:generate
 # Open Prisma Studio (GUI database browser)
 pnpx prisma studio
 
-# Re-seed the database
+# Re-seed the database. Set ADMIN_BOOTSTRAP_PASSWORD if creating the initial admin.
 pnpm db:seed
 ```
 

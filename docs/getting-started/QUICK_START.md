@@ -29,7 +29,7 @@ cd bedrock-forge
 2. Runs `docker compose build`
 3. Starts all services (`docker compose up -d`)
 4. Waits for the API health check to pass (`/health`)
-5. Seeds the database with roles, default admin user, tags, and starter packages
+5. Seeds the database with roles, a randomly generated initial admin password, tags, and starter packages
 
 **Duration:** ~2–4 minutes on first run (Docker build + image pull).
 
@@ -42,15 +42,15 @@ Navigate to **http://localhost:3002** in your browser.
 ### Login Screen
 ![Login Page](../assets/login.png)
 
-Log in with the default admin credentials:
+Log in with the initial admin credentials printed once by `./install.sh`:
 
 | Field    | Value                      |
 | -------- | -------------------------- |
 | Email    | `admin@bedrockforge.local` |
-| Password | `admin123`                 |
+| Password | Generated randomly during setup |
 
-> [!WARNING]
-> **Change this password immediately** via Settings -> Users after your first login to secure your installation.
+Save the password when the installer prints it; it cannot be retrieved from the
+database. Existing admin accounts are not reset when setup is run again.
 
 Once authenticated, you will arrive at the main system dashboard, which displays a high-level summary of your servers, projects, monitoring alerts, and recent job activities.
 

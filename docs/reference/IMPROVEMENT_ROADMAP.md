@@ -8,9 +8,9 @@ and extend. It is intentionally separate from product feature requests.
 - Create clear environment profiles for production, Docker development, and
   manual local development. The current `.env.example` mixes production Docker
   defaults with development hints.
-- Add a non-mutating setup doctor command that checks Docker, Compose, Node,
-  pnpm, ports, `.env` values, Redis URL, database URL, and required secret
-  lengths before starting services.
+- `doctor.sh` checks Docker, Compose, host tool versions, port conflicts, `.env`
+  placeholders, Redis and database URL formats, and required secret lengths.
+  Keep those checks aligned with the runtime's actual requirements.
 - Make `install.sh`, `dev.sh`, `update.sh`, and `reset.sh` share common helper
   behavior for writing `.env` values, checking prerequisites, and printing next
   steps.
@@ -77,9 +77,8 @@ and extend. It is intentionally separate from product feature requests.
 
 ## Suggested Order
 
-1. Clean up setup docs and script consistency.
-2. Add setup doctor/preflight checks.
-3. Split the largest frontend pages into page-local modules.
-4. Split the largest worker processors into services with focused tests.
-5. Strengthen shared contracts for jobs, WebSockets, and API errors.
-6. Add ESLint and targeted component/integration tests.
+1. Clean up setup profiles and script consistency.
+2. Split the largest frontend pages into page-local modules.
+3. Split the largest worker processors into services with focused tests.
+4. Strengthen shared contracts for jobs, WebSockets, and API errors.
+5. Add ESLint and targeted component/integration tests.

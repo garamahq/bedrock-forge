@@ -4,8 +4,8 @@
 
 | Version | Supported |
 | ------- | --------- |
-| 2.x     | Yes       |
-| < 2.0   | No        |
+| 0.1.x   | Yes       |
+| < 0.1   | No        |
 
 ## Reporting a Vulnerability
 
@@ -36,13 +36,15 @@ Bedrock Forge follows these security practices:
   passwords, and API tokens
 - **Authentication:** JWT with refresh token rotation, bcrypt password hashing
   (12 rounds)
-- **Authorization:** Role-based access control (admin / manager / client)
+- **Authorization:** Role-based access control (admin / manager / maintainer /
+  client)
 - **Input validation:** Global validation pipe with whitelist + forbid unknown
   fields
 - **Rate limiting:** Global and per-endpoint throttling
 - **Security headers:** Helmet with HSTS enabled
-- **No shell execution:** All remote commands use `spawn()` with argument
-  arrays, never shell interpolation
+- **Remote commands:** Server operations execute through SSH and helper
+  scripts; command arguments are validated or escaped before execution. Local
+  subprocesses use argument arrays where supported.
 - **Dependency auditing:** `pnpm audit` in CI pipeline
 
 ## Disclosure Policy

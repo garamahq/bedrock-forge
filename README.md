@@ -10,7 +10,7 @@
 [![TypeScript](https://img.shields.io/badge/typescript-5-blue.svg)](https://www.typescriptlang.org/)
 [![NestJS 11](https://img.shields.io/badge/nestjs-11-red.svg)](https://nestjs.com/)
 [![React 19](https://img.shields.io/badge/react-19-61dafb.svg)](https://react.dev/)
-[![Version](https://img.shields.io/badge/version-0.1.1-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.1.3-orange.svg)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 </div>
@@ -38,7 +38,7 @@ supports standard WordPress layouts for many operations.
 | Servers              | Store encrypted SSH credentials, test connectivity, inspect server health, use CyberPanel helpers where configured.                                                                                          |
 | Clients and projects | Track clients, projects, environments, domains, tags, packages, invoices, and activity.                                                                                                                      |
 | Environments         | Manage production/staging/dev environments, root paths, backup paths, protected DB tables, and WP DB credential discovery.                                                                                   |
-| Backups              | Create full, database-only, and files-only backups; schedule backups; upload to Google Drive via rclone; restore to the same environment.                                                                    |
+| Backups              | Create full, database-only, files-only, and incremental backups; schedule backups; upload to Google Drive via rclone; restore to the same environment.                                                      |
 | Sync and restore     | Clone/push database and files between environments with safety backups, URL replacement, cache cleanup, and protected table support.                                                                         |
 | Plugins              | Scan installed plugins, view Composer/manual/GitHub source, activate/deactivate, install, update, remove, change Composer constraints, schedule Composer updates, and manage a custom GitHub plugin catalog. |
 | Themes               | Scan, install, update, activate, and delete themes through WP-CLI worker jobs.                                                                                                                               |
@@ -131,14 +131,15 @@ Production Docker ports:
 | `http://localhost:3002`        | Web dashboard    |
 | `http://localhost:3001/health` | API health check |
 
-Default seeded admin:
+Initial admin account created by `./install.sh`:
 
 | Field    | Value                      |
 | -------- | -------------------------- |
 | Email    | `admin@bedrockforge.local` |
-| Password | `admin123`                 |
+| Password | Generated randomly and printed once by the installer |
 
-Change the admin password immediately after first login.
+Save the generated password when installing. Existing admin accounts are left
+unchanged when the installer is run again.
 
 ## Common Workflows
 
@@ -182,12 +183,22 @@ pnpm install
 Manual development flow:
 
 ```bash
+source tools/setup-helpers.sh
+generate_env_file
+./doctor.sh development
 docker compose -f docker-compose.dev.yml up -d postgres redis
 pnpm install
-cp .env.example .env
+POSTGRES_PASSWORD="$(sed -n 's/^POSTGRES_PASSWORD=//p' .env)"
+REDIS_PASSWORD="$(sed -n 's/^REDIS_PASSWORD=//p' .env)"
+export DATABASE_URL="postgresql://forge:${POSTGRES_PASSWORD}@localhost:5432/bedrock_forge"
+export REDIS_URL="redis://:${REDIS_PASSWORD}@localhost:6379"
+export CORS_ORIGIN="http://localhost:5173"
 pnpm db:generate
 pnpm db:migrate
+export ADMIN_BOOTSTRAP_PASSWORD="$(openssl rand -hex 24)"
 pnpm db:seed
+printf 'Admin password: %s\n' "$ADMIN_BOOTSTRAP_PASSWORD"
+unset ADMIN_BOOTSTRAP_PASSWORD
 pnpm dev
 ```
 

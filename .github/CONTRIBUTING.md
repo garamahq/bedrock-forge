@@ -28,10 +28,16 @@ how to get started.
 See [PROJECT.md](docs/reference/PROJECT.md) for architecture conventions and
 module structure.
 
+Before opening a pull request, run `pnpm verify` from the repository root. It
+runs the workspace type/lint checks and all test suites, building required
+packages in dependency order.
+
 ## Code Style
 
-- ESLint + Prettier are configured at the workspace level.
-- Run `pnpm lint` and `pnpm format` before committing.
+- `pnpm lint` runs TypeScript checks; Prettier is available through
+  `pnpm format`. ESLint is not configured yet.
+- Run `pnpm lint` before committing. Use `pnpm format` only for files you
+  intend to reformat because it writes changes across the repository.
 - Follow the existing patterns in each module (controller → service →
   repository).
 
@@ -48,7 +54,7 @@ chore: bump dependencies
 
 ## Pull Requests
 
-1. Ensure `pnpm build` and `pnpm test` pass locally.
+1. Ensure `pnpm verify` passes locally.
 2. Keep PRs focused on a single concern.
 3. Reference any related issue in the PR description (e.g. `Closes #42`).
 4. Add tests for new business logic in services and processors.
