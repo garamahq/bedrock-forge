@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
@@ -428,6 +428,16 @@ export function ServersPage() {
   });
 
   const servers = data?.items ?? [];
+
+  useEffect(() => {
+    const visibleIds = new Set(servers.map((server) => server.id));
+    setSelectedIds((previous) => {
+      const next = new Set(
+        [...previous].filter((serverId) => visibleIds.has(serverId)),
+      );
+      return next.size === previous.size ? previous : next;
+    });
+  }, [servers]);
   const totalPages = data ? Math.ceil(data.total / 10) : 1;
 
   const deleteMutation = useMutation({

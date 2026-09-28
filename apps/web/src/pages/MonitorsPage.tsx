@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useWebSocketEvent } from "@/lib/websocket";
@@ -537,6 +537,16 @@ export function MonitorsPage() {
   });
 
   const monitors = data?.items ?? [];
+
+  useEffect(() => {
+    const visibleIds = new Set(monitors.map((monitor) => monitor.id));
+    setSelectedIds((previous) => {
+      const next = new Set(
+        [...previous].filter((monitorId) => visibleIds.has(monitorId)),
+      );
+      return next.size === previous.size ? previous : next;
+    });
+  }, [monitors]);
   const totalPages = data ? Math.ceil(data.total / PAGE_LIMIT) : 1;
 
   const { data: environments = [] } = useQuery({

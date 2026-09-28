@@ -138,11 +138,20 @@ export function DataTable<T>({
   const handleSelectRow = (checked: boolean, id: string | number) => {
     if (!onSelectionChange || !selectedIds) return;
     if (checked) {
-      onSelectionChange([...selectedIds, id]);
+      if (!selectedIds.includes(id)) onSelectionChange([...selectedIds, id]);
     } else {
       onSelectionChange(selectedIds.filter((x) => x !== id));
     }
   };
+
+  useEffect(() => {
+    if (!onSelectionChange || !selectedIds?.length) return;
+    const visibleIds = new Set(data.map((row) => rowKey(row)));
+    const visibleSelection = selectedIds.filter((id) => visibleIds.has(id));
+    if (visibleSelection.length !== selectedIds.length) {
+      onSelectionChange(visibleSelection);
+    }
+  }, [data, onSelectionChange, rowKey, selectedIds]);
 
   return (
     <div className="bg-card border rounded-lg overflow-hidden shadow-sm">

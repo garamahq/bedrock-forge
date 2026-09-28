@@ -48,7 +48,7 @@ export function BulkActionsBar({
           <X className="h-4 w-4" />
         </Button>
         <span className="text-sm font-medium">
-          {selectedCount} item{selectedCount !== 1 ? "s" : ""} selected
+          {selectedCount} item{selectedCount !== 1 ? "s" : ""} selected in this view
         </span>
       </div>
 

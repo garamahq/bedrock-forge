@@ -154,6 +154,14 @@ export function BackupsPage() {
     refetchInterval: 15_000,
   });
 
+  useEffect(() => {
+    const visibleIds = new Set(backupsData?.items.map((backup) => backup.id) ?? []);
+    setSelectedIds((previous) => {
+      const next = previous.filter((backupId) => visibleIds.has(backupId));
+      return next.length === previous.length ? previous : next;
+    });
+  }, [backupsData?.items]);
+
   const createBackup = useMutation({
     mutationFn: () =>
       api.post("/backups/create", {

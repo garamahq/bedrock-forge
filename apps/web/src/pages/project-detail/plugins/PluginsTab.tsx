@@ -738,6 +738,16 @@ export function PluginsTab({
     return true;
   });
 
+  useEffect(() => {
+    const visibleSlugs = new Set(filtered.map((plugin) => plugin.slug));
+    setSelectedSlugs((previous) => {
+      const next = new Set(
+        [...previous].filter((slug) => visibleSlugs.has(slug)),
+      );
+      return next.size === previous.size ? previous : next;
+    });
+  }, [filtered]);
+
   const isBusy = scanMutation.isPending || scanning || bulkProcessing;
   const isManaging =
     !!managingJobId ||
