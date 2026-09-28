@@ -10,7 +10,7 @@
 [![TypeScript](https://img.shields.io/badge/typescript-5-blue.svg)](https://www.typescriptlang.org/)
 [![NestJS 11](https://img.shields.io/badge/nestjs-11-red.svg)](https://nestjs.com/)
 [![React 19](https://img.shields.io/badge/react-19-61dafb.svg)](https://react.dev/)
-[![Version](https://img.shields.io/badge/version-0.1.3-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/github/v/release/satusdev/bedrock-forge?color=orange)](https://github.com/satusdev/bedrock-forge/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 </div>
