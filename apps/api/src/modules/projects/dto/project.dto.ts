@@ -81,8 +81,12 @@ export class QueryProjectsDto extends PaginationQueryDto {
   server_id?: number;
 
   @IsOptional()
-  @IsString()
+  @IsIn(["exclude:archived", "active", "inactive", "archived", "all"])
   status?: string;
+
+  @IsOptional()
+  @IsIn(["no_backup", "stale_backup", "down", "unmonitored", "never_scanned"])
+  coverage?: string;
 }
 
 export class ArchiveProjectDto {

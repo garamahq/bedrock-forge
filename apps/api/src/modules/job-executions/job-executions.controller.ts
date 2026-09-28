@@ -29,6 +29,7 @@ export class JobExecutionsController {
     return this.svc.list(
       {
         queue_name: query.queue_name,
+        job_id: query.job_id,
         job_type: query.job_type,
         status: query.status,
         environment_id: query.environment_id,

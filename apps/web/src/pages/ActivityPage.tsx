@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import {
   CheckCircle2,
   XCircle,
@@ -251,11 +251,13 @@ function ExecutionRow({ row }: { row: JobExecutionRow }) {
 
 export function ActivityPage() {
   const queryClient = useQueryClient();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [page, setPage] = useState(1);
   const [queueFilter, setQueueFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [isRecovering, setIsRecovering] = useState(false);
   const [recoveryMessage, setRecoveryMessage] = useState<string | null>(null);
+  const jobIdFilter = searchParams.get("job") ?? "";
   const LIMIT = 10;
 
   async function handleRecoverQueues() {
@@ -284,7 +286,7 @@ export function ActivityPage() {
     }
   }
 
-  const queryKey = ["job-executions", page, queueFilter, statusFilter];
+  const queryKey = ["job-executions", page, queueFilter, statusFilter, jobIdFilter];
 
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey,
@@ -295,6 +297,7 @@ export function ActivityPage() {
       });
       if (queueFilter !== "all") params.set("queue_name", queueFilter);
       if (statusFilter !== "all") params.set("status", statusFilter);
+      if (/^\d+$/.test(jobIdFilter)) params.set("job_id", jobIdFilter);
       return api.get<PageResult>(`/job-executions?${params.toString()}`);
     },
     staleTime: 10_000,
@@ -386,6 +389,24 @@ export function ActivityPage() {
           </Select>
         </div>
       </div>
+
+      {jobIdFilter && /^\d+$/.test(jobIdFilter) && (
+        <div className="flex items-center justify-between gap-3 rounded-md border bg-muted/20 px-3 py-2">
+          <span className="text-sm">Showing operation #{jobIdFilter}</span>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              const next = new URLSearchParams(searchParams);
+              next.delete("job");
+              setSearchParams(next);
+              setPage(1);
+            }}
+          >
+            Clear filter
+          </Button>
+        </div>
+      )}
 
       {recoveryMessage && (
         <div className="rounded-md bg-emerald-500/10 border border-emerald-500/30 px-3 py-2 text-xs text-emerald-400 flex items-center gap-2">

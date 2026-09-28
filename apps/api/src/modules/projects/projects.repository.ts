@@ -60,6 +60,27 @@ interface BulkImportEntry {
   mainDomain?: string;
 }
 
+interface ProjectHistoryJob {
+  id: bigint;
+  queue_name: string;
+  job_type: string | null;
+  status: string;
+  created_at: Date;
+  started_at: Date | null;
+  completed_at: Date | null;
+  environment: { id: bigint; type: string; url: string | null } | null;
+}
+
+interface ProjectHistoryAuditLog {
+  id: bigint;
+  action: string;
+  resource_type: string | null;
+  resource_id: bigint | null;
+  metadata: Prisma.JsonValue | null;
+  created_at: Date;
+  user: { name: string } | null;
+}
+
 const PROJECT_LIST_INCLUDE = {
   client: true,
   hosting_package: { select: { id: true, name: true } },
@@ -100,6 +121,17 @@ const PROJECT_DETAIL_INCLUDE = {
   },
 } as const;
 
+export type ProjectListItem = Prisma.ProjectGetPayload<{
+  include: typeof PROJECT_LIST_INCLUDE;
+}>;
+
+export interface PaginatedProjects {
+  items: ProjectListItem[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
 @Injectable()
 export class ProjectsRepository {
   constructor(
@@ -107,23 +139,93 @@ export class ProjectsRepository {
     private readonly enc: EncryptionService,
   ) {}
 
-  async findAllPaginated(query: QueryProjectsDto) {
+  async findAllPaginated(query: QueryProjectsDto): Promise<PaginatedProjects> {
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
     const skip = (page - 1) * limit;
-    const where: Record<string, unknown> = {};
-    if (query.search)
-      where.name = { contains: query.search, mode: "insensitive" as const };
-    if (query.client_id) where.client_id = BigInt(query.client_id);
-    if (query.server_id)
-      where.environments = { some: { server_id: BigInt(query.server_id) } };
+    const filters: Prisma.ProjectWhereInput[] = [];
+    if (query.search) {
+      filters.push({
+        OR: [
+          { name: { contains: query.search, mode: "insensitive" } },
+          { client: { name: { contains: query.search, mode: "insensitive" } } },
+          {
+            environments: {
+              some: {
+                OR: [
+                  { url: { contains: query.search, mode: "insensitive" } },
+                  { type: { contains: query.search, mode: "insensitive" } },
+                  {
+                    server: {
+                      name: { contains: query.search, mode: "insensitive" },
+                    },
+                  },
+                  {
+                    environment_tags: {
+                      some: {
+                        tag: {
+                          name: { contains: query.search, mode: "insensitive" },
+                        },
+                      },
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        ],
+      });
+    }
+    if (query.client_id) filters.push({ client_id: BigInt(query.client_id) });
+    if (query.server_id) {
+      filters.push({
+        environments: { some: { server_id: BigInt(query.server_id) } },
+      });
+    }
     if (query.status) {
       if (query.status === "exclude:archived") {
-        where.status = { not: "archived" };
-      } else {
-        where.status = query.status;
+        filters.push({ status: { not: "archived" } });
+      } else if (
+        query.status === "active" ||
+        query.status === "inactive" ||
+        query.status === "archived"
+      ) {
+        filters.push({ status: query.status });
       }
     }
+    if (query.coverage) {
+      const environmentFilter: Prisma.EnvironmentWhereInput = {};
+      if (query.coverage === "no_backup") {
+        environmentFilter.backups = { none: { status: "completed" } };
+      } else if (query.coverage === "stale_backup") {
+        const staleBefore = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+        environmentFilter.backups = {
+          some: {
+            status: "completed",
+            completed_at: { lt: staleBefore },
+          },
+          none: {
+            status: "completed",
+            completed_at: { gte: staleBefore },
+          },
+        };
+      } else if (query.coverage === "down") {
+        environmentFilter.monitors = {
+          some: { enabled: true, last_status: { not: 200 } },
+        };
+      } else if (query.coverage === "unmonitored") {
+        environmentFilter.monitors = { none: { enabled: true } };
+      } else if (query.coverage === "never_scanned") {
+        environmentFilter.plugin_scans = { none: {} };
+      }
+      filters.push({ environments: { some: environmentFilter } });
+    }
+    const where: Prisma.ProjectWhereInput =
+      filters.length === 0
+        ? {}
+        : filters.length === 1
+          ? filters[0]
+          : { AND: filters };
 
     const [items, total] = await this.prisma.$transaction([
       this.prisma.project.findMany({
@@ -148,6 +250,100 @@ export class ProjectsRepository {
     return project;
   }
 
+  async findProjectHistory(
+    projectId: bigint,
+    environmentIds: bigint[],
+    page: number,
+    limit: number,
+    search?: string,
+  ): Promise<{
+    jobs: ProjectHistoryJob[];
+    auditLogs: ProjectHistoryAuditLog[];
+    totalJobs: number;
+    totalAuditLogs: number;
+  }> {
+    const take = page * limit;
+    const auditResourceFilters: Prisma.AuditLogWhereInput[] = [
+      { resource_type: "project", resource_id: projectId },
+    ];
+    if (environmentIds.length > 0) {
+      auditResourceFilters.push({
+        resource_type: "environment",
+        resource_id: { in: environmentIds },
+      });
+    }
+    const query = search?.trim();
+    const numericId = query && /^\d+$/.test(query) ? BigInt(query) : undefined;
+    const auditWhere: Prisma.AuditLogWhereInput = query
+      ? {
+          AND: [
+            { OR: auditResourceFilters },
+            {
+              OR: [
+                { action: { contains: query, mode: "insensitive" } },
+                ...(numericId ? [{ resource_id: numericId }] : []),
+              ],
+            },
+          ],
+        }
+      : { OR: auditResourceFilters };
+    const environmentScope: Prisma.JobExecutionWhereInput = {
+      environment_id: { in: environmentIds },
+    };
+    const jobWhere: Prisma.JobExecutionWhereInput = query
+      ? {
+          AND: [
+            environmentScope,
+            {
+              OR: [
+                { job_type: { contains: query, mode: "insensitive" } },
+                { queue_name: { contains: query, mode: "insensitive" } },
+                ...(numericId ? [{ id: numericId }] : []),
+              ],
+            },
+          ],
+        }
+      : environmentScope;
+
+    const [jobs, totalJobs, auditLogs, totalAuditLogs] = await Promise.all([
+      this.prisma.jobExecution.findMany({
+        where: jobWhere,
+        orderBy: { created_at: "desc" },
+        take,
+        select: {
+          id: true,
+          queue_name: true,
+          job_type: true,
+          status: true,
+          created_at: true,
+          started_at: true,
+          completed_at: true,
+          environment: {
+            select: { id: true, type: true, url: true },
+          },
+        },
+      }),
+      this.prisma.jobExecution.count({ where: jobWhere }),
+      this.prisma.auditLog.findMany({
+        where: auditWhere,
+        orderBy: { created_at: "desc" },
+        take,
+        select: {
+          id: true,
+          action: true,
+          resource_type: true,
+          resource_id: true,
+          metadata: true,
+          created_at: true,
+          user: { select: { name: true } },
+        },
+      }),
+      this.prisma.auditLog.count({ where: auditWhere }),
+    ]);
+
+    return { jobs, auditLogs, totalJobs, totalAuditLogs };
+  }
+
   async create(data: CreateProjectData) {
     return this.prisma.project.create({
       data: {
@@ -162,7 +358,9 @@ export class ProjectsRepository {
         ...(data.status && { status: data.status as never }),
         notes: data.notes,
         links: data.links,
-        ...(data.github_repo !== undefined && { github_repo: data.github_repo }),
+        ...(data.github_repo !== undefined && {
+          github_repo: data.github_repo,
+        }),
       },
       include: PROJECT_LIST_INCLUDE,
     });
@@ -183,7 +381,9 @@ export class ProjectsRepository {
         ...(data.status !== undefined && { status: data.status as never }),
         ...(data.notes !== undefined && { notes: data.notes }),
         ...(data.links !== undefined && { links: data.links }),
-        ...(data.github_repo !== undefined && { github_repo: data.github_repo }),
+        ...(data.github_repo !== undefined && {
+          github_repo: data.github_repo,
+        }),
       },
     });
   }
@@ -193,11 +393,18 @@ export class ProjectsRepository {
   }
 
   async getSchedulesForEnvironments(envIds: bigint[]) {
-    const [backupSchedules, pluginUpdateSchedules, monitors] = await Promise.all([
-      this.prisma.backupSchedule.findMany({ where: { environment_id: { in: envIds } } }),
-      this.prisma.pluginUpdateSchedule.findMany({ where: { environment_id: { in: envIds } } }),
-      this.prisma.monitor.findMany({ where: { environment_id: { in: envIds } } }),
-    ]);
+    const [backupSchedules, pluginUpdateSchedules, monitors] =
+      await Promise.all([
+        this.prisma.backupSchedule.findMany({
+          where: { environment_id: { in: envIds } },
+        }),
+        this.prisma.pluginUpdateSchedule.findMany({
+          where: { environment_id: { in: envIds } },
+        }),
+        this.prisma.monitor.findMany({
+          where: { environment_id: { in: envIds } },
+        }),
+      ]);
     return { backupSchedules, pluginUpdateSchedules, monitors };
   }
 

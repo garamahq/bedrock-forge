@@ -52,7 +52,7 @@ import { SecurityTab } from "./project-detail/SecurityTab";
 import { GitDeployTab } from "./project-detail/GitDeployTab";
 import { EnvironmentQuickBar } from "./project-detail/EnvironmentQuickBar";
 import { ProjectFormDialog } from "./ProjectsPage";
-import { ResourceActivityFeed } from "@/components/ResourceActivityFeed";
+import { ProjectHistoryTab } from "./project-detail/ProjectHistoryTab";
 import {
   ArchiveDialog,
   RestoreDialog,
@@ -986,7 +986,7 @@ export function ProjectDetailPage() {
               className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
             >
               <ListChecks className="h-3.5 w-3.5 opacity-70" />
-              Activity
+              History
             </TabsTrigger>
           </TabsList>
 
@@ -1071,15 +1071,7 @@ export function ProjectDetailPage() {
           </TabsContent>
 
           <TabsContent value="activity">
-            <div className="border rounded-xl p-5 bg-card shadow-sm">
-              <h3 className="text-sm font-semibold mb-4 text-muted-foreground uppercase tracking-wide">
-                Project Activity Log
-              </h3>
-              <ResourceActivityFeed
-                resourceType="project"
-                resourceId={projectId}
-              />
-            </div>
+            <ProjectHistoryTab projectId={projectId} />
           </TabsContent>
         </Tabs>
       </div>

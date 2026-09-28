@@ -18,6 +18,7 @@ import { Roles } from "../../common/decorators/roles.decorator";
 import { ROLES } from "@bedrock-forge/shared";
 import { PaginationQueryDto } from "../../common/dto/pagination-query.dto";
 import { ProjectsService } from "./projects.service";
+import type { PaginatedProjects } from "./projects.repository";
 import {
   CreateProjectDto,
   UpdateProjectDto,
@@ -35,8 +36,14 @@ import { CreateProjectFullDto } from "./dto/create-project-full.dto";
 export class ProjectsController {
   constructor(private readonly svc: ProjectsService) {}
 
-  @Get() findAll(@Query() q: QueryProjectsDto) {
+  @Get() findAll(@Query() q: QueryProjectsDto): Promise<PaginatedProjects> {
     return this.svc.findAll(q);
+  }
+  @Get(":id/history") getHistory(
+    @Param("id", ParseIntPipe) id: number,
+    @Query() query: PaginationQueryDto,
+  ) {
+    return this.svc.getHistory(id, query.page, query.limit, query.search);
   }
   @Get(":id") findOne(@Param("id", ParseIntPipe) id: number) {
     return this.svc.findOne(id);

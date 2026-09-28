@@ -16,6 +16,7 @@ function makeRepo() {
   return {
     findAllPaginated: jest.fn(),
     findById: jest.fn(),
+    findProjectHistory: jest.fn(),
     create: jest.fn(),
     update: jest.fn(),
     remove: jest.fn(),
@@ -144,6 +145,77 @@ describe("ProjectsService", () => {
       repo.findById.mockResolvedValue(makeProject());
       svc.findOne(5);
       expect(repo.findById).toHaveBeenCalledWith(BigInt(5));
+    });
+  });
+
+  describe("getHistory", () => {
+    it("merges environment operations with redacted audit summaries", async () => {
+      repo.findById.mockResolvedValue({
+        id: BigInt(1),
+        environments: [
+          { id: BigInt(10), type: "production", url: "https://mysite.com" },
+        ],
+      } as Awaited<ReturnType<ProjectsRepository["findById"]>>);
+      repo.findProjectHistory.mockResolvedValue({
+        jobs: [
+          {
+            id: BigInt(77),
+            queue_name: "backups",
+            job_type: "backup:create",
+            status: "completed",
+            created_at: new Date("2026-09-20T10:00:00.000Z"),
+            started_at: new Date("2026-09-20T10:00:01.000Z"),
+            completed_at: new Date("2026-09-20T10:00:02.000Z"),
+            environment: {
+              id: BigInt(10),
+              type: "production",
+              url: "https://mysite.com",
+            },
+          },
+        ],
+        auditLogs: [
+          {
+            id: BigInt(19),
+            action: "environment.update",
+            resource_type: "environment",
+            resource_id: BigInt(10),
+            metadata: { outcome: "success", userEmail: "private@example.test" },
+            created_at: new Date("2026-09-19T10:00:00.000Z"),
+            user: { name: "Operator" },
+          },
+        ],
+        totalJobs: 1,
+        totalAuditLogs: 1,
+      });
+
+      const result = await svc.getHistory(1, 1, 10, "backup");
+
+      expect(repo.findProjectHistory).toHaveBeenCalledWith(
+        BigInt(1),
+        [BigInt(10)],
+        1,
+        10,
+        "backup",
+      );
+      expect(result.data[0]).toEqual(
+        expect.objectContaining({
+          id: "job:77",
+          kind: "operation",
+          action: "backup:create",
+          status: "completed",
+          environment: {
+            id: 10,
+            type: "production",
+            url: "https://mysite.com",
+          },
+        }),
+      );
+      expect(result.data[1]).not.toHaveProperty("metadata");
+      expect(result.data[1]?.environment).toEqual({
+        id: 10,
+        type: "production",
+        url: "https://mysite.com",
+      });
     });
   });
 

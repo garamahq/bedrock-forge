@@ -14,6 +14,7 @@ import {
   PaginationQuery,
 } from "@bedrock-forge/shared";
 import { ProjectsRepository } from "./projects.repository";
+import type { PaginatedProjects } from "./projects.repository";
 import { projectLinksJson } from "./dto/project.dto";
 import {
   CreateProjectDto,
@@ -33,14 +34,30 @@ import { PluginUpdateSchedulesService } from "../plugin-update-schedules/plugin-
 const SECRET_ASSIGNMENT_RE =
   /\b[\w-]*(?:PASSWORD|PASSWD|PASSPHRASE|DB[_-]?PASS|SECRET|TOKEN|API[_-]?KEY|PRIVATE[_-]?KEY|CLIENT[_-]?SECRET|AUTHORIZATION)[\w-]*\b\s*["']?\s*[:=]\s*(?:"([^"]*)"|'([^']*)'|([^\s,;]+))/gi;
 const PRIVATE_KEY_RE = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/i;
-const CREDENTIAL_URL_RE =
-  /\b[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:[^@\s/]+@/i;
+const CREDENTIAL_URL_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:[^@\s/]+@/i;
 const BEARER_TOKEN_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/i;
-const JWT_TOKEN_RE = /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/;
+const JWT_TOKEN_RE =
+  /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/;
 const PLACEHOLDER_SECRET_RE =
   /^(?:your(?:[-_ ]|$)|placeholder\b|example\b|change[-_ ]?me\b|changeme\b|replace[-_ ]?me\b|redacted\b|x{4,}$|<[^>]+>|\$\{?[A-Z_][A-Z0-9_]*\}?$)/i;
 const SENSITIVE_LINK_LABEL_RE =
   /(password|passwd|db[_ -]?(?:password|pass)|secret|token|api[_ -]?key|private[_ -]?key|credential|auth(?:orization)?)/i;
+
+export interface ProjectHistoryItem {
+  id: string;
+  kind: "operation" | "audit";
+  action: string;
+  status: string | null;
+  actor: string | null;
+  resource_type: string | null;
+  resource_id: number | null;
+  created_at: Date;
+  environment: { id: number; type: string; url: string | null } | null;
+}
+
+function isJsonRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 function containsSecretAssignment(value: string): boolean {
   SECRET_ASSIGNMENT_RE.lastIndex = 0;
@@ -68,12 +85,94 @@ export class ProjectsService {
     private readonly pluginUpdateSchedulesService: PluginUpdateSchedulesService,
   ) {}
 
-  findAll(query: QueryProjectsDto) {
+  findAll(query: QueryProjectsDto): Promise<PaginatedProjects> {
     return this.repo.findAllPaginated(query);
   }
 
   findOne(id: number) {
     return this.repo.findById(BigInt(id));
+  }
+
+  async getHistory(
+    id: number,
+    page = 1,
+    limit = 25,
+    search?: string,
+  ): Promise<{
+    data: ProjectHistoryItem[];
+    total: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+  }> {
+    const safePage = Math.min(Math.max(page, 1), 100);
+    const safeLimit = Math.min(Math.max(limit, 1), 100);
+    const projectId = BigInt(id);
+    const project = await this.repo.findById(projectId);
+    const environmentsById = new Map(
+      project.environments.map((environment) => [environment.id, environment]),
+    );
+    const batch = await this.repo.findProjectHistory(
+      projectId,
+      project.environments.map((environment) => environment.id),
+      safePage,
+      safeLimit,
+      search,
+    );
+
+    const operations: ProjectHistoryItem[] = batch.jobs.map((job) => ({
+      id: `job:${job.id}`,
+      kind: "operation",
+      action: job.job_type ?? job.queue_name,
+      status: job.status,
+      actor: null,
+      resource_type: "job-execution",
+      resource_id: Number(job.id),
+      created_at: job.completed_at ?? job.started_at ?? job.created_at,
+      environment: job.environment
+        ? {
+            id: Number(job.environment.id),
+            type: job.environment.type,
+            url: job.environment.url,
+          }
+        : null,
+    }));
+    const auditEvents: ProjectHistoryItem[] = batch.auditLogs.map((event) => {
+      const metadata = isJsonRecord(event.metadata) ? event.metadata : null;
+      const eventEnvironment =
+        event.resource_type === "environment" && event.resource_id
+          ? environmentsById.get(event.resource_id)
+          : undefined;
+      return {
+        id: `audit:${event.id}`,
+        kind: "audit",
+        action: event.action,
+        status: typeof metadata?.outcome === "string" ? metadata.outcome : null,
+        actor: event.user?.name ?? null,
+        resource_type: event.resource_type,
+        resource_id: event.resource_id ? Number(event.resource_id) : null,
+        created_at: event.created_at,
+        environment: eventEnvironment
+          ? {
+              id: Number(eventEnvironment.id),
+              type: eventEnvironment.type,
+              url: eventEnvironment.url,
+            }
+          : null,
+      };
+    });
+    const allEvents = [...operations, ...auditEvents].sort(
+      (left, right) => right.created_at.getTime() - left.created_at.getTime(),
+    );
+    const total = batch.totalJobs + batch.totalAuditLogs;
+
+    return {
+      data: allEvents.slice((safePage - 1) * safeLimit, safePage * safeLimit),
+      total,
+      page: safePage,
+      limit: safeLimit,
+      totalPages: Math.ceil(total / safeLimit),
+    };
   }
 
   create(dto: CreateProjectDto) {
@@ -137,7 +236,9 @@ export class ProjectsService {
         await this.backupSchedulesService.removeRepeatableJob(Number(bs.id));
       }
       for (const pus of pluginUpdateSchedules) {
-        await this.pluginUpdateSchedulesService.removeRepeatableJob(Number(pus.id));
+        await this.pluginUpdateSchedulesService.removeRepeatableJob(
+          Number(pus.id),
+        );
       }
 
       // 3. Create job execution for tracking decommissioning
@@ -170,7 +271,10 @@ export class ProjectsService {
         DEFAULT_JOB_OPTIONS,
       );
 
-      return { message: "Decommissioning job queued. The project will be fully deleted once remote server resources are cleaned up." };
+      return {
+        message:
+          "Decommissioning job queued. The project will be fully deleted once remote server resources are cleaned up.",
+      };
     } else {
       return this.repo.remove(BigInt(id));
     }
@@ -328,20 +432,21 @@ export class ProjectsService {
     const dbHost = dto.db_host?.trim() || "localhost";
 
     // Create Project + Environment in a transaction
-    const { project, environment, jobExecution } =
-      await this.repo.createFull({
-        name,
-        client_id: BigInt(client_id),
-        hosting_package_id: dto.hosting_package_id ? BigInt(dto.hosting_package_id) : undefined,
-        server_id: BigInt(server_id),
-        envType,
-        siteUrl,
-        rootPath,
-        queueName: QUEUES.PROJECTS,
-        jobType: JOB_TYPES.PROJECT_CREATE_BEDROCK,
-        notes: dto.notes,
-        links: projectLinksJson(dto.links),
-      });
+    const { project, environment, jobExecution } = await this.repo.createFull({
+      name,
+      client_id: BigInt(client_id),
+      hosting_package_id: dto.hosting_package_id
+        ? BigInt(dto.hosting_package_id)
+        : undefined,
+      server_id: BigInt(server_id),
+      envType,
+      siteUrl,
+      rootPath,
+      queueName: QUEUES.PROJECTS,
+      jobType: JOB_TYPES.PROJECT_CREATE_BEDROCK,
+      notes: dto.notes,
+      links: projectLinksJson(dto.links),
+    });
 
     // Enqueue the provisioning job
     const job = await this.projectsQueue.add(
@@ -403,7 +508,9 @@ export class ProjectsService {
         await this.backupSchedulesService.removeRepeatableJob(Number(bs.id));
       }
       for (const pus of pluginUpdateSchedules) {
-        await this.pluginUpdateSchedulesService.removeRepeatableJob(Number(pus.id));
+        await this.pluginUpdateSchedulesService.removeRepeatableJob(
+          Number(pus.id),
+        );
       }
     }
 

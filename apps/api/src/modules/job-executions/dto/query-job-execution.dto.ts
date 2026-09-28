@@ -43,6 +43,12 @@ export class QueryJobExecutionDto {
   limit: number = 25;
 
   @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  job_id?: number;
+
+  @IsOptional()
   @IsString()
   @IsIn(VALID_QUEUES)
   queue_name?: string;

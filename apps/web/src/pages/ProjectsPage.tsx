@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -16,6 +16,7 @@ import {
   FolderPlus,
   Archive,
   RotateCcw,
+  BookmarkPlus,
 } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "@/lib/api-client";
@@ -113,6 +114,91 @@ const projectSchema = z.object({
 type ProjectForm = z.infer<typeof projectSchema>;
 
 const STATUS_OPTIONS = ["active", "inactive", "archived"] as const;
+const SAVED_PROJECT_VIEWS_KEY = "bedrock-forge:saved-project-views:v1";
+const SAVED_VIEW_STATUS_OPTIONS = [
+  "exclude:archived",
+  "active",
+  "inactive",
+  "archived",
+  "all",
+] as const;
+const SAVED_VIEW_COVERAGE_OPTIONS = [
+  "all-coverage",
+  "no_backup",
+  "stale_backup",
+  "down",
+  "unmonitored",
+  "never_scanned",
+] as const;
+
+function validProjectFilter(
+  value: string | null,
+  allowed: readonly string[],
+  fallback: string,
+): string {
+  return value && allowed.includes(value) ? value : fallback;
+}
+
+function validResourceId(value: string | null): string {
+  return value && /^[1-9]\d*$/.test(value) ? value : "";
+}
+
+interface SavedProjectView {
+  id: string;
+  name: string;
+  search: string;
+  clientId: string;
+  serverId: string;
+  status: string;
+  coverage: string;
+}
+
+function loadSavedProjectViews(): SavedProjectView[] {
+  try {
+    const raw: unknown = JSON.parse(
+      window.localStorage.getItem(SAVED_PROJECT_VIEWS_KEY) ?? "null",
+    );
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .flatMap((item): SavedProjectView[] => {
+        if (typeof item !== "object" || item === null) return [];
+        const view = item as Record<string, unknown>;
+        if (
+          typeof view.id !== "string" ||
+          typeof view.name !== "string" ||
+          typeof view.search !== "string" ||
+          typeof view.clientId !== "string" ||
+          typeof view.serverId !== "string" ||
+          typeof view.status !== "string" ||
+          !SAVED_VIEW_STATUS_OPTIONS.includes(
+            view.status as (typeof SAVED_VIEW_STATUS_OPTIONS)[number],
+          ) ||
+          typeof view.coverage !== "string" ||
+          !SAVED_VIEW_COVERAGE_OPTIONS.includes(
+            view.coverage as (typeof SAVED_VIEW_COVERAGE_OPTIONS)[number],
+          ) ||
+          (view.clientId !== "" && !/^[1-9]\d*$/.test(view.clientId)) ||
+          (view.serverId !== "" && !/^[1-9]\d*$/.test(view.serverId))
+        ) {
+          return [];
+        }
+        return [
+          {
+            id: view.id,
+            name: view.name,
+            search: view.search,
+            clientId: view.clientId,
+            serverId: view.serverId,
+            status: view.status,
+            coverage: view.coverage,
+          },
+        ];
+      })
+      .slice(0, 20);
+  } catch {
+    return [];
+  }
+}
 
 export function ProjectFormDialog({
   open,
@@ -758,19 +844,34 @@ export function ProjectsPage() {
   );
   const [searchParams, setSearchParams] = useSearchParams();
   const [page, setPage] = useState(1);
-  const [search, setSearch] = useState("");
-  const [searchInput, setSearchInput] = useState("");
+  const [search, setSearch] = useState(() => searchParams.get("search") ?? "");
+  const [searchInput, setSearchInput] = useState(
+    () => searchParams.get("search") ?? "",
+  );
   const [clientFilter, setClientFilter] = useState(() => {
-    const value = searchParams.get("client_id") ?? "";
-    return value === "all-clients" ? "" : value;
+    return validResourceId(searchParams.get("client_id"));
   });
   const [serverFilter, setServerFilter] = useState(() => {
-    const value = searchParams.get("server_id") ?? "";
-    return value === "all-servers" ? "" : value;
+    return validResourceId(searchParams.get("server_id"));
   });
-  const [statusFilter, setStatusFilter] = useState(
-    searchParams.get("status") ?? "exclude:archived",
+  const [statusFilter, setStatusFilter] = useState(() =>
+    validProjectFilter(
+      searchParams.get("status"),
+      SAVED_VIEW_STATUS_OPTIONS,
+      "exclude:archived",
+    ),
   );
+  const [coverageFilter, setCoverageFilter] = useState(() =>
+    validProjectFilter(
+      searchParams.get("coverage"),
+      SAVED_VIEW_COVERAGE_OPTIONS,
+      "all-coverage",
+    ),
+  );
+  const [savedViews, setSavedViews] = useState(loadSavedProjectViews);
+  const [selectedSavedViewId, setSelectedSavedViewId] = useState("");
+  const [saveViewOpen, setSaveViewOpen] = useState(false);
+  const [savedViewName, setSavedViewName] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [bedrockOpen, setBedrockOpen] = useState(false);
@@ -791,6 +892,7 @@ export function ProjectsPage() {
       clientFilter,
       serverFilter,
       statusFilter,
+      coverageFilter,
     ],
     queryFn: () => {
       const qs = new URLSearchParams({ page: String(page), limit: "10" });
@@ -799,6 +901,7 @@ export function ProjectsPage() {
       if (serverFilter) qs.set("server_id", serverFilter);
       if (statusFilter && statusFilter !== "all")
         qs.set("status", statusFilter);
+      if (coverageFilter !== "all-coverage") qs.set("coverage", coverageFilter);
       return api.get<{ items: Project[]; total: number }>(`/projects?${qs}`);
     },
   });
@@ -886,6 +989,95 @@ export function ProjectsPage() {
 
   const projects = data?.items ?? [];
 
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        SAVED_PROJECT_VIEWS_KEY,
+        JSON.stringify(savedViews),
+      );
+    } catch {
+      // The current filters remain usable when browser storage is unavailable.
+    }
+  }, [savedViews]);
+
+  function applySavedView(viewId: string) {
+    const view = savedViews.find((candidate) => candidate.id === viewId);
+    if (!view) {
+      setSelectedSavedViewId("");
+      return;
+    }
+    setSelectedSavedViewId(viewId);
+    setSearch(view.search);
+    setSearchInput(view.search);
+    setClientFilter(view.clientId);
+    setServerFilter(view.serverId);
+    setStatusFilter(view.status);
+    setCoverageFilter(view.coverage);
+    setSearchParams((previous) => {
+      if (view.search) previous.set("search", view.search);
+      else previous.delete("search");
+      if (view.clientId) previous.set("client_id", view.clientId);
+      else previous.delete("client_id");
+      if (view.serverId) previous.set("server_id", view.serverId);
+      else previous.delete("server_id");
+      if (view.status && view.status !== "exclude:archived") {
+        previous.set("status", view.status);
+      } else {
+        previous.delete("status");
+      }
+      if (view.coverage && view.coverage !== "all-coverage") {
+        previous.set("coverage", view.coverage);
+      } else {
+        previous.delete("coverage");
+      }
+      return previous;
+    });
+    setPage(1);
+  }
+
+  function saveCurrentView() {
+    const name = savedViewName.trim();
+    if (!name) return;
+    const existing = savedViews.find(
+      (view) => view.name.toLowerCase() === name.toLowerCase(),
+    );
+    const view: SavedProjectView = {
+      id: existing?.id ?? crypto.randomUUID(),
+      name,
+      search,
+      clientId: clientFilter,
+      serverId: serverFilter,
+      status: statusFilter,
+      coverage: coverageFilter,
+    };
+    setSavedViews((current) =>
+      [view, ...current.filter((candidate) => candidate.id !== view.id)].slice(
+        0,
+        20,
+      ),
+    );
+    setSelectedSavedViewId(view.id);
+    setSavedViewName("");
+    setSaveViewOpen(false);
+  }
+
+  function deleteSavedView() {
+    setSavedViews((current) =>
+      current.filter((view) => view.id !== selectedSavedViewId),
+    );
+    setSelectedSavedViewId("");
+  }
+
+  useEffect(() => {
+    const visibleIds = new Set(projects.map((project) => project.id));
+    setSelectedIds((previous) => {
+      const next = new Set(
+        [...previous].filter((projectId) => visibleIds.has(projectId)),
+      );
+      return next.size === previous.size ? previous : next;
+    });
+  }, [projects]);
+
   // ── Selection Logic ──────────────────────────────────────────────────────
   const toggleSelect = (id: number) => {
     const next = new Set(selectedIds);
@@ -960,23 +1152,105 @@ export function ProjectsPage() {
         onChange={setSearchInput}
         onSearch={() => {
           setSearch(searchInput);
+          setSelectedSavedViewId("");
+          setSearchParams((previous) => {
+            if (searchInput) previous.set("search", searchInput);
+            else previous.delete("search");
+            return previous;
+          });
           setPage(1);
         }}
         onClear={() => {
           setSearch("");
           setSearchInput("");
+          setSelectedSavedViewId("");
+          setSearchParams((previous) => {
+            previous.delete("search");
+            return previous;
+          });
           setPage(1);
         }}
-        placeholder="Search projects…"
+        placeholder="Search projects, URLs, clients, servers, and tags…"
         totalCount={data?.total ?? 0}
         totalLabel="total projects"
       >
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <Select
+            value={selectedSavedViewId || "saved-view-none"}
+            onValueChange={applySavedView}
+          >
+            <SelectTrigger className="w-[170px] h-9">
+              <SelectValue placeholder="Saved views" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="saved-view-none">Saved views</SelectItem>
+              {savedViews.map((view) => (
+                <SelectItem key={view.id} value={view.id}>
+                  {view.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select
+            value={coverageFilter}
+            onValueChange={(value) => {
+              setCoverageFilter(value);
+              setSelectedSavedViewId("");
+              setSearchParams((previous) => {
+                if (value === "all-coverage") previous.delete("coverage");
+                else previous.set("coverage", value);
+                return previous;
+              });
+              setPage(1);
+            }}
+          >
+            <SelectTrigger className="w-[190px] h-9">
+              <SelectValue placeholder="All coverage" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all-coverage">All coverage</SelectItem>
+              <SelectItem value="no_backup">No completed backup</SelectItem>
+              <SelectItem value="stale_backup">
+                Backup older than 30 days
+              </SelectItem>
+              <SelectItem value="down">Site down</SelectItem>
+              <SelectItem value="unmonitored">No active monitor</SelectItem>
+              <SelectItem value="never_scanned">
+                Never plugin scanned
+              </SelectItem>
+            </SelectContent>
+          </Select>
+          {selectedSavedViewId && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-9 w-9"
+              aria-label="Delete saved view"
+              title="Delete saved view"
+              onClick={deleteSavedView}
+            >
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          )}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-9"
+            onClick={() => setSaveViewOpen(true)}
+          >
+            <BookmarkPlus className="mr-1.5 h-4 w-4" />
+            Save view
+          </Button>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
           <Select
             value={clientFilter || "all-clients"}
             onValueChange={(v) => {
               const nextFilter = v === "all-clients" ? "" : v;
               setClientFilter(nextFilter);
+              setSelectedSavedViewId("");
               setSearchParams((prev) => {
                 if (nextFilter) prev.set("client_id", nextFilter);
                 else prev.delete("client_id");
@@ -1003,6 +1277,7 @@ export function ProjectsPage() {
             onValueChange={(v) => {
               const nextFilter = v === "all-servers" ? "" : v;
               setServerFilter(nextFilter);
+              setSelectedSavedViewId("");
               setSearchParams((prev) => {
                 if (nextFilter) prev.set("server_id", nextFilter);
                 else prev.delete("server_id");
@@ -1027,6 +1302,7 @@ export function ProjectsPage() {
             value={statusFilter}
             onValueChange={(v) => {
               setStatusFilter(v);
+              setSelectedSavedViewId("");
               setSearchParams((prev) => {
                 if (v && v !== "exclude:archived") prev.set("status", v);
                 else prev.delete("status");
@@ -1121,6 +1397,51 @@ export function ProjectsPage() {
           onPageChange={setPage}
         />
       )}
+
+      <Dialog open={saveViewOpen} onOpenChange={setSaveViewOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Save this project view</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="saved-project-view-name">View name</Label>
+            <Input
+              id="saved-project-view-name"
+              value={savedViewName}
+              onChange={(event) => setSavedViewName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && savedViewName.trim()) {
+                  event.preventDefault();
+                  saveCurrentView();
+                }
+              }}
+              maxLength={60}
+              placeholder="Production sites for Acme"
+              autoFocus
+            />
+            <p className="text-xs text-muted-foreground">
+              Saves the current search, client, server, and status filters in
+              this browser.
+            </p>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setSaveViewOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={saveCurrentView}
+              disabled={!savedViewName.trim()}
+            >
+              Save view
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <ProjectFormDialog
         open={createOpen}

@@ -3,6 +3,7 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { Prisma, JobExecutionStatus } from "@prisma/client";
 
 export interface JobExecutionFilter {
+  job_id?: number;
   queue_name?: string;
   job_type?: string;
   status?: string;
@@ -50,6 +51,7 @@ export class JobExecutionsRepository {
     limit: number,
   ): Promise<JobExecutionPage> {
     const where: Record<string, unknown> = {};
+    if (filter.job_id) where.id = BigInt(filter.job_id);
 
     if (filter.queue_name) where.queue_name = filter.queue_name;
     if (filter.job_type) where.job_type = filter.job_type;
