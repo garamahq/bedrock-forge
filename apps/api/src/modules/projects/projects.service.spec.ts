@@ -8,6 +8,7 @@ import { MonitorsService } from "../monitors/monitors.service";
 import { BackupSchedulesService } from "../backups/backup-schedules.service";
 import { PluginUpdateSchedulesService } from "../plugin-update-schedules/plugin-update-schedules.service";
 import { QUEUES } from "@bedrock-forge/shared";
+import { BadRequestException } from "@nestjs/common";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -162,6 +163,27 @@ describe("ProjectsService", () => {
           support_package_id: BigInt(2),
         }),
       );
+    });
+
+    it("rejects credential-like content in project notes", async () => {
+      expect(() =>
+        svc.create({
+          name: "New Site",
+          client_id: 3,
+          notes: "DB_PASSWORD=real-secret-value",
+        }),
+      ).toThrow(BadRequestException);
+      expect(repo.create).not.toHaveBeenCalled();
+    });
+
+    it("allows placeholder examples in project notes", async () => {
+      repo.create.mockResolvedValue(makeProject());
+      await svc.create({
+        name: "New Site",
+        client_id: 3,
+        notes: "Set API_KEY=your-api-key in the integration settings.",
+      });
+      expect(repo.create).toHaveBeenCalled();
     });
   });
 

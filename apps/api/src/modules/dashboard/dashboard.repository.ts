@@ -1,4 +1,5 @@
 import { Injectable } from "@nestjs/common";
+import { isHttpStatusWorking } from "@bedrock-forge/shared";
 import { PrismaService } from "../../prisma/prisma.service";
 
 export interface AttentionItem {
@@ -425,7 +426,9 @@ export class DashboardRepository {
       });
     }
 
-    for (const monitor of monitorsDown.filter((m) => m.last_status !== 200)) {
+    for (const monitor of monitorsDown.filter(
+      (m) => !isHttpStatusWorking(m.last_status),
+    )) {
       items.push({
         id: `monitor_down_${monitor.id}`,
         severity: "critical",

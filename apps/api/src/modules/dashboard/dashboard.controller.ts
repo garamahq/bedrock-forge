@@ -7,7 +7,7 @@ import { DashboardService } from "./dashboard.service";
 
 @Controller("dashboard")
 @UseGuards(AuthGuard("jwt"), RolesGuard)
-@Roles(ROLES.CLIENT)
+@Roles(ROLES.MAINTAINER)
 export class DashboardController {
   constructor(private readonly svc: DashboardService) {}
 

@@ -3,6 +3,35 @@ import { SettingsRepository } from "../settings.repository";
 import { EncryptionService } from "../../../common/encryption/encryption.service";
 import { UpdateCloudflareDnsRecordDto } from "../dto/cloudflare-settings.dto";
 
+type CloudflareRecord = {
+  type: string;
+  name: string;
+  content: string;
+  ttl: number;
+  proxied: boolean;
+};
+
+type CloudflareResponse = {
+  success?: boolean;
+  errors: unknown[];
+  result: unknown;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isCloudflareRecord(value: unknown): value is CloudflareRecord {
+  return (
+    isRecord(value) &&
+    typeof value.type === "string" &&
+    typeof value.name === "string" &&
+    typeof value.content === "string" &&
+    typeof value.ttl === "number" &&
+    typeof value.proxied === "boolean"
+  );
+}
+
 @Injectable()
 export class CloudflareSettingsService {
   constructor(
@@ -45,9 +74,13 @@ export class CloudflareSettingsService {
   async testCloudflare() {
     const { token, zoneId } = await this.getCloudflareCredentials();
     const result = await this.cloudflareFetch(token, `/zones/${zoneId}`);
+    const zoneName =
+      isRecord(result.result) && typeof result.result.name === "string"
+        ? result.result.name
+        : zoneId;
     return {
       success: true,
-      message: `Connected to ${result.result?.name ?? zoneId}`,
+      message: `Connected to ${zoneName}`,
       zone: result.result,
     };
   }
@@ -58,7 +91,7 @@ export class CloudflareSettingsService {
       token,
       `/zones/${zoneId}/dns_records?per_page=100`,
     );
-    return result.result ?? [];
+    return Array.isArray(result.result) ? result.result : [];
   }
 
   async updateCloudflareDnsRecord(
@@ -70,6 +103,11 @@ export class CloudflareSettingsService {
       token,
       `/zones/${zoneId}/dns_records/${recordId}`,
     );
+    if (!isCloudflareRecord(existing.result)) {
+      throw new BadRequestException(
+        "Cloudflare returned an invalid DNS record.",
+      );
+    }
     const current = existing.result;
     const payload = {
       type: dto.type ?? current.type,
@@ -127,7 +165,7 @@ export class CloudflareSettingsService {
     token: string,
     path: string,
     init: RequestInit = {},
-  ): Promise<any> {
+  ): Promise<CloudflareResponse> {
     const res = await fetch(`https://api.cloudflare.com/client/v4${path}`, {
       ...init,
       headers: {
@@ -136,14 +174,25 @@ export class CloudflareSettingsService {
         ...(init.headers ?? {}),
       },
     });
-    const payload = await res.json().catch(() => null);
-    if (!res.ok || payload?.success === false) {
+    const payload: unknown = await res.json().catch(() => null);
+    if (!isRecord(payload)) {
+      throw new BadRequestException("Cloudflare returned an invalid response.");
+    }
+    const errors = Array.isArray(payload.errors) ? payload.errors : [];
+    if (!res.ok || payload.success === false) {
+      const firstError = errors[0];
       const message =
-        payload?.errors?.[0]?.message ??
+        (isRecord(firstError) && typeof firstError.message === "string"
+          ? firstError.message
+          : undefined) ??
         res.statusText ??
         "Cloudflare request failed";
       throw new BadRequestException(message);
     }
-    return payload;
+    return {
+      success: payload.success === true,
+      errors,
+      result: payload.result,
+    };
   }
 }

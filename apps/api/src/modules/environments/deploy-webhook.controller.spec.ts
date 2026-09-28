@@ -20,14 +20,13 @@ describe("DeployWebhookController", () => {
     controller = module.get(DeployWebhookController);
   });
 
-  it("calls triggerDeployWebhook with query token and body", async () => {
+  it("calls triggerDeployWebhook with header token and body", async () => {
     const req = { body: { ref: "refs/heads/main", after: "abc" } } as any;
 
     const res = await controller.handleDeployWebhook(
       1,
       req,
       "token-123",
-      undefined,
       undefined,
       "push",
     );
@@ -38,6 +37,7 @@ describe("DeployWebhookController", () => {
       signature: undefined,
       event: "push",
       body: req.body,
+      rawBody: undefined,
     });
   });
 
@@ -47,7 +47,6 @@ describe("DeployWebhookController", () => {
     await controller.handleDeployWebhook(
       2,
       req,
-      undefined,
       "header-token",
       "sha256=abcdef",
       "ping",
@@ -58,6 +57,7 @@ describe("DeployWebhookController", () => {
       signature: "sha256=abcdef",
       event: "ping",
       body: req.body,
+      rawBody: undefined,
     });
   });
 
@@ -65,14 +65,7 @@ describe("DeployWebhookController", () => {
     const req = { body: {} } as any;
 
     await expect(
-      controller.handleDeployWebhook(
-        3,
-        req,
-        undefined,
-        undefined,
-        undefined,
-        "push",
-      ),
+      controller.handleDeployWebhook(3, req, undefined, undefined, "push"),
     ).rejects.toThrow(BadRequestException);
   });
 });

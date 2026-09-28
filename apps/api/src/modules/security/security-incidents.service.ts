@@ -1,12 +1,13 @@
 import { Injectable, NotFoundException } from "@nestjs/common";
 import { SecurityRepository } from "./security.repository";
+import type { SecurityIncidentStatus } from "@prisma/client";
 
 @Injectable()
 export class SecurityIncidentsService {
   constructor(private readonly repo: SecurityRepository) {}
 
   async listIncidents(params: {
-    status?: string;
+    status?: SecurityIncidentStatus;
     serverId?: number;
     page?: number;
     limit?: number;
@@ -25,7 +26,7 @@ export class SecurityIncidentsService {
     return incident;
   }
 
-  async updateIncidentStatus(id: number, status: string) {
+  async updateIncidentStatus(id: number, status: SecurityIncidentStatus) {
     const incident = await this.repo.findIncidentById(BigInt(id));
     if (!incident) throw new NotFoundException(`Incident ${id} not found`);
     return this.repo.updateIncidentStatus(BigInt(id), status);

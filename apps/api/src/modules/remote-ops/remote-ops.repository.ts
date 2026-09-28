@@ -11,7 +11,7 @@ export class RemoteOpsRepository {
     action: string;
     resource_type: string;
     resource_id: bigint;
-    metadata: Record<string, any>;
+    metadata: Prisma.InputJsonObject;
   }) {
     return this.prisma.auditLog.create({ data }).catch(() => undefined);
   }

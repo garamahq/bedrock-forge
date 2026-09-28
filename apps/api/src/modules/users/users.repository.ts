@@ -1,4 +1,5 @@
 import { Injectable } from "@nestjs/common";
+import { Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { Role } from "@bedrock-forge/shared";
 
@@ -7,6 +8,7 @@ const USER_WITH_ROLES = {
     user_roles: { include: { role: true } },
   },
 } as const;
+type UserWithRoles = Prisma.UserGetPayload<typeof USER_WITH_ROLES>;
 
 @Injectable()
 export class UsersRepository {
@@ -77,14 +79,23 @@ export class UsersRepository {
     });
   }
 
-  async update(
+  async updateAndRevokeRefreshTokens(
     id: number,
     data: { email?: string; name?: string; password_hash?: string },
-  ) {
-    return this.prisma.user.update({
-      where: { id: BigInt(id) },
-      data,
-      ...USER_WITH_ROLES,
+  ): Promise<UserWithRoles> {
+    return this.prisma.$transaction(async (tx) => {
+      const user = await tx.user.update({
+        where: { id: BigInt(id) },
+        data,
+        ...USER_WITH_ROLES,
+      });
+      if (data.password_hash !== undefined) {
+        await tx.refreshToken.updateMany({
+          where: { user_id: BigInt(id), revoked_at: null },
+          data: { revoked_at: new Date() },
+        });
+      }
+      return user;
     });
   }
 

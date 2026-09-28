@@ -13,6 +13,7 @@ import type {
   ServerHardeningActionType,
   EnvironmentHardeningActionType,
 } from "@bedrock-forge/shared";
+import type { SecurityFindingStatus, SecurityIncidentStatus } from "@prisma/client";
 import type { UpsertSecurityScheduleDto } from "./dto/security-schedule.dto";
 import type { AckFindingDto, RemoveAckDto } from "./dto/ack-finding.dto";
 import type { GenerateSecurityReportDto } from "./dto/generate-security-report.dto";
@@ -90,7 +91,7 @@ export class SecurityService {
 
   async transitionFindingStatus(
     id: number,
-    status: any,
+    status: SecurityFindingStatus,
     note?: string,
     actorId?: number,
   ) {
@@ -283,7 +284,7 @@ export class SecurityService {
   // ─── Incidents ─────────────────────────────────────────────────────────────
 
   async listIncidents(params: {
-    status?: string;
+    status?: SecurityIncidentStatus;
     serverId?: number;
     page?: number;
     limit?: number;
@@ -295,7 +296,7 @@ export class SecurityService {
     return this.incidentsSvc.getIncidentById(id);
   }
 
-  async updateIncidentStatus(id: number, status: string) {
+  async updateIncidentStatus(id: number, status: SecurityIncidentStatus) {
     return this.incidentsSvc.updateIncidentStatus(id, status);
   }
 

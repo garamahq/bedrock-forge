@@ -34,7 +34,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
 
     if (status >= 400) {
       this.logger.warn(
-        `HTTP ${status} on ${request.method} ${request.url}: ${JSON.stringify(message)}`,
+        `HTTP ${status} on ${request.method} ${request.path}: ${JSON.stringify(message)}`,
       );
       if (status >= 500) {
         this.logger.error(
@@ -46,7 +46,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
     response.status(status).json({
       statusCode: status,
       timestamp: new Date().toISOString(),
-      path: request.url,
+      path: request.path,
       message,
     });
   }

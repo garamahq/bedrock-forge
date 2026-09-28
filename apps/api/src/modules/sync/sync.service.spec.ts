@@ -201,12 +201,9 @@ describe("SyncService", () => {
 
       const result = await svc.cancelJobExecution(5);
 
-      expect(redisSet).toHaveBeenCalledWith(
-        "forge:cancel:bull-exec-5",
-        "1",
-        "EX",
-        3600,
-      );
+      expect(redisSet).toHaveBeenCalledWith("forge:cancel:bull-exec-5", "1", {
+        EX: 3600,
+      });
       expect(repo.cancelJobExecutionIfActive).toHaveBeenCalledWith(
         BigInt(5),
         "Cancelled by user",

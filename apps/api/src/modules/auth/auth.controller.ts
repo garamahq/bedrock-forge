@@ -22,8 +22,10 @@ import type {
   Response as ExpressResponse,
 } from "express";
 import { AuthService } from "./auth.service";
+import type { TokenPair } from "./auth.service";
 import { LoginDto } from "./dto/auth.dto";
 import { ChangePasswordDto } from "./dto/change-password.dto";
+import { MfaCodeDto } from "./dto/mfa-code.dto";
 import {
   CurrentUser,
   AuthenticatedUser,
@@ -40,7 +42,7 @@ export class AuthController {
     @Body() dto: LoginDto,
     @Req() req: ExpressRequest,
     @Res({ passthrough: true }) res: ExpressResponse,
-  ): Promise<any> {
+  ): Promise<Pick<TokenPair, "accessToken" | "user"> | { mfaRequired: true }> {
     const result = await this.authService.login(
       dto.email,
       dto.password,
@@ -64,7 +66,7 @@ export class AuthController {
   async refresh(
     @Req() req: ExpressRequest,
     @Res({ passthrough: true }) res: ExpressResponse,
-  ): Promise<any> {
+  ): Promise<Pick<TokenPair, "accessToken" | "user">> {
     const refreshToken = this.getRefreshCookie(req);
     if (!refreshToken) {
       throw new UnauthorizedException("Missing refresh token");
@@ -148,10 +150,9 @@ export class AuthController {
   @HttpCode(HttpStatus.NO_CONTENT)
   async enableMfa(
     @CurrentUser() user: AuthenticatedUser,
-    @Body("code") code: string,
+    @Body() dto: MfaCodeDto,
   ) {
-    if (!code) throw new BadRequestException("MFA code is required");
-    await this.authService.enableMfa(user.id, code);
+    await this.authService.enableMfa(user.id, dto.code);
   }
 
   @Post("mfa/disable")
@@ -159,10 +160,9 @@ export class AuthController {
   @HttpCode(HttpStatus.NO_CONTENT)
   async disableMfa(
     @CurrentUser() user: AuthenticatedUser,
-    @Body("code") code: string,
+    @Body() dto: MfaCodeDto,
   ) {
-    if (!code) throw new BadRequestException("MFA code is required to disable 2FA");
-    await this.authService.disableMfa(user.id, code);
+    await this.authService.disableMfa(user.id, dto.code);
   }
 
   private setRefreshCookie(res: ExpressResponse, refreshToken: string): void {

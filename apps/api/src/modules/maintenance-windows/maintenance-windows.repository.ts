@@ -1,4 +1,5 @@
 import { Injectable } from "@nestjs/common";
+import { Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 
 @Injectable()
@@ -11,7 +12,7 @@ export class MaintenanceWindowsRepository {
     page: number;
     limit: number;
   }) {
-    const where: Record<string, any> = {};
+    const where: Prisma.MaintenanceWindowWhereInput = {};
 
     if (filters.resource_type) {
       where.resource_type = filters.resource_type;

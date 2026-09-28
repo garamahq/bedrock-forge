@@ -49,6 +49,7 @@ import { CorrelationIdMiddleware } from "./common/middleware/correlation-id.midd
 import { LoggingInterceptor } from "./common/interceptors/logging.interceptor";
 import { SettingsRepository } from "./modules/settings/settings.repository";
 import { AuditInterceptor } from "./common/interceptors/audit.interceptor";
+import { SensitiveResponseInterceptor } from "./common/interceptors/sensitive-response.interceptor";
 import { HttpExceptionFilter } from "./common/filters/http-exception.filter";
 import { QUEUES } from "@bedrock-forge/shared";
 import appConfig from "./config/app.config";
@@ -161,6 +162,8 @@ import appConfig from "./config/app.config";
     { provide: APP_INTERCEPTOR, useClass: LoggingInterceptor },
     // Global audit trail — logs all non-GET requests to audit_logs
     { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
+    // Remove encrypted fields and deployment secrets from every API response.
+    { provide: APP_INTERCEPTOR, useClass: SensitiveResponseInterceptor },
     IpAllowlistMiddleware,
     SettingsRepository,
   ],
@@ -168,9 +171,7 @@ import appConfig from "./config/app.config";
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {
     // Request Correlation ID Middleware runs first on all routes
-    consumer
-      .apply(CorrelationIdMiddleware)
-      .forRoutes("*");
+    consumer.apply(CorrelationIdMiddleware).forRoutes("*");
 
     // Health endpoint sits outside the /api prefix (excluded in main.ts via setGlobalPrefix).
     // Auth endpoints are always reachable regardless of IP allowlist so

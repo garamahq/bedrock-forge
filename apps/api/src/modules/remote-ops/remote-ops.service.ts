@@ -618,8 +618,7 @@ function quoteEnvValue(value: string): string {
 function maskSecret(value: string): string {
   const unquoted = value.replace(/^['"]|['"]$/g, "");
   if (!unquoted) return "";
-  if (unquoted.length <= 4) return "****";
-  return `${unquoted.slice(0, 2)}****${unquoted.slice(-2)}`;
+  return "****";
 }
 
 function checksum(content: string | Buffer): string {

@@ -1,4 +1,9 @@
-import { Injectable, NotFoundException, BadRequestException, Logger } from "@nestjs/common";
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  Logger,
+} from "@nestjs/common";
 import { JobExecutionStatus } from "@prisma/client";
 import { ModuleRef } from "@nestjs/core";
 import { getQueueToken } from "@nestjs/bullmq";
@@ -42,7 +47,12 @@ export class JobExecutionsService {
     status: JobExecutionStatus,
     error?: string,
   ) {
-    return this.repo.updateStatusByBullJobId(bullJobId, queueName, status, error);
+    return this.repo.updateStatusByBullJobId(
+      bullJobId,
+      queueName,
+      status,
+      error,
+    );
   }
 
   updateProgressByBullJobId(
@@ -76,7 +86,9 @@ export class JobExecutionsService {
     }
 
     if (!jobExec.job_type) {
-      throw new BadRequestException(`Cannot retry a job execution with no job type`);
+      throw new BadRequestException(
+        `Cannot retry a job execution with no job type`,
+      );
     }
 
     return this.orchestrator.enqueue({
@@ -85,7 +97,9 @@ export class JobExecutionsService {
       jobType: jobExec.job_type,
       payload: jobExec.payload,
       serverId: jobExec.server_id ? Number(jobExec.server_id) : undefined,
-      environmentId: jobExec.environment_id ? Number(jobExec.environment_id) : undefined,
+      environmentId: jobExec.environment_id
+        ? Number(jobExec.environment_id)
+        : undefined,
     });
   }
 
@@ -102,13 +116,17 @@ export class JobExecutionsService {
       if (queue && jobExec.bull_job_id) {
         const bullJob = await queue.getJob(jobExec.bull_job_id);
         if (bullJob) {
-          await bullJob.moveToFailed(new Error("Discarded by operator"), "0", true).catch(async () => {
-            await bullJob.remove().catch(() => {});
-          });
+          await bullJob
+            .moveToFailed(new Error("Discarded by operator"), "0", true)
+            .catch(async () => {
+              await bullJob.remove().catch(() => {});
+            });
         }
       }
     } catch (err) {
-      this.logger.debug(`Could not remove bull job ${jobExec.bull_job_id} from queue: ${err}`);
+      this.logger.debug(
+        `Could not remove bull job ${jobExec.bull_job_id} from queue: ${err}`,
+      );
     }
 
     return this.repo.updateStatus(
@@ -135,19 +153,23 @@ export class JobExecutionsService {
         for (const job of activeJobs) {
           try {
             const lockKey = `bull:${qName}:${job.id}:lock`;
-            const hasLock = await client.exists(lockKey);
+            const hasLock = Boolean(await client.get(lockKey));
             if (!hasLock) {
-              await job.moveToFailed(
-                new Error("Stalled active job recovered by operator"),
-                "0",
-                true,
-              ).catch(async () => {
-                await job.remove().catch(() => {});
-              });
+              await job
+                .moveToFailed(
+                  new Error("Stalled active job recovered by operator"),
+                  "0",
+                  true,
+                )
+                .catch(async () => {
+                  await job.remove().catch(() => {});
+                });
               reclaimed++;
             }
           } catch (jobErr) {
-            this.logger.debug(`Error checking active job ${job.id} on ${qName}: ${jobErr}`);
+            this.logger.debug(
+              `Error checking active job ${job.id} on ${qName}: ${jobErr}`,
+            );
           }
         }
 

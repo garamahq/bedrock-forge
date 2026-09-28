@@ -1,4 +1,9 @@
-import { Injectable, Logger, NotFoundException, BadRequestException } from "@nestjs/common";
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from "@nestjs/common";
 import { InjectQueue } from "@nestjs/bullmq";
 import { Queue } from "bullmq";
 import { randomBytes } from "crypto";
@@ -9,6 +14,7 @@ import {
   PaginationQuery,
 } from "@bedrock-forge/shared";
 import { ProjectsRepository } from "./projects.repository";
+import { projectLinksJson } from "./dto/project.dto";
 import {
   CreateProjectDto,
   UpdateProjectDto,
@@ -23,6 +29,31 @@ import { DomainsService } from "../domains/domains.service";
 import { MonitorsService } from "../monitors/monitors.service";
 import { BackupSchedulesService } from "../backups/backup-schedules.service";
 import { PluginUpdateSchedulesService } from "../plugin-update-schedules/plugin-update-schedules.service";
+
+const SECRET_ASSIGNMENT_RE =
+  /\b[\w-]*(?:PASSWORD|PASSWD|PASSPHRASE|DB[_-]?PASS|SECRET|TOKEN|API[_-]?KEY|PRIVATE[_-]?KEY|CLIENT[_-]?SECRET|AUTHORIZATION)[\w-]*\b\s*["']?\s*[:=]\s*(?:"([^"]*)"|'([^']*)'|([^\s,;]+))/gi;
+const PRIVATE_KEY_RE = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/i;
+const CREDENTIAL_URL_RE =
+  /\b[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:[^@\s/]+@/i;
+const BEARER_TOKEN_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/i;
+const JWT_TOKEN_RE = /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/;
+const PLACEHOLDER_SECRET_RE =
+  /^(?:your(?:[-_ ]|$)|placeholder\b|example\b|change[-_ ]?me\b|changeme\b|replace[-_ ]?me\b|redacted\b|x{4,}$|<[^>]+>|\$\{?[A-Z_][A-Z0-9_]*\}?$)/i;
+const SENSITIVE_LINK_LABEL_RE =
+  /(password|passwd|db[_ -]?(?:password|pass)|secret|token|api[_ -]?key|private[_ -]?key|credential|auth(?:orization)?)/i;
+
+function containsSecretAssignment(value: string): boolean {
+  SECRET_ASSIGNMENT_RE.lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = SECRET_ASSIGNMENT_RE.exec(value)) !== null) {
+    const assignedValue = match[1] ?? match[2] ?? match[3] ?? "";
+    if (assignedValue && !PLACEHOLDER_SECRET_RE.test(assignedValue)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 @Injectable()
 export class ProjectsService {
@@ -46,6 +77,7 @@ export class ProjectsService {
   }
 
   create(dto: CreateProjectDto) {
+    this.assertProjectDetailsAreNotCredentials(dto.notes, dto.links);
     return this.repo.create({
       name: dto.name,
       client_id: BigInt(dto.client_id),
@@ -57,12 +89,13 @@ export class ProjectsService {
       }),
       ...(dto.status && { status: dto.status }),
       notes: dto.notes,
-      links: dto.links,
+      links: projectLinksJson(dto.links),
       ...(dto.github_repo !== undefined && { github_repo: dto.github_repo }),
     });
   }
 
   async update(id: number, dto: UpdateProjectDto) {
+    this.assertProjectDetailsAreNotCredentials(dto.notes, dto.links);
     await this.findOne(id);
     return this.repo.update(BigInt(id), {
       ...(dto.name !== undefined && { name: dto.name }),
@@ -77,7 +110,7 @@ export class ProjectsService {
       }),
       ...(dto.status !== undefined && { status: dto.status }),
       ...(dto.notes !== undefined && { notes: dto.notes }),
-      ...(dto.links !== undefined && { links: dto.links }),
+      ...(dto.links !== undefined && { links: projectLinksJson(dto.links) }),
       ...(dto.github_repo !== undefined && { github_repo: dto.github_repo }),
     });
   }
@@ -279,6 +312,7 @@ export class ProjectsService {
    *    DB credential storage, monitor + domain auto-creation.
    */
   async createFull(dto: CreateProjectFullDto) {
+    this.assertProjectDetailsAreNotCredentials(dto.notes, dto.links);
     const { name, client_id, server_id, domain, admin_email } = dto;
     const phpVersion = dto.php_version ?? "8.3";
     const envType = dto.env_type ?? "production";
@@ -306,7 +340,7 @@ export class ProjectsService {
         queueName: QUEUES.PROJECTS,
         jobType: JOB_TYPES.PROJECT_CREATE_BEDROCK,
         notes: dto.notes,
-        links: dto.links,
+        links: projectLinksJson(dto.links),
       });
 
     // Enqueue the provisioning job
@@ -470,5 +504,36 @@ export class ProjectsService {
       jobExecutionId: Number(jobExecution.id),
       jobId: String(job.id),
     };
+  }
+
+  private assertProjectDetailsAreNotCredentials(
+    notes?: string,
+    links?: CreateProjectDto["links"],
+  ): void {
+    const values = [
+      notes ?? "",
+      ...(links ?? []).flatMap((link) => [link.value ?? "", link.url ?? ""]),
+    ];
+    const containsCredential =
+      values.some(
+        (value) =>
+          PRIVATE_KEY_RE.test(value) ||
+          CREDENTIAL_URL_RE.test(value) ||
+          BEARER_TOKEN_RE.test(value) ||
+          JWT_TOKEN_RE.test(value) ||
+          containsSecretAssignment(value),
+      ) ||
+      (links ?? []).some(
+        (link) =>
+          link.isText === true &&
+          SENSITIVE_LINK_LABEL_RE.test(link.label) &&
+          Boolean(link.value?.trim()),
+      );
+
+    if (containsCredential) {
+      throw new BadRequestException(
+        "Project notes and custom info are not a secure credential store. Save secrets in the relevant server, integration, or environment credential settings.",
+      );
+    }
   }
 }

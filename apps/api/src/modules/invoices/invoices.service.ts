@@ -7,7 +7,6 @@ import {
   ServiceUnavailableException,
 } from "@nestjs/common";
 import { Cron, CronExpression } from "@nestjs/schedule";
-import * as puppeteer from "puppeteer-core";
 import { existsSync } from "fs";
 import { InvoicesRepository } from "./invoices.repository";
 import { NotificationsService } from "../notifications/notifications.service";
@@ -52,6 +51,19 @@ function assertValidPeriod(
 
 function firstExistingPath(paths: Array<string | undefined>): string | null {
   return paths.find((path) => path !== undefined && existsSync(path)) ?? null;
+}
+
+function escapeHtml(value: string | number | null | undefined): string {
+  return String(value ?? "").replace(/[&<>"']/g, (character) => {
+    const entities: Record<string, string> = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    };
+    return entities[character] ?? character;
+  });
 }
 
 @Injectable()
@@ -111,6 +123,7 @@ export class InvoicesService {
       );
     }
 
+    const puppeteer = await import("puppeteer-core");
     const browser = await puppeteer.launch({
       executablePath: chromePath,
       args: [
@@ -142,51 +155,61 @@ export class InvoicesService {
     }
   }
 
-  private buildInvoiceHtml(inv: any): string {
-    const formatDate = (d: any) => {
-      if (!d) return '—';
-      const date = new Date(d);
+  private buildInvoiceHtml(
+    inv: ReturnType<InvoicesService["serialise"]>,
+  ): string {
+    const formatDate = (value: Date | null) => {
+      if (!value) return "—";
+      const date = new Date(value);
       return date.toISOString().slice(0, 10);
     };
 
-    const client = inv.client || {};
-    const project = inv.project || {};
+    const hostingAmount = Number(inv.hosting_amount);
+    const supportAmount = Number(inv.support_amount);
+    const totalAmount = Number(inv.total_amount);
+    const status = escapeHtml(inv.status);
+    const statusClass =
+      inv.status === "paid" ||
+      inv.status === "sent" ||
+      inv.status === "overdue" ||
+      inv.status === "cancelled"
+        ? inv.status
+        : "draft";
 
-    let hostingRow = '';
-    if (inv.hosting_package_snapshot && inv.hosting_amount > 0) {
+    let hostingRow = "";
+    if (inv.hosting_package_snapshot && hostingAmount > 0) {
       hostingRow = `
         <tr>
           <td>
-            <strong>Hosting Package: ${inv.hosting_package_snapshot}</strong>
+            <strong>Hosting Package: ${escapeHtml(inv.hosting_package_snapshot)}</strong>
             <div style="font-size: 12px; color: #6b7280; margin-top: 4px;">Monthly WordPress hosting plan.</div>
           </td>
-          <td style="text-align: right; vertical-align: middle;">€${inv.hosting_amount.toFixed(2)}</td>
+          <td style="text-align: right; vertical-align: middle;">€${hostingAmount.toFixed(2)}</td>
         </tr>
       `;
     }
 
-    let supportRow = '';
-    if (inv.support_package_snapshot && inv.support_amount > 0) {
+    let supportRow = "";
+    if (inv.support_package_snapshot && supportAmount > 0) {
       supportRow = `
         <tr>
           <td>
-            <strong>Support & Maintenance: ${inv.support_package_snapshot}</strong>
+            <strong>Support & Maintenance: ${escapeHtml(inv.support_package_snapshot)}</strong>
             <div style="font-size: 12px; color: #6b7280; margin-top: 4px;">Updates, security scans, and operational support.</div>
           </td>
-          <td style="text-align: right; vertical-align: middle;">€${inv.support_amount.toFixed(2)}</td>
+          <td style="text-align: right; vertical-align: middle;">€${supportAmount.toFixed(2)}</td>
         </tr>
       `;
     }
 
-    const subtotal = inv.hosting_amount + inv.support_amount;
-    const total = inv.total_amount;
+    const subtotal = hostingAmount + supportAmount;
 
     return `
 <!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
-  <title>Invoice ${inv.invoice_number}</title>
+  <title>Invoice ${escapeHtml(inv.invoice_number)}</title>
   <style>
     body {
       font-family: 'Inter', system-ui, -apple-system, sans-serif;
@@ -306,9 +329,9 @@ export class InvoicesService {
         <div style="font-size: 11px; color: #6b7280; margin-top: 4px;">Automated WordPress Hosting & Maintenance Operations</div>
       </div>
       <div style="text-align: right;">
-        <span class="status-badge status-${inv.status}">${inv.status}</span>
+        <span class="status-badge status-${statusClass}">${status}</span>
         <div style="margin-top: 8px;">
-          <strong style="font-size: 16px; color: #111827;">${inv.invoice_number}</strong>
+          <strong style="font-size: 16px; color: #111827;">${escapeHtml(inv.invoice_number)}</strong>
         </div>
       </div>
     </div>
@@ -316,16 +339,16 @@ export class InvoicesService {
     <div class="meta-grid">
       <div class="meta-block">
         <h3>Billed To</h3>
-        <p><strong>${client.name}</strong></p>
-        ${client.email ? `<p>${client.email}</p>` : ''}
-        ${client.phone ? `<p>${client.phone}</p>` : ''}
+        <p><strong>${escapeHtml(inv.client?.name)}</strong></p>
+        ${inv.client?.email ? `<p>${escapeHtml(inv.client.email)}</p>` : ""}
+        ${inv.client?.phone ? `<p>${escapeHtml(inv.client.phone)}</p>` : ""}
       </div>
       <div class="meta-block" style="text-align: right;">
         <h3>Invoice Details</h3>
         <p><strong>Date Issued:</strong> ${formatDate(inv.created_at)}</p>
         <p><strong>Due Date:</strong> ${formatDate(inv.due_date)}</p>
         <p><strong>Billing Period:</strong> ${formatDate(inv.period_start)} to ${formatDate(inv.period_end)}</p>
-        <p><strong>Project:</strong> ${project.name || '—'}</p>
+        <p><strong>Project:</strong> ${escapeHtml(inv.project?.name || "—")}</p>
       </div>
     </div>
     
@@ -353,7 +376,7 @@ export class InvoicesService {
           </tr>
           <tr class="grand-total">
             <td>Total Due</td>
-            <td style="text-align: right;">€${total.toFixed(2)}</td>
+            <td style="text-align: right;">€${totalAmount.toFixed(2)}</td>
           </tr>
         </tbody>
       </table>
@@ -362,7 +385,7 @@ export class InvoicesService {
     ${inv.notes ? `
     <div class="notes-section">
       <h3 style="font-size: 11px; text-transform: uppercase; margin: 0 0 6px 0; color: #374151;">Notes</h3>
-      <p style="margin: 0; line-height: 1.5;">${inv.notes}</p>
+      <p style="margin: 0; line-height: 1.5;">${escapeHtml(inv.notes)}</p>
     </div>
     ` : ''}
   </div>
@@ -696,25 +719,23 @@ export class InvoicesService {
     this.logger.log(`Marked ${overdueList.length} invoice(s) as overdue`);
   }
 
-  private serialise(inv: Record<string, unknown>) {
+  private serialise(
+    inv: NonNullable<Awaited<ReturnType<InvoicesRepository["findById"]>>>,
+  ) {
     return {
       ...inv,
-      id: Number((inv as { id: bigint }).id),
-      project_id: Number((inv as { project_id: bigint }).project_id),
-      client_id: Number((inv as { client_id: bigint }).client_id),
+      id: Number(inv.id),
+      project_id: Number(inv.project_id),
+      client_id: Number(inv.client_id),
       hosting_package_id: inv.hosting_package_id
         ? Number(inv.hosting_package_id)
         : null,
       support_package_id: inv.support_package_id
         ? Number(inv.support_package_id)
         : null,
-      hosting_amount: Number(
-        (inv as { hosting_amount: string }).hosting_amount,
-      ),
-      support_amount: Number(
-        (inv as { support_amount: string }).support_amount,
-      ),
-      total_amount: Number((inv as { total_amount: string }).total_amount),
+      hosting_amount: Number(inv.hosting_amount),
+      support_amount: Number(inv.support_amount),
+      total_amount: Number(inv.total_amount),
     };
   }
 }

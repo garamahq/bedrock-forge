@@ -50,7 +50,7 @@ export class InvoicesController {
     @Res({ passthrough: true }) res: Response,
   ) {
     const pdfBuffer = await this.invoicesService.generatePdf(id);
-    const invoice: any = await this.invoicesService.findById(id);
+    const invoice = await this.invoicesService.findById(id);
     res.set({
       "Content-Type": "application/pdf",
       "Content-Disposition": `attachment; filename="invoice-${invoice.invoice_number}.pdf"`,

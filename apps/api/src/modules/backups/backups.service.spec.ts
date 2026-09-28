@@ -53,7 +53,11 @@ function makeBackup(
 }
 
 function makeEnv(
-  overrides: Partial<{ id: bigint; google_drive_folder_id: string | null; project_id: bigint }> = {},
+  overrides: Partial<{
+    id: bigint;
+    google_drive_folder_id: string | null;
+    project_id: bigint;
+  }> = {},
 ) {
   return {
     id: BigInt(1),
@@ -198,8 +202,12 @@ describe("BackupsService", () => {
       // Mock findEnvironment for target environment (returns project_id 2)
       // and mock findEnvironment for backup environment (returns project_id 1)
       repo.findEnvironment
-        .mockResolvedValueOnce(makeEnv({ id: BigInt(99), project_id: BigInt(2) }))
-        .mockResolvedValueOnce(makeEnv({ id: BigInt(3), project_id: BigInt(1) }));
+        .mockResolvedValueOnce(
+          makeEnv({ id: BigInt(99), project_id: BigInt(2) }),
+        )
+        .mockResolvedValueOnce(
+          makeEnv({ id: BigInt(3), project_id: BigInt(1) }),
+        );
 
       await expect(
         svc.enqueueRestore({ backupId: 10, targetEnvironmentId: 99 }),
@@ -316,12 +324,9 @@ describe("BackupsService", () => {
 
       const result = await svc.cancelJobExecution(1);
 
-      expect(redisSet).toHaveBeenCalledWith(
-        "forge:cancel:some-bull-id",
-        "1",
-        "EX",
-        3600,
-      );
+      expect(redisSet).toHaveBeenCalledWith("forge:cancel:some-bull-id", "1", {
+        EX: 3600,
+      });
       expect(repo.cancelJobExecutionIfActive).toHaveBeenCalledWith(
         BigInt(1),
         "Cancelled by user",

@@ -1,4 +1,5 @@
 import { Injectable } from "@nestjs/common";
+import { isHttpStatusWorking } from "@bedrock-forge/shared";
 import { DashboardRepository } from "./dashboard.repository";
 
 @Injectable()
@@ -17,20 +18,19 @@ export class DashboardService {
       failedJobs24h,
     } = await this.repo.getSummaryData();
 
-    const monitorsUp = monitors.filter(
-      (m) =>
-        m.last_status !== null && m.last_status >= 200 && m.last_status < 400,
+    const monitorsUp = monitors.filter((m) =>
+      isHttpStatusWorking(m.last_status),
     ).length;
     const monitorsDown = monitors.filter(
-      (m) =>
-        m.last_status !== null && (m.last_status < 200 || m.last_status >= 400),
+      (m) => m.last_status !== null && !isHttpStatusWorking(m.last_status),
     ).length;
+    const checkedMonitors = monitors.filter((m) => m.last_status !== null);
     const avgUptime =
-      monitors.length > 0
-        ? monitors.reduce(
-            (sum, m) => sum + parseFloat(String(m.uptime_pct ?? 100)),
+      checkedMonitors.length > 0
+        ? checkedMonitors.reduce(
+            (sum, m) => sum + parseFloat(String(m.uptime_pct ?? 0)),
             0,
-          ) / monitors.length
+          ) / checkedMonitors.length
         : null;
 
     const mapJob = (j: {

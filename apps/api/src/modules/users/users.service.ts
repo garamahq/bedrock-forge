@@ -85,7 +85,7 @@ export class UsersService {
     if (dto.name) data.name = dto.name;
     if (dto.password) data.password_hash = await bcrypt.hash(dto.password, 12);
 
-    let user = await this.repo.update(id, data);
+    let user = await this.repo.updateAndRevokeRefreshTokens(id, data);
 
     if (dto.roles && dto.roles.length > 0) {
       // Prevent removing admin role if this is the last admin and it's being dropped

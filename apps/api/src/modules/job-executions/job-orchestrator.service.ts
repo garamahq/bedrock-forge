@@ -1,10 +1,14 @@
 import { Injectable, Logger } from "@nestjs/common";
-import { Queue } from "bullmq";
+import { Queue, type JobsOptions } from "bullmq";
 import { JobExecutionsRepository } from "./job-executions.repository";
 import { randomUUID } from "crypto";
 import { DEFAULT_JOB_OPTIONS } from "@bedrock-forge/shared";
+import {
+  toJobPayloadRecord,
+  toPrismaJsonValue,
+} from "../../common/json/prisma-json";
 
-export interface EnqueueOptions<PayloadType = any> {
+export interface EnqueueOptions<PayloadType = unknown> {
   queue: Queue;
   queueName: string;
   jobType: string;
@@ -12,8 +16,8 @@ export interface EnqueueOptions<PayloadType = any> {
   serverId?: bigint | number;
   environmentId?: bigint | number;
   jobId?: string;
-  jobOptions?: any;
-  beforeQueueAdd?: (jobExecutionId: number) => Promise<any>;
+  jobOptions?: JobsOptions;
+  beforeQueueAdd?: (jobExecutionId: number) => Promise<unknown>;
   onFailure?: (jobExecutionId: number, error: string) => Promise<void>;
 }
 
@@ -23,7 +27,7 @@ export class JobOrchestratorService {
 
   constructor(private readonly repo: JobExecutionsRepository) {}
 
-  async enqueue<PayloadType = any>({
+  async enqueue<PayloadType = unknown>({
     queue,
     queueName,
     jobType,
@@ -45,7 +49,7 @@ export class JobOrchestratorService {
       status: "queued",
       server_id: serverId ? BigInt(serverId) : null,
       environment_id: environmentId ? BigInt(environmentId) : null,
-      payload: (payload || {}) as any,
+      payload: toPrismaJsonValue(payload),
     });
 
     const jobExecutionId = Number(exec.id);
@@ -54,7 +58,7 @@ export class JobOrchestratorService {
       // Resolve the exact payload/job data to send to the queue
       const jobData = beforeQueueAdd
         ? await beforeQueueAdd(jobExecutionId)
-        : { ...payload, jobExecutionId };
+        : { ...toJobPayloadRecord(payload), jobExecutionId };
 
       const job = await queue.add(jobType, jobData, {
         ...jobOptions,

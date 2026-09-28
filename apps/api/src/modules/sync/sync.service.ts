@@ -84,15 +84,11 @@ export class SyncService {
     }
 
     const client = await this.queue.client;
-    await client.set(`forge:cancel:${exec.bull_job_id}`, "1", "EX", 3600);
+    await client.set(`forge:cancel:${exec.bull_job_id}`, "1", { EX: 3600 });
 
     // Optimistically mark as failed if still active; prevents overwriting completed status in a race.
-    await this.repo.cancelJobExecutionIfActive(
-      BigInt(id),
-      "Cancelled by user",
-    );
+    await this.repo.cancelJobExecutionIfActive(BigInt(id), "Cancelled by user");
 
     return { cancelled: true };
   }
 }
-

@@ -43,6 +43,7 @@ export interface DeployWebhookOptions {
   signature?: string;
   event?: string;
   body?: Record<string, unknown>;
+  rawBody?: Buffer;
 }
 
 export interface WpUser {
@@ -107,10 +108,14 @@ export class EnvironmentsService {
   }
 
   async create(projectId: number, dto: CreateEnvironmentDto) {
-    const project = await this.repo.findProjectWithHostingPackage(BigInt(projectId));
+    const project = await this.repo.findProjectWithHostingPackage(
+      BigInt(projectId),
+    );
     if (project && project.hosting_package) {
       const maxSites = project.hosting_package.max_sites;
-      const currentEnvsCount = await this.repo.countEnvironmentsForProject(BigInt(projectId));
+      const currentEnvsCount = await this.repo.countEnvironmentsForProject(
+        BigInt(projectId),
+      );
       if (currentEnvsCount >= maxSites) {
         throw new BadRequestException(
           `Environment quota reached. Your hosting package allows a maximum of ${maxSites} sites/environments for this project.`,
@@ -155,10 +160,14 @@ export class EnvironmentsService {
   }
 
   async createFull(projectId: number, dto: CreateEnvironmentFullDto) {
-    const project = await this.repo.findProjectWithHostingPackage(BigInt(projectId));
+    const project = await this.repo.findProjectWithHostingPackage(
+      BigInt(projectId),
+    );
     if (project && project.hosting_package) {
       const maxSites = project.hosting_package.max_sites;
-      const currentEnvsCount = await this.repo.countEnvironmentsForProject(BigInt(projectId));
+      const currentEnvsCount = await this.repo.countEnvironmentsForProject(
+        BigInt(projectId),
+      );
       if (currentEnvsCount >= maxSites) {
         throw new BadRequestException(
           `Environment quota reached. Your hosting package allows a maximum of ${maxSites} sites/environments for this project.`,
@@ -267,7 +276,9 @@ export class EnvironmentsService {
       await this.backupSchedulesService.removeRepeatableJob(Number(bs.id));
     }
     for (const pus of pluginUpdateSchedules) {
-      await this.pluginUpdateSchedulesService.removeRepeatableJob(Number(pus.id));
+      await this.pluginUpdateSchedulesService.removeRepeatableJob(
+        Number(pus.id),
+      );
     }
 
     // 4. Create job execution for decommissioning tracking
@@ -304,7 +315,8 @@ export class EnvironmentsService {
       environmentId: id,
       jobExecutionId: Number(jobExecution.id),
       jobId: String(job.id),
-      message: "Environment decommissioning job queued. The environment will be fully deleted once remote server resources are cleaned up.",
+      message:
+        "Environment decommissioning job queued. The environment will be fully deleted once remote server resources are cleaned up.",
     };
   }
 
@@ -528,7 +540,9 @@ export class EnvironmentsService {
           `[getWpUsers] Environment ${envId} scan error: ${parsed.error}`,
         );
         if (!parsed.users || parsed.users.length === 0) {
-          throw new BadRequestException(`WordPress scan error: ${parsed.error}`);
+          throw new BadRequestException(
+            `WordPress scan error: ${parsed.error}`,
+          );
         }
         return parsed.users;
       }
@@ -735,10 +749,7 @@ export class EnvironmentsService {
     return { token };
   }
 
-  async triggerDeployWebhook(
-    id: number,
-    opts: string | DeployWebhookOptions,
-  ) {
+  async triggerDeployWebhook(id: number, opts: string | DeployWebhookOptions) {
     const env = await this.repo.findById(BigInt(id));
     if (!env) throw new NotFoundException(`Environment ${id} not found`);
 
@@ -746,7 +757,9 @@ export class EnvironmentsService {
       typeof opts === "string" ? { token: opts } : opts;
 
     if (!env.deploy_webhook_token) {
-      throw new BadRequestException("Deploy webhook token is not configured on this environment");
+      throw new BadRequestException(
+        "Deploy webhook token is not configured on this environment",
+      );
     }
 
     // 1. Authenticate via token or HMAC SHA256 signature
@@ -758,7 +771,7 @@ export class EnvironmentsService {
         const expectedSig =
           "sha256=" +
           createHmac("sha256", env.deploy_webhook_token)
-            .update(JSON.stringify(options.body))
+            .update(options.rawBody ?? JSON.stringify(options.body))
             .digest("hex");
         if (
           expectedSig.length === options.signature.length &&
@@ -775,7 +788,9 @@ export class EnvironmentsService {
     }
 
     if (!authenticated) {
-      throw new UnauthorizedException("Invalid deploy webhook token or signature");
+      throw new UnauthorizedException(
+        "Invalid deploy webhook token or signature",
+      );
     }
 
     // 2. Handle GitHub ping event
@@ -848,7 +863,9 @@ export class EnvironmentsService {
       return { publicKey: newKey, keyType, isGenerated: true };
     }
 
-    throw new BadRequestException("Failed to read or generate server SSH deploy key");
+    throw new BadRequestException(
+      "Failed to read or generate server SSH deploy key",
+    );
   }
 
   // ── Secure Guard ──────────────────────────────────────────────────────────

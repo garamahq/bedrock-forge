@@ -2,6 +2,21 @@ import { Injectable } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 
+const LIGHTHOUSE_AUDIT_INCLUDE = {
+  environment: {
+    select: {
+      id: true,
+      type: true,
+      url: true,
+      project: { select: { id: true, name: true } },
+    },
+  },
+} as const;
+
+type LighthouseAuditWithEnvironment = Prisma.LighthouseAuditGetPayload<{
+  include: typeof LIGHTHOUSE_AUDIT_INCLUDE;
+}>;
+
 @Injectable()
 export class LighthouseRepository {
   constructor(private readonly prisma: PrismaService) {}
@@ -20,16 +35,7 @@ export class LighthouseRepository {
     const rows = await this.prisma.lighthouseAudit.findMany({
       orderBy: { created_at: "desc" },
       distinct: ["environment_id", "strategy"],
-      include: {
-        environment: {
-          select: {
-            id: true,
-            type: true,
-            url: true,
-            project: { select: { id: true, name: true } },
-          },
-        },
-      },
+      include: LIGHTHOUSE_AUDIT_INCLUDE,
     });
     return rows.map((row) => this.serializeAudit(row));
   }
@@ -43,16 +49,7 @@ export class LighthouseRepository {
       orderBy: { created_at: "desc" },
       skip,
       take: limit,
-      include: {
-        environment: {
-          select: {
-            id: true,
-            type: true,
-            url: true,
-            project: { select: { id: true, name: true } },
-          },
-        },
-      },
+      include: LIGHTHOUSE_AUDIT_INCLUDE,
     });
     return {
       items: rows.map((row) => this.serializeAudit(row)),
@@ -63,16 +60,7 @@ export class LighthouseRepository {
   async findById(id: bigint) {
     const row = await this.prisma.lighthouseAudit.findUnique({
       where: { id },
-      include: {
-        environment: {
-          select: {
-            id: true,
-            type: true,
-            url: true,
-            project: { select: { id: true, name: true } },
-          },
-        },
-      },
+      include: LIGHTHOUSE_AUDIT_INCLUDE,
     });
     return row ? this.serializeAudit(row) : null;
   }
@@ -85,16 +73,7 @@ export class LighthouseRepository {
         status: { in: ["queued", "running"] },
       },
       orderBy: { created_at: "desc" },
-      include: {
-        environment: {
-          select: {
-            id: true,
-            type: true,
-            url: true,
-            project: { select: { id: true, name: true } },
-          },
-        },
-      },
+      include: LIGHTHOUSE_AUDIT_INCLUDE,
     });
     return row ? this.serializeAudit(row) : null;
   }
@@ -137,7 +116,7 @@ export class LighthouseRepository {
     });
   }
 
-  private serializeAudit(row: any) {
+  private serializeAudit(row: LighthouseAuditWithEnvironment) {
     return {
       ...row,
       id: Number(row.id),

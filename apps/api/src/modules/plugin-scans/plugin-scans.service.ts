@@ -6,6 +6,10 @@ import { QUEUES, JOB_TYPES, PaginationQuery } from "@bedrock-forge/shared";
 import { GithubService } from "../custom-plugins/github.service";
 import { JobOrchestratorService } from "../job-executions/job-orchestrator.service";
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 @Injectable()
 export class PluginScansService {
   constructor(
@@ -98,17 +102,23 @@ export class PluginScansService {
       if (!res.ok) {
         throw new Error(`WordPress.org API returned status ${res.status}`);
       }
-      const data = (await res.json()) as { plugins?: any[] };
-      if (!data.plugins || !Array.isArray(data.plugins)) {
-        return [];
-      }
-      return data.plugins.map((p) => ({
-        name: p.name || "",
-        slug: p.slug || "",
-        version: p.version || "",
-        author: p.author ? p.author.replace(/<[^>]*>/g, "") : "",
-        short_description: p.short_description || "",
-        homepage: p.homepage || "",
+      const data: unknown = await res.json();
+      const plugins = isRecord(data) && Array.isArray(data.plugins)
+        ? (data.plugins as unknown[])
+        : [];
+      return plugins.filter(isRecord).map((plugin) => ({
+        name: typeof plugin.name === "string" ? plugin.name : "",
+        slug: typeof plugin.slug === "string" ? plugin.slug : "",
+        version: typeof plugin.version === "string" ? plugin.version : "",
+        author:
+          typeof plugin.author === "string"
+            ? plugin.author.replace(/<[^>]*>/g, "")
+            : "",
+        short_description:
+          typeof plugin.short_description === "string"
+            ? plugin.short_description
+            : "",
+        homepage: typeof plugin.homepage === "string" ? plugin.homepage : "",
       }));
     } catch (err) {
       return [];

@@ -11,6 +11,11 @@ import type { SecurityFindingStatus } from "@prisma/client";
 import type { AckFindingDto, RemoveAckDto } from "./dto/ack-finding.dto";
 import type { GenerateSecurityReportDto } from "./dto/generate-security-report.dto";
 
+type SecurityFindingRecord =
+  | NonNullable<Awaited<ReturnType<SecurityRepository["findFindingById"]>>>
+  | Awaited<ReturnType<SecurityRepository["listSecurityFindings"]>>["data"][number]
+  | NonNullable<Awaited<ReturnType<SecurityRepository["updateFindingStatus"]>>>;
+
 const SEVERITY_ORDER: Record<string, number> = {
   critical: 0,
   high: 1,
@@ -80,8 +85,8 @@ export class SecurityFindingsService {
     return this.serializeFinding(updated);
   }
 
-  private serializeFinding(finding: any) {
-    if (!finding) return null;
+  private serializeFinding(finding: SecurityFindingRecord) {
+    const scan = "scan" in finding ? finding.scan : null;
     return {
       ...finding,
       id: Number(finding.id),
@@ -106,15 +111,17 @@ export class SecurityFindingsService {
               : null,
           }
         : null,
-      scan: finding.scan
-        ? { ...finding.scan, id: Number(finding.scan.id) }
+      scan: scan
+        ? { ...scan, id: Number(scan.id) }
         : null,
-      transitions: (finding.transitions ?? []).map((t: any) => ({
-        ...t,
-        id: Number(t.id),
-        finding_id: Number(t.finding_id),
-        actor_id: t.actor_id ? Number(t.actor_id) : null,
-        actor: t.actor ? { ...t.actor, id: Number(t.actor.id) } : null,
+      transitions: finding.transitions.map((transition) => ({
+        ...transition,
+        id: Number(transition.id),
+        finding_id: Number(transition.finding_id),
+        actor_id: transition.actor_id ? Number(transition.actor_id) : null,
+        actor: transition.actor
+          ? { ...transition.actor, id: Number(transition.actor.id) }
+          : null,
       })),
     };
   }

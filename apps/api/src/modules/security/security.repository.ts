@@ -1,7 +1,14 @@
 import { Injectable } from "@nestjs/common";
+import { Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import type { SecurityScanType } from "@bedrock-forge/shared";
-import type { SecurityScanStatus, SecuritySeverity, SecurityFindingStatus } from "@prisma/client";
+import type {
+  SecurityScanStatus,
+  SecuritySeverity,
+  SecurityFindingStatus,
+  SecurityIncidentStatus,
+  JobExecutionStatus,
+} from "@prisma/client";
 
 @Injectable()
 export class SecurityRepository {
@@ -14,9 +21,7 @@ export class SecurityRepository {
     job_execution_id?: bigint;
   }) {
     return this.prisma.securityScan.create({
-      data: data as Parameters<
-        typeof this.prisma.securityScan.create
-      >[0]["data"],
+      data,
     });
   }
 
@@ -25,8 +30,8 @@ export class SecurityRepository {
     data: {
       status?: SecurityScanStatus;
       score?: number;
-      summary?: Record<string, number>;
-      findings?: unknown[];
+      summary?: Prisma.InputJsonValue;
+      findings?: Prisma.InputJsonValue;
       error?: string;
       started_at?: Date;
       completed_at?: Date;
@@ -34,8 +39,7 @@ export class SecurityRepository {
   ) {
     return this.prisma.securityScan.update({
       where: { id },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      data: data as any,
+      data,
     });
   }
 
@@ -501,21 +505,20 @@ export class SecurityRepository {
   createJobExecution(data: {
     queue_name: string;
     job_type: string;
-    status: string;
+    status: JobExecutionStatus;
     server_id?: bigint | null;
     environment_id?: bigint | null;
-    payload?: Record<string, unknown>;
+    payload?: Prisma.InputJsonValue;
   }) {
     return this.prisma.jobExecution.create({
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       data: {
         queue_name: data.queue_name,
         bull_job_id: "pending",
         job_type: data.job_type,
-        status: data.status as any,
+        status: data.status,
         server_id: data.server_id ?? null,
         environment_id: data.environment_id ?? null,
-        payload: (data.payload ?? {}) as any,
+        payload: data.payload ?? {},
       },
     });
   }
@@ -590,17 +593,16 @@ export class SecurityRepository {
   createServerScansTransaction(
     serverId: bigint,
     executionId: bigint,
-    types: string[],
+    types: SecurityScanType[],
   ) {
     return this.prisma.$transaction(
       types.map((scanType) =>
         this.prisma.securityScan.create({
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           data: {
-            scan_type: scanType as SecurityScanType,
+            scan_type: scanType,
             server_id: serverId,
             job_execution_id: executionId,
-          } as any,
+          },
         }),
       ),
     );
@@ -609,17 +611,16 @@ export class SecurityRepository {
   createEnvironmentScansTransaction(
     environmentId: bigint,
     executionId: bigint,
-    types: string[],
+    types: SecurityScanType[],
   ) {
     return this.prisma.$transaction(
       types.map((scanType) =>
         this.prisma.securityScan.create({
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           data: {
-            scan_type: scanType as SecurityScanType,
+            scan_type: scanType,
             environment_id: environmentId,
             job_execution_id: executionId,
-          } as any,
+          },
         }),
       ),
     );
@@ -661,7 +662,7 @@ export class SecurityRepository {
     page: number,
     limit: number,
   ) {
-    const where: any = {};
+    const where: Prisma.SecurityFindingWhereInput = {};
 
     if (filter.server_id) {
       where.server_id = BigInt(filter.server_id);
@@ -812,7 +813,7 @@ export class SecurityRepository {
     const limit = Math.min(100, Math.max(1, params.limit ?? 20));
     const skip = (page - 1) * limit;
 
-    const where: any = {};
+    const where: Prisma.SecurityDriftEventWhereInput = {};
     if (params.serverId !== undefined) where.server_id = params.serverId;
     if (params.environmentId !== undefined) where.environment_id = params.environmentId;
 
@@ -848,7 +849,7 @@ export class SecurityRepository {
   // ─── Incidents ─────────────────────────────────────────────────────────────
 
   async listIncidents(params: {
-    status?: any;
+    status?: SecurityIncidentStatus;
     serverId?: bigint;
     page?: number;
     limit?: number;
@@ -857,7 +858,7 @@ export class SecurityRepository {
     const limit = Math.min(100, Math.max(1, params.limit ?? 20));
     const skip = (page - 1) * limit;
 
-    const where: any = {};
+    const where: Prisma.SecurityIncidentWhereInput = {};
     if (params.status) where.status = params.status;
     if (params.serverId !== undefined) where.server_id = params.serverId;
 
@@ -903,7 +904,7 @@ export class SecurityRepository {
     });
   }
 
-  updateIncidentStatus(id: bigint, status: any) {
+  updateIncidentStatus(id: bigint, status: SecurityIncidentStatus) {
     return this.prisma.securityIncident.update({
       where: { id },
       data: {
@@ -934,7 +935,7 @@ export class SecurityRepository {
   createAlertRule(data: {
     name: string;
     enabled?: boolean;
-    min_severity?: any;
+    min_severity?: SecuritySeverity | null;
     categories?: string[];
     server_ids?: bigint[];
     channel_ids?: bigint[];
@@ -960,7 +961,7 @@ export class SecurityRepository {
     data: {
       name?: string;
       enabled?: boolean;
-      min_severity?: any;
+      min_severity?: SecuritySeverity | null;
       categories?: string[];
       server_ids?: bigint[];
       channel_ids?: bigint[];

@@ -106,6 +106,33 @@ describe("RemoteOpsService", () => {
         }),
       );
     });
+
+    it("fully masks secret values by default", async () => {
+      const mockEnv = {
+        id: BigInt(1),
+        type: "production",
+        root_path: "/var/www",
+        server: { ip: "1.2.3.4", port: 22 },
+        project: { name: "Test project" },
+      };
+      repo.findEnvironmentWithServerAndProject.mockResolvedValue(mockEnv);
+      repo.findTemplatesByEnvType.mockResolvedValue([]);
+      mockExecutor.pullFile.mockResolvedValue(
+        Buffer.from("API_KEY=super-secret-key\nAPP_NAME=Bedrock"),
+      );
+
+      const res = await service.readEnvFile(1);
+      expect(res.variables).toContainEqual(
+        expect.objectContaining({
+          key: "API_KEY",
+          value: "",
+          masked_value: "****",
+          is_secret: true,
+        }),
+      );
+      expect(res.content).toContain("API_KEY=****");
+      expect(res.content).not.toContain("super-secret-key");
+    });
   });
 
   describe("writeEnvFile", () => {

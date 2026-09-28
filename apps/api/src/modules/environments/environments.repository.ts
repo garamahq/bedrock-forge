@@ -231,7 +231,7 @@ export class EnvironmentsRepository {
     });
   }
 
-  async createEnvironment(data: any) {
+  async createEnvironment(data: Prisma.EnvironmentUncheckedCreateInput) {
     return this.prisma.environment.create({
       data,
       include: {

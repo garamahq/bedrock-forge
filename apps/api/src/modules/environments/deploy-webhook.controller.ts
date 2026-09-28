@@ -2,7 +2,6 @@ import {
   Controller,
   Post,
   Param,
-  Query,
   Headers,
   Req,
   ParseIntPipe,
@@ -22,18 +21,20 @@ export class DeployWebhookController {
   async handleDeployWebhook(
     @Param("envId", ParseIntPipe) envId: number,
     @Req() req: Request,
-    @Query("token") tokenQuery?: string,
     @Headers("x-webhook-token") tokenHeader?: string,
     @Headers("x-hub-signature-256") githubSignature?: string,
     @Headers("x-github-event") githubEvent?: string,
   ) {
-    const token = tokenQuery || tokenHeader;
-    const body = (req.body && typeof req.body === "object"
-      ? req.body
-      : {}) as Record<string, unknown>;
+    const token = tokenHeader;
+    const body = (
+      req.body && typeof req.body === "object" ? req.body : {}
+    ) as Record<string, unknown>;
+    const rawBody = (req as Request & { rawBody?: Buffer }).rawBody;
 
     if (!token && !githubSignature) {
-      throw new BadRequestException("Deployment token or signature is required");
+      throw new BadRequestException(
+        "Deployment token or signature is required",
+      );
     }
 
     return this.svc.triggerDeployWebhook(envId, {
@@ -41,7 +42,7 @@ export class DeployWebhookController {
       signature: githubSignature,
       event: githubEvent,
       body,
+      rawBody,
     });
   }
 }
-

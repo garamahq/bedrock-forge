@@ -110,18 +110,24 @@ export class BackupsService {
     let targetEnvId = Number(backup.environment_id);
 
     if (dto.targetEnvironmentId) {
-      const targetEnv = await this.repo.findEnvironment(BigInt(dto.targetEnvironmentId));
+      const targetEnv = await this.repo.findEnvironment(
+        BigInt(dto.targetEnvironmentId),
+      );
       if (!targetEnv) {
-        throw new NotFoundException(`Target environment ${dto.targetEnvironmentId} not found`);
+        throw new NotFoundException(
+          `Target environment ${dto.targetEnvironmentId} not found`,
+        );
       }
-      
-      const backupEnv = await this.repo.findEnvironment(BigInt(backup.environment_id));
+
+      const backupEnv = await this.repo.findEnvironment(
+        BigInt(backup.environment_id),
+      );
       if (!backupEnv || targetEnv.project_id !== backupEnv.project_id) {
         throw new BadRequestException(
           `Target environment ${dto.targetEnvironmentId} must belong to the same project as the backup's environment.`,
         );
       }
-      
+
       targetEnvId = dto.targetEnvironmentId;
     }
 
@@ -189,13 +195,10 @@ export class BackupsService {
     // Write a cancellation token into Redis — the worker checks this in
     // its progress callback and kills the rclone child process when found.
     const client = await this.backupsQueue.client;
-    await client.set(`forge:cancel:${exec.bull_job_id}`, "1", "EX", 3600);
+    await client.set(`forge:cancel:${exec.bull_job_id}`, "1", { EX: 3600 });
 
     // Optimistically mark as failed if still active; prevents overwriting completed status in a race.
-    await this.repo.cancelJobExecutionIfActive(
-      BigInt(id),
-      "Cancelled by user",
-    );
+    await this.repo.cancelJobExecutionIfActive(BigInt(id), "Cancelled by user");
 
     return { cancelled: true };
   }

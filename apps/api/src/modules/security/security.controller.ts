@@ -38,7 +38,10 @@ import { GenerateSecurityReportDto } from "./dto/generate-security-report.dto";
 import { HardenServerDto, HardenEnvironmentDto } from "./dto/harden-target.dto";
 import { UpsertServerAlertSettingDto } from "./dto/server-alert-setting.dto";
 import { CreateBaselineDto } from "./dto/create-baseline.dto";
-import { UpdateIncidentStatusDto } from "./dto/incident-status.dto";
+import {
+  SecurityIncidentsQueryDto,
+  UpdateIncidentStatusDto,
+} from "./dto/incident-status.dto";
 import { CreateAlertRuleDto, UpdateAlertRuleDto } from "./dto/alert-rule.dto";
 import { PreviewRemediationDto, ApplyRemediationDto } from "./dto/safe-remediation.dto";
 import { WatcherHeartbeatDto } from "./dto/watcher-heartbeat.dto";
@@ -452,16 +455,12 @@ export class SecurityController {
 
   /** GET /security/incidents — list correlated security incidents */
   @Get("incidents")
-  listIncidents(
-    @Query("status") status?: string,
-    @Query("serverId") serverId?: string,
-    @Query() query?: PaginationQueryDto,
-  ) {
+  listIncidents(@Query() query: SecurityIncidentsQueryDto) {
     return this.svc.listIncidents({
-      status,
-      serverId: serverId ? Number(serverId) : undefined,
-      page: query?.page,
-      limit: query?.limit,
+      status: query.status,
+      serverId: query.serverId,
+      page: query.page,
+      limit: query.limit,
     });
   }
 

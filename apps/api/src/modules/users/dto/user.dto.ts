@@ -8,7 +8,7 @@ import {
   IsOptional,
 } from "class-validator";
 import { PartialType } from "@nestjs/mapped-types";
-import { Role } from "@bedrock-forge/shared";
+import { ROLES, Role } from "@bedrock-forge/shared";
 
 export class CreateUserDto {
   @IsString()
@@ -25,7 +25,7 @@ export class CreateUserDto {
   password!: string;
 
   @IsArray()
-  @IsEnum(["admin", "manager", "client"], { each: true })
+  @IsEnum(ROLES, { each: true })
   roles!: Role[];
 }
 
@@ -35,6 +35,6 @@ export class UpdateUserDto extends PartialType(CreateUserDto) {
 
 export class AssignRolesDto {
   @IsArray()
-  @IsEnum(["admin", "manager", "client"], { each: true })
+  @IsEnum(ROLES, { each: true })
   roles!: Role[];
 }

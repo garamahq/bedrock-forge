@@ -13,16 +13,18 @@ import { Request, Response } from "express";
 export class LoggingInterceptor implements NestInterceptor {
   private readonly logger = new Logger("HTTP");
 
-  intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
+  intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
     const httpContext = context.switchToHttp();
     const request = httpContext.getRequest<Request>();
     const response = httpContext.getResponse<Response>();
 
-    const { method, originalUrl, ip } = request;
+    const { method, ip, path } = request;
     const userAgent = request.get("user-agent") || "";
-    
+
     // Attempt to extract user info from request (populated by guards/auth)
-    const user = (request as any).user;
+    const user = (
+      request as Request & { user?: { id?: number; email?: string } }
+    ).user;
     const userStr = user ? `user=${user.id ?? user.email}` : "user=anonymous";
 
     const startTime = Date.now();
@@ -33,14 +35,21 @@ export class LoggingInterceptor implements NestInterceptor {
           const duration = Date.now() - startTime;
           const statusCode = response.statusCode;
           this.logger.log(
-            `${method} ${originalUrl} ${statusCode} - ${userAgent} - ${ip} - ${userStr} - ${duration}ms`,
+            `${method} ${path} ${statusCode} - ${userAgent} - ${ip} - ${userStr} - ${duration}ms`,
           );
         },
-        error: (err: any) => {
+        error: (err: unknown) => {
           const duration = Date.now() - startTime;
-          const statusCode = err.status ?? 500;
+          const statusCode =
+            err &&
+            typeof err === "object" &&
+            "status" in err &&
+            typeof err.status === "number"
+              ? err.status
+              : 500;
+          const message = err instanceof Error ? err.message : String(err);
           this.logger.error(
-            `${method} ${originalUrl} ${statusCode} - ${userAgent} - ${ip} - ${userStr} - ${duration}ms - error: ${err.message || err}`,
+            `${method} ${path} ${statusCode} - ${userAgent} - ${ip} - ${userStr} - ${duration}ms - error: ${message}`,
           );
         },
       }),

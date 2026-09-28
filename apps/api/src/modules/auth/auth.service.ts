@@ -15,7 +15,13 @@ import { EncryptionService } from "../../common/encryption/encryption.service";
 export interface TokenPair {
   accessToken: string;
   refreshToken: string;
-  user: { id: number; email: string; name: string; roles: string[]; mfa_enabled: boolean };
+  user: {
+    id: number;
+    email: string;
+    name: string;
+    roles: string[];
+    mfa_enabled: boolean;
+  };
 }
 
 @Injectable()
@@ -83,13 +89,16 @@ export class AuthService {
       if (matchedStep === null) {
         throw new UnauthorizedException("Invalid MFA code");
       }
-      if (user.last_totp_step !== null && BigInt(matchedStep) <= user.last_totp_step) {
+      if (
+        user.last_totp_step !== null &&
+        BigInt(matchedStep) <= user.last_totp_step
+      ) {
         throw new UnauthorizedException("MFA code has already been used");
       }
       await this.repo.updateLastTotpStep(user.id, BigInt(matchedStep));
     }
 
-    const roles = user.user_roles.map((ur: any) => ur.role.name);
+    const roles = user.user_roles.map((userRole) => userRole.role.name);
     return this.issueTokens(
       Number(user.id),
       user.email,
@@ -190,9 +199,16 @@ export class AuthService {
 
   /* ── MFA ───────────────────────────────────────────────────────────── */
 
-  async generateMfaSetup(userId: number): Promise<{ secret: string; qrCodeDataUrl: string }> {
+  async generateMfaSetup(
+    userId: number,
+  ): Promise<{ secret: string; qrCodeDataUrl: string }> {
     const user = await this.repo.findUserById(userId);
     if (!user) throw new NotFoundException("User not found");
+    if (user.mfa_enabled) {
+      throw new BadRequestException(
+        "MFA is already enabled. Verify your current code to disable it before setting up a new authenticator.",
+      );
+    }
 
     const secret = this.generateBase32Secret();
     const encryptedSecret = this.encryption.encrypt(secret);
@@ -208,7 +224,9 @@ export class AuthService {
     const user = await this.repo.findUserById(userId);
     if (!user) throw new NotFoundException("User not found");
     if (!user.totp_secret_encrypted) {
-      throw new BadRequestException("MFA not set up yet. Generate setup first.");
+      throw new BadRequestException(
+        "MFA not set up yet. Generate setup first.",
+      );
     }
 
     const secret = this.encryption.decrypt(user.totp_secret_encrypted);
@@ -233,10 +251,15 @@ export class AuthService {
     const secret = this.encryption.decrypt(user.totp_secret_encrypted);
     const matchedStep = this.verifyTOTP(secret, code);
     if (matchedStep === null) {
-      throw new UnauthorizedException("Invalid MFA code — please provide your current authenticator code to disable MFA");
+      throw new UnauthorizedException(
+        "Invalid MFA code — please provide your current authenticator code to disable MFA",
+      );
     }
     // Prevent replay of the same TOTP window used to disable MFA
-    if (user.last_totp_step !== null && BigInt(matchedStep) <= user.last_totp_step) {
+    if (
+      user.last_totp_step !== null &&
+      BigInt(matchedStep) <= user.last_totp_step
+    ) {
       throw new UnauthorizedException("MFA code has already been used");
     }
     await this.repo.updateMfa(BigInt(userId), false, null);
@@ -272,7 +295,9 @@ export class AuthService {
 
     const accessToken = this.jwtService.sign(payload, {
       secret: this.config.get<string>("jwt.secret"),
-      expiresIn: (this.config.get<string>("jwt.accessExpiresIn") ?? "15m") as `${number}${'s'|'m'|'h'|'d'}` | number,
+      expiresIn: (this.config.get<string>("jwt.accessExpiresIn") ?? "15m") as
+        | `${number}${"s" | "m" | "h" | "d"}`
+        | number,
     });
 
     const rawRefreshToken = crypto.randomBytes(64).toString("hex");

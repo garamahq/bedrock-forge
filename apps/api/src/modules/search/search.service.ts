@@ -36,7 +36,12 @@ const STATIC_PAGES: Array<{
   icon: string;
   minRole?: string;
 }> = [
-  { label: "Dashboard", path: "/dashboard", icon: "LayoutDashboard" },
+  {
+    label: "Dashboard",
+    path: "/dashboard",
+    icon: "LayoutDashboard",
+    minRole: "maintainer",
+  },
   { label: "Clients", path: "/clients", icon: "Users" },
   { label: "Servers", path: "/servers", icon: "Server", minRole: "manager" },
   {
@@ -154,16 +159,23 @@ export class SearchService {
     results.push(...this.searchPages(q, roles));
 
     if (canSee(roles, "manager")) {
-      const [projects, environments, servers, domains, monitors, jobs, clients] =
-        await Promise.all([
-          this.searchProjects(q, take),
-          this.searchEnvironments(q, take),
-          this.searchServers(q, take),
-          this.searchDomains(q, take),
-          this.searchMonitors(q, take),
-          this.searchJobs(q, take),
-          this.searchClients(q, take),
-        ]);
+      const [
+        projects,
+        environments,
+        servers,
+        domains,
+        monitors,
+        jobs,
+        clients,
+      ] = await Promise.all([
+        this.searchProjects(q, take),
+        this.searchEnvironments(q, take),
+        this.searchServers(q, take),
+        this.searchDomains(q, take),
+        this.searchMonitors(q, take),
+        this.searchJobs(q, take),
+        this.searchClients(q, take),
+      ]);
       const findings = await this.searchFindings(q, take);
 
       results.push(...projects);

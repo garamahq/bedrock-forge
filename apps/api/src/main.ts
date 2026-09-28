@@ -92,7 +92,20 @@ async function bootstrap() {
 
   // Request body size limit
   app.use(cookieParser());
-  app.use(json({ limit: "10mb" }));
+  app.use(
+    json({
+      limit: "10mb",
+      verify: (req, _res, buffer) => {
+        const requestPath = (req.url ?? "").split("?", 1)[0];
+        if (
+          requestPath.startsWith("/api/webhooks/deploy/") ||
+          requestPath.startsWith("/webhooks/deploy/")
+        ) {
+          (req as typeof req & { rawBody?: Buffer }).rawBody = buffer;
+        }
+      },
+    }),
+  );
 
   // CORS — in production, CORS_ORIGIN must be set (validated above)
   app.enableCors({

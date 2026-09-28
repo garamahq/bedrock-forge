@@ -1,6 +1,18 @@
 import { Injectable } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
-import type { PaginationQuery } from "@bedrock-forge/shared";
+import {
+  PluginInfoSchema,
+  PluginScanOutputSchema,
+  type PaginationQuery,
+  type PluginInfo,
+} from "@bedrock-forge/shared";
+
+function parseStoredPlugins(value: unknown): PluginInfo[] | null {
+  const output = PluginScanOutputSchema.safeParse(value);
+  if (output.success) return output.data.plugins;
+  const legacy = PluginInfoSchema.array().safeParse(value);
+  return legacy.success ? legacy.data : null;
+}
 
 @Injectable()
 export class PluginScansRepository {
@@ -56,9 +68,8 @@ export class PluginScansRepository {
       if (!latestScan) continue;
       environmentsScanned += 1;
 
-      const output = latestScan.plugins as any;
-      const plugins = Array.isArray(output) ? output : output?.plugins;
-      if (!Array.isArray(plugins)) continue;
+      const plugins = parseStoredPlugins(latestScan.plugins);
+      if (!plugins) continue;
 
       for (const plugin of plugins) {
         const version = plugin.version ? String(plugin.version) : null;

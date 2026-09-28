@@ -9,6 +9,9 @@ import {
   MaxLength,
   Matches,
 } from "class-validator";
+import { ArrayMaxSize, IsArray, ValidateNested } from "class-validator";
+import { Type } from "class-transformer";
+import { ProjectLinkDto } from "./project.dto";
 
 const PHP_VERSIONS = ["8.1", "8.2", "8.3"] as const;
 const ENV_TYPES = ["production", "staging", "development"] as const;
@@ -96,5 +99,9 @@ export class CreateProjectFullDto {
   notes?: string;
 
   @IsOptional()
-  links?: any;
+  @IsArray()
+  @ArrayMaxSize(100)
+  @ValidateNested({ each: true })
+  @Type(() => ProjectLinkDto)
+  links?: ProjectLinkDto[];
 }

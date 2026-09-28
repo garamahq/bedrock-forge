@@ -10,7 +10,7 @@ const PROJECT_WITH_PACKAGES_INCLUDE = {
 const INVOICE_INCLUDE = {
   include: {
     project: { select: { id: true, name: true } },
-    client: { select: { id: true, name: true } },
+    client: { select: { id: true, name: true, email: true, phone: true } },
     hosting_package: { select: { id: true, name: true } },
     support_package: { select: { id: true, name: true } },
   },

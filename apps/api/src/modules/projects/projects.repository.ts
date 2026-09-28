@@ -12,7 +12,7 @@ interface CreateProjectData {
   support_package_id?: bigint;
   status?: string;
   notes?: string;
-  links?: any;
+  links?: Prisma.InputJsonValue;
   github_repo?: string;
 }
 
@@ -23,7 +23,7 @@ interface UpdateProjectData {
   support_package_id?: bigint;
   status?: string;
   notes?: string;
-  links?: any;
+  links?: Prisma.InputJsonValue;
   github_repo?: string;
 }
 
@@ -353,7 +353,7 @@ export class ProjectsRepository {
     queueName: string;
     jobType: string;
     notes?: string;
-    links?: any;
+    links?: Prisma.InputJsonValue;
   }) {
     return this.prisma.$transaction(async (tx) => {
       const project = await tx.project.create({

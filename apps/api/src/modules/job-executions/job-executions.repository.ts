@@ -1,6 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
-import { JobExecutionStatus } from "@prisma/client";
+import { Prisma, JobExecutionStatus } from "@prisma/client";
 
 export interface JobExecutionFilter {
   queue_name?: string;
@@ -197,7 +197,7 @@ export class JobExecutionsRepository {
     status: JobExecutionStatus;
     server_id: bigint | null;
     environment_id: bigint | null;
-    payload: any;
+    payload: Prisma.InputJsonValue;
   }) {
     return this.prisma.jobExecution.create({ data });
   }
