@@ -16,7 +16,7 @@ Get Bedrock Forge running and connect your first WordPress site.
 ## Step 1 — Install
 
 ```bash
-git clone https://github.com/satusdev/bedrock-forge.git
+git clone https://github.com/garamahq/bedrock-forge.git
 cd bedrock-forge
 ./install.sh
 ```

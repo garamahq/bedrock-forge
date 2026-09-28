@@ -48,8 +48,8 @@ an individual is officially representing the community in public spaces.
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported by opening a
-[GitHub Issue](https://github.com/satusdev/bedrock-forge/issues) or via
-[GitHub private vulnerability reporting](https://github.com/satusdev/bedrock-forge/security/advisories/new)
+[GitHub Issue](https://github.com/garamahq/bedrock-forge/issues) or via
+[GitHub private vulnerability reporting](https://github.com/garamahq/bedrock-forge/security/advisories/new)
 for sensitive matters.
 
 All complaints will be reviewed and investigated promptly and fairly.

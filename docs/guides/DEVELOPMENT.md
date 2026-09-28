@@ -17,7 +17,7 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/satusdev/bedrock-forge.git
+git clone https://github.com/garamahq/bedrock-forge.git
 cd bedrock-forge
 
 # Start only the infrastructure (postgres + redis) in Docker

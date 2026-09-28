@@ -102,7 +102,7 @@ If you prefer full control:
 
 ```bash
 # On the target server:
-git clone https://github.com/satusdev/bedrock-forge.git /home/forge
+git clone https://github.com/garamahq/bedrock-forge.git /home/forge
 cd /home/forge
 ./install.sh
 ```

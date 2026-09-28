@@ -12,7 +12,7 @@
 **Do not open a public GitHub issue for security vulnerabilities.**
 
 Instead, please report them privately via
-[GitHub private vulnerability reporting](https://github.com/satusdev/bedrock-forge/security/advisories/new).
+[GitHub private vulnerability reporting](https://github.com/garamahq/bedrock-forge/security/advisories/new).
 
 Include the following in your report:
 

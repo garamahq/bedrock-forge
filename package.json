@@ -7,12 +7,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/satusdev/bedrock-forge.git"
+    "url": "https://github.com/garamahq/bedrock-forge.git"
   },
   "bugs": {
-    "url": "https://github.com/satusdev/bedrock-forge/issues"
+    "url": "https://github.com/garamahq/bedrock-forge/issues"
   },
-  "homepage": "https://github.com/satusdev/bedrock-forge#readme",
+  "homepage": "https://github.com/garamahq/bedrock-forge#readme",
   "scripts": {
     "dev": "turbo run dev",
     "doctor": "./doctor.sh",
