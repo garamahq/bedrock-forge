@@ -45,6 +45,11 @@ export interface BaselineData {
   label: string | null;
   created_at: string;
   created_by?: { id: number; name: string; email: string } | null;
+  last_comparison?: {
+    status: string;
+    created_at: string;
+    completed_at: string | null;
+  } | null;
   items: {
     id: number;
     category: string;
@@ -108,6 +113,12 @@ export function BaselineDriftTab({
           )
         : Promise.resolve(null),
     enabled: selectedId > 0,
+    refetchInterval: (query) =>
+      ["queued", "active"].includes(
+        query.state.data?.last_comparison?.status ?? "",
+      )
+        ? 3000
+        : false,
   });
 
   // Fetch drift events
@@ -127,6 +138,11 @@ export function BaselineDriftTab({
           )
         : Promise.resolve({ data: [], total: 0, page: 1, totalPages: 1 }),
     enabled: selectedId > 0,
+    refetchInterval: ["queued", "active"].includes(
+      baseline?.last_comparison?.status ?? "",
+    )
+      ? 3000
+      : false,
   });
 
   // Capture baseline mutation
@@ -178,6 +194,9 @@ export function BaselineDriftTab({
       });
       setTimeout(() => {
         void queryClient.invalidateQueries({
+          queryKey: ["security", "baseline", targetType, selectedId],
+        });
+        void queryClient.invalidateQueries({
           queryKey: ["security", "drift", targetType, selectedId],
         });
         void queryClient.invalidateQueries({ queryKey: ["security", "findings"] });
@@ -199,6 +218,14 @@ export function BaselineDriftTab({
       return acc;
     },
     {},
+  );
+  const comparisonStatus = baseline?.last_comparison?.status;
+  const comparisonComplete = comparisonStatus === "completed";
+  const comparisonInProgress = ["queued", "active"].includes(
+    comparisonStatus ?? "",
+  );
+  const comparisonFailed = ["failed", "dead_letter"].includes(
+    comparisonStatus ?? "",
   );
 
   return (
@@ -306,7 +333,18 @@ export function BaselineDriftTab({
               )}
             </div>
             <p className="text-xs text-muted-foreground">
-              {baseline?.label || "Canonical snapshot used for zero-drift security enforcement."}
+              {baseline?.label || "Captured snapshot used to compare current security state."}
+              {baseline && (
+                <span className="block mt-1">
+                  {comparisonComplete && baseline.last_comparison?.completed_at
+                    ? `Last comparison completed ${new Date(baseline.last_comparison.completed_at).toLocaleString()}.`
+                    : comparisonInProgress
+                      ? "A comparison is running. Results will appear here when it completes."
+                      : comparisonFailed
+                        ? "The latest comparison failed. Run it again to check current state."
+                        : "No completed comparison exists for this baseline yet."}
+                </span>
+              )}
             </p>
           </div>
 
@@ -360,10 +398,28 @@ export function BaselineDriftTab({
 
         {driftData?.data.length === 0 && !isDriftFetching && (
           <div className="text-center py-12 bg-card rounded-lg border border-border text-muted-foreground space-y-2">
-            <ShieldCheck className="h-10 w-10 mx-auto text-emerald-500 opacity-80" />
-            <p className="font-semibold text-sm text-foreground">Zero Configuration Drift</p>
+            {comparisonComplete ? (
+              <ShieldCheck className="h-10 w-10 mx-auto text-emerald-500 opacity-80" />
+            ) : (
+              <AlertTriangle className="h-10 w-10 mx-auto text-amber-500 opacity-80" />
+            )}
+            <p className="font-semibold text-sm text-foreground">
+              {comparisonComplete
+                ? "No drift found in the latest comparison"
+                : baseline
+                  ? comparisonInProgress
+                    ? "Comparison in progress"
+                    : comparisonFailed
+                      ? "Comparison failed"
+                      : "Comparison required"
+                  : "Baseline required"}
+            </p>
             <p className="text-xs">
-              Live server state matches the active baseline. No unauthorized keys, ports, or accounts detected.
+              {comparisonComplete
+                ? "The latest completed comparison found no changes from this baseline."
+                : baseline
+                  ? "No current-state result is available. Run a comparison before treating this target as clear."
+                  : "Capture a baseline, then compare the live state to check for drift."}
             </p>
           </div>
         )}

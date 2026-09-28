@@ -1,5 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
+import { JOB_TYPES, QUEUES } from "@bedrock-forge/shared";
 import { PrismaService } from "../../prisma/prisma.service";
 import type { SecurityScanType } from "@bedrock-forge/shared";
 import type {
@@ -789,8 +790,8 @@ export class SecurityRepository {
 
   // ─── Baseline & Drift ────────────────────────────────────────────────────────
 
-  getActiveBaseline(scope: { serverId?: bigint; environmentId?: bigint }) {
-    return this.prisma.securityBaseline.findFirst({
+  async getActiveBaseline(scope: { serverId?: bigint; environmentId?: bigint }) {
+    const baseline = await this.prisma.securityBaseline.findFirst({
       where:
         scope.serverId !== undefined
           ? { server_id: scope.serverId }
@@ -801,6 +802,23 @@ export class SecurityRepository {
         created_by: { select: { id: true, name: true, email: true } },
       },
     });
+
+    if (!baseline) return null;
+
+    const lastComparison = await this.prisma.jobExecution.findFirst({
+      where: {
+        queue_name: QUEUES.SECURITY,
+        job_type: JOB_TYPES.SECURITY_BASELINE_COMPARE,
+        created_at: { gte: baseline.created_at },
+        ...(scope.serverId !== undefined
+          ? { server_id: scope.serverId }
+          : { environment_id: scope.environmentId }),
+      },
+      orderBy: { created_at: "desc" },
+      select: { status: true, created_at: true, completed_at: true },
+    });
+
+    return { ...baseline, last_comparison: lastComparison };
   }
 
   async listDriftEvents(params: {
