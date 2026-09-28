@@ -48,13 +48,13 @@ describe("PagespeedSettingsService", () => {
 
   it("encrypts and stores apiKey and provider", async () => {
     await service.setPagespeedConfig({
-      apiKey: "test-api-key-12345",
+      apiKey: "test-pagespeed-api-key",
       provider: "pagespeed",
     });
-    expect(enc.encrypt).toHaveBeenCalledWith("test-api-key-12345");
+    expect(enc.encrypt).toHaveBeenCalledWith("test-pagespeed-api-key");
     expect(repo.upsert).toHaveBeenCalledWith(
       "pagespeed_api_key",
-      "enc:test-api-key-12345",
+      "enc:test-pagespeed-api-key",
     );
     expect(repo.upsert).toHaveBeenCalledWith(
       "pagespeed_provider",

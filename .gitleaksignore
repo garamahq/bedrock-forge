@@ -1,0 +1,17 @@
+050f41b9f419209a74ad59c16075991a1890dc30:forge/db/seed_data.py:generic-api-key:74
+34dcde4b26083096fab3c1156a79b2295da6a990:.agents/skills/aws-cloudformation-iam/reference.md:private-key:502
+34dcde4b26083096fab3c1156a79b2295da6a990:.agents/skills/aws-sdk-java-v2-secrets-manager/SKILL.md:generic-api-key:212
+34dcde4b26083096fab3c1156a79b2295da6a990:.agents/skills/spring-boot-security-jwt/references/jwt-testing-guide.md:generic-api-key:34
+34dcde4b26083096fab3c1156a79b2295da6a990:.agents/skills/spring-boot-security-jwt/references/troubleshooting.md:curl-auth-header:571
+34dcde4b26083096fab3c1156a79b2295da6a990:.agents/skills/spring-boot-security-jwt/scripts/test-jwt-setup.sh:jwt:133
+34dcde4b26083096fab3c1156a79b2295da6a990:.agents/skills/vueuse-functions/references/useJwt.md:jwt:21
+5beda98732dce65d166e3afbc4d6539ff1aa374b:.github/workflows/ci.yml:generic-api-key:44
+68f56a5fe22b5547f37ebb4bbddec31f7e6336a5:.github/workflows/ci.yml:generic-api-key:44
+770a07de82cade863ebfb04bf157570ed7f60451:apps/api/src/modules/settings/services/pagespeed-settings.service.spec.ts:generic-api-key:51
+884a95451440950b39fba3f1ab630e74a4977509:forge/db/seed_data.py:generic-api-key:74
+bf9fab7e838e5f0cbf9ba3d82318529c5f35fc9a:.agents/skills/aws-cloudformation-iam/reference.md:private-key:502
+bf9fab7e838e5f0cbf9ba3d82318529c5f35fc9a:.agents/skills/aws-sdk-java-v2-secrets-manager/SKILL.md:generic-api-key:212
+bf9fab7e838e5f0cbf9ba3d82318529c5f35fc9a:.agents/skills/spring-boot-security-jwt/references/jwt-testing-guide.md:generic-api-key:34
+bf9fab7e838e5f0cbf9ba3d82318529c5f35fc9a:.agents/skills/spring-boot-security-jwt/references/troubleshooting.md:curl-auth-header:571
+bf9fab7e838e5f0cbf9ba3d82318529c5f35fc9a:.agents/skills/spring-boot-security-jwt/scripts/test-jwt-setup.sh:jwt:133
+bf9fab7e838e5f0cbf9ba3d82318529c5f35fc9a:.agents/skills/vueuse-functions/references/useJwt.md:jwt:21
