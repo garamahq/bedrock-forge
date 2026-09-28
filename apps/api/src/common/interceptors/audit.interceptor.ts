@@ -39,9 +39,8 @@ export class AuditInterceptor implements NestInterceptor {
             this.logAuditWriteFailure(req, "success", err);
           });
         },
-        error: (err: unknown) => {
-          const errMsg = err instanceof Error ? err.message : String(err);
-          this.writeLog(req, "failure", errMsg).catch((e) => {
+        error: () => {
+          this.writeLog(req, "failure").catch((e) => {
             this.logAuditWriteFailure(req, "failure", e);
           });
         },
@@ -65,10 +64,8 @@ export class AuditInterceptor implements NestInterceptor {
   private async writeLog(
     req: Request,
     outcome: "success" | "failure" = "success",
-    errorMsg?: string,
   ): Promise<void> {
-    const user = (req as Request & { user?: { id: number; email: string } })
-      .user;
+    const user = (req as Request & { user?: { id: number } }).user;
 
     const action = this.buildAction(req.method, req.path);
     const { resourceType, resourceId } = this.parseResource(req.path);
@@ -84,21 +81,34 @@ export class AuditInterceptor implements NestInterceptor {
         metadata: {
           method: req.method,
           path: req.path,
-          userEmail: user?.email ?? null,
           outcome,
-          ...(errorMsg ? { error: errorMsg } : {}),
         },
       },
     });
   }
 
   private buildAction(method: string, path: string): string {
-    const resource = this.parseResource(path).resourceType ?? "resource";
+    const segments = path.replace(/^\/api\//, "").split("/").filter(Boolean);
+    const resourceIndex = segments.reduce(
+      (last, segment, index) =>
+        AuditInterceptor.SINGULAR_MAP[segment] !== undefined ? index : last,
+      -1,
+    );
+    const resource =
+      resourceIndex >= 0
+        ? AuditInterceptor.SINGULAR_MAP[segments[resourceIndex]]
+        : segments[0] ?? "resource";
+    const operation = (resourceIndex >= 0
+      ? segments.slice(resourceIndex + 1)
+      : segments.slice(1)
+    ).filter((segment) => !/^\d+$/.test(segment));
     const verb =
       { POST: "create", PUT: "update", PATCH: "update", DELETE: "delete" }[
         method
       ] ?? method.toLowerCase();
-    return `${resource}.${verb}`;
+    return operation.length > 0
+      ? `${resource}.${operation.join(".")}`
+      : `${resource}.${verb}`;
   }
 
   /** Explicit plural → singular map for paths where strip-s is wrong. */
@@ -108,6 +118,8 @@ export class AuditInterceptor implements NestInterceptor {
     clients: "client",
     domains: "domain",
     environments: "environment",
+    findings: "finding",
+    incidents: "incident",
     invoices: "invoice",
     jobs: "job",
     "job-executions": "job-execution",
@@ -136,13 +148,20 @@ export class AuditInterceptor implements NestInterceptor {
     const seg = path.replace(/^\/api\//, "").split("/");
     if (!seg[0]) return { resourceType: null, resourceId: null };
 
-    // Use the explicit map first; fall back to strip-trailing-s heuristic.
+    const resourceIndex = seg.reduce(
+      (last, segment, index) =>
+        AuditInterceptor.SINGULAR_MAP[segment] !== undefined ? index : last,
+      -1,
+    );
+    const selectedIndex = resourceIndex >= 0 ? resourceIndex : 0;
+    const selectedSegment = seg[selectedIndex];
     const resourceType =
-      AuditInterceptor.SINGULAR_MAP[seg[0]] ?? seg[0].replace(/s$/, "");
-
-    // The second segment is the ID if it's numeric
-    const maybeId = seg[1] ? parseInt(seg[1], 10) : NaN;
-    const resourceId = isNaN(maybeId) ? null : maybeId;
+      AuditInterceptor.SINGULAR_MAP[selectedSegment] ??
+      selectedSegment.replace(/s$/, "");
+    const maybeId = seg
+      .slice(selectedIndex + 1)
+      .find((segment) => /^\d+$/.test(segment));
+    const resourceId = maybeId ? Number.parseInt(maybeId, 10) : null;
 
     return { resourceType, resourceId };
   }

@@ -10,9 +10,8 @@ interface AuditLogEntry {
   resource_type: string | null;
   resource_id: number | null;
   metadata: Record<string, unknown> | null;
-  ip_address: string | null;
   created_at: string;
-  user: { id: number; name: string; email: string } | null;
+  user: { id: number; name: string } | null;
 }
 
 interface AuditLogResponse {
@@ -24,11 +23,47 @@ interface AuditLogResponse {
 }
 
 /** Maps an action string to a human-readable label and badge colour. */
-function parseAction(action: string): { label: string; variant: "default" | "secondary" | "destructive" | "outline" } {
-  if (action.endsWith(".create") || action.endsWith(".created")) return { label: action, variant: "default" };
-  if (action.endsWith(".delete") || action.endsWith(".deleted")) return { label: action, variant: "destructive" };
-  if (action.endsWith(".update") || action.endsWith(".updated")) return { label: action, variant: "secondary" };
-  return { label: action, variant: "outline" };
+function parseAction(
+  action: string,
+): { label: string; variant: "default" | "secondary" | "destructive" | "outline" } {
+  const labels: Record<string, string> = {
+    "project.drift.set-baseline": "Baseline set",
+    "project.drift.clear-baseline": "Baseline cleared",
+    "server.test-connection": "Connection test",
+    "environment.quick-login": "Quick login",
+  };
+  if (labels[action]) return { label: labels[action], variant: "secondary" };
+
+  const [resource, ...operationParts] = action.split(".");
+  const operation = operationParts.join(".");
+  const lifecycle: Record<string, { label: string; variant: "default" | "secondary" | "destructive" }> = {
+    create: { label: `${resource} created`, variant: "default" },
+    update: { label: `${resource} updated`, variant: "secondary" },
+    delete: { label: `${resource} deleted`, variant: "destructive" },
+  };
+  if (lifecycle[operation]) return lifecycle[operation];
+
+  return {
+    label: operation
+      .replace(/[:._-]+/g, " ")
+      .replace(/\b\w/g, (letter) => letter.toUpperCase()) || action,
+    variant: "outline",
+  };
+}
+
+function metadataOutcome(
+  metadata: Record<string, unknown> | null,
+): string | null {
+  const outcome = metadata?.outcome;
+  return typeof outcome === "string" ? outcome : null;
+}
+
+function safeMetadataDetails(metadata: Record<string, unknown> | null) {
+  if (!metadata) return [];
+  return [
+    typeof metadata.method === "string" ? `Method: ${metadata.method}` : null,
+    typeof metadata.path === "string" ? `Route: ${metadata.path}` : null,
+  ].filter((value): value is string => value !== null);
 }
 
 function timeAgo(dateStr: string): string {
@@ -99,6 +134,8 @@ export function ResourceActivityFeed({
       <div className="space-y-1">
         {entries.map((entry) => {
           const { label, variant } = parseAction(entry.action);
+          const outcome = metadataOutcome(entry.metadata);
+          const details = safeMetadataDetails(entry.metadata);
           return (
             <div
               key={entry.id}
@@ -118,18 +155,30 @@ export function ResourceActivityFeed({
                       {entry.user.name}
                     </span>
                   )}
-                  {entry.ip_address && (
-                    <span className="font-mono">{entry.ip_address}</span>
-                  )}
                   <span className="flex items-center gap-1 ml-auto shrink-0">
                     <Clock className="h-3 w-3" />
                     {timeAgo(entry.created_at)}
                   </span>
                 </div>
-                {entry.metadata && Object.keys(entry.metadata).length > 0 && (
-                  <p className="text-xs text-muted-foreground mt-0.5 truncate font-mono">
-                    {JSON.stringify(entry.metadata).slice(0, 120)}
-                  </p>
+                {outcome && (
+                  <Badge
+                    variant="outline"
+                    className={`mt-1 text-[10px] capitalize ${outcome === "failure" ? "text-destructive border-destructive/30" : "text-emerald-500 border-emerald-500/30"}`}
+                  >
+                    {outcome}
+                  </Badge>
+                )}
+                {details.length > 0 && (
+                  <details className="mt-1 text-xs text-muted-foreground">
+                    <summary className="w-fit cursor-pointer hover:text-foreground">
+                      Request details
+                    </summary>
+                    <div className="mt-1 space-y-0.5 font-mono">
+                      {details.map((detail) => (
+                        <p key={detail} className="break-all">{detail}</p>
+                      ))}
+                    </div>
+                  </details>
                 )}
               </div>
             </div>
