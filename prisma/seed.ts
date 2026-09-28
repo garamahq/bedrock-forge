@@ -26,12 +26,17 @@ async function seedRoles() {
 // ── Admin User ───────────────────────────────────────────────────────────────
 
 async function seedAdminUser() {
-  // ⚠ Development seed only — change password immediately after first login.
   const email = "admin@bedrockforge.local";
   const existing = await prisma.user.findUnique({ where: { email } });
   if (existing) return 0;
 
-  const password_hash = await bcrypt.hash("admin123", 12);
+  const initialPassword = process.env.ADMIN_BOOTSTRAP_PASSWORD;
+  if (!initialPassword || initialPassword.length < 32) {
+    throw new Error(
+      "ADMIN_BOOTSTRAP_PASSWORD must be set to a value of at least 32 characters when creating the initial admin user",
+    );
+  }
+  const password_hash = await bcrypt.hash(initialPassword, 12);
   const adminRole = await prisma.role.findUnique({ where: { name: "admin" } });
   if (!adminRole) throw new Error("Admin role not found — run seedRoles first");
 
@@ -205,9 +210,7 @@ async function main() {
   console.log(`  Custom plugins upserted:   ${customPlugins}`);
 
   console.log("\nDone.");
-  console.log(
-    "\nAdmin credentials are printed by install.sh. Change the password immediately after first login.",
-  );
+  console.log("\nExisting users are left unchanged by the seed.");
 }
 
 main()
