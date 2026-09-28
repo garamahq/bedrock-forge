@@ -9,6 +9,7 @@ import { makeFinding } from "../scoring";
 import { FindingDeduplicationService } from "./finding-deduplication.service";
 import { SecurityAlertRuleEngineService } from "./security-alert-rule-engine.service";
 import { SecurityIncidentCorrelationService } from "./security-incident-correlation.service";
+import type { Server } from "@prisma/client";
 
 @Injectable()
 export class SecurityAgentlessWatcherService {
@@ -36,13 +37,15 @@ export class SecurityAgentlessWatcherService {
     for (const server of servers) {
       try {
         await this.pollServer(server);
-      } catch (err: any) {
-        this.logger.warn(`Failed watcher check on server ${server.id}: ${err.message}`);
+      } catch (err) {
+        this.logger.warn(
+          `Failed watcher check on server ${server.id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
     }
   }
 
-  private async pollServer(server: any) {
+  private async pollServer(server: Server) {
     const serverId = Number(server.id);
 
     // Rapid agentless check

@@ -158,8 +158,10 @@ export class SecurityIncidentCorrelationService {
               severity: pattern.severity,
               summary: incident.summary,
             });
-          } catch (err: any) {
-            this.logger.warn(`Failed to dispatch notification for incident ${incident.id}: ${err.message}`);
+          } catch (err) {
+            this.logger.warn(
+              `Failed to dispatch notification for incident ${incident.id}: ${err instanceof Error ? err.message : String(err)}`,
+            );
           }
 
           createdCount++;

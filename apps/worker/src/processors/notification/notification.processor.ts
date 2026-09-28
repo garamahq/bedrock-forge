@@ -10,6 +10,33 @@ interface NotificationJob {
   payload: Record<string, unknown>;
 }
 
+type SecurityAttackNotification =
+  | { type: "mass_infection"; criticalCount: number; targetCount: number }
+  | { type: "batch_pattern"; title: string; count: number; targets: string[] };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isSecurityAttackNotification(
+  value: unknown,
+): value is SecurityAttackNotification {
+  if (!isRecord(value)) return false;
+  if (value.type === "mass_infection") {
+    return (
+      typeof value.criticalCount === "number" &&
+      typeof value.targetCount === "number"
+    );
+  }
+  return (
+    value.type === "batch_pattern" &&
+    typeof value.title === "string" &&
+    typeof value.count === "number" &&
+    Array.isArray(value.targets) &&
+    value.targets.every((target: unknown) => typeof target === "string")
+  );
+}
+
 // concurrency=3: notification provider calls are lightweight network I/O.
 @Processor(QUEUES.NOTIFICATIONS, { concurrency: 3, lockDuration: 30_000 })
 export class NotificationProcessor extends WorkerHost {
@@ -397,7 +424,9 @@ export class NotificationProcessor extends WorkerHost {
         break;
       }
       case "security.attack_detected": {
-        const attacks = (payload.attacks as any[]) || [];
+        const attacks = Array.isArray(payload.attacks)
+          ? (payload.attacks as unknown[]).filter(isSecurityAttackNotification)
+          : [];
         lines.push(`🚨 *SECURITY ATTACK DETECTED* 🚨`);
         lines.push(`Time: \`${payload.timestamp}\``);
 

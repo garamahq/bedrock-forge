@@ -1,8 +1,9 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { createHash } from "crypto";
 import { PrismaService } from "../../../prisma/prisma.service";
-import type { SecurityFinding, SecuritySeverity } from "@bedrock-forge/shared";
+import type { SecurityFinding } from "@bedrock-forge/shared";
 import type { SecurityFindingStatus } from "@prisma/client";
+import { toPrismaJsonValue } from "../../../utils/prisma-json";
 
 export interface UpsertFindingsParams {
   serverId?: number;
@@ -72,15 +73,15 @@ export class FindingDeduplicationService {
             where: { id: existing.id },
             data: {
               scan_id: scanId ? BigInt(scanId) : existing.scan_id,
-              severity: f.severity as SecuritySeverity,
+              severity: f.severity,
               status: newStatus,
               description: f.description,
-              evidence: (f.metadata ?? null) as any,
+              evidence: toPrismaJsonValue(f.metadata ?? null),
               resource: f.resource ?? null,
               recommendation: f.remediation ?? null,
               remediation_available: f.remediation_available ?? false,
               remediation_type: f.remediation_type ?? null,
-              remediation_meta: (f.remediation_meta ?? null) as any,
+              remediation_meta: toPrismaJsonValue(f.remediation_meta ?? null),
               last_seen_at: now,
               resolved_at: shouldReopen ? null : existing.resolved_at,
               scanner_version: scannerVersion ?? existing.scanner_version,
@@ -107,16 +108,16 @@ export class FindingDeduplicationService {
               server_id: serverId ? BigInt(serverId) : null,
               environment_id: environmentId ? BigInt(environmentId) : null,
               category: f.category,
-              severity: f.severity as SecuritySeverity,
+              severity: f.severity,
               status: "new",
               title: f.title,
               description: f.description,
-              evidence: (f.metadata ?? null) as any,
+              evidence: toPrismaJsonValue(f.metadata ?? null),
               resource: f.resource ?? null,
               recommendation: f.remediation ?? null,
               remediation_available: f.remediation_available ?? false,
               remediation_type: f.remediation_type ?? null,
-              remediation_meta: (f.remediation_meta ?? null) as any,
+              remediation_meta: toPrismaJsonValue(f.remediation_meta ?? null),
               first_seen_at: now,
               last_seen_at: now,
               scanner_version: scannerVersion ?? "1.0.0",

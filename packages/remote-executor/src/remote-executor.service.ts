@@ -1,6 +1,11 @@
 import { createWriteStream } from "fs";
 import type { Readable } from "stream";
-import { Client } from "ssh2";
+import {
+  Client,
+  type ReadStream as SftpReadStream,
+  type SFTPWrapper,
+  type WriteStream as SftpWriteStream,
+} from "ssh2";
 import {
   sshPoolManager,
   SshServerConfig,
@@ -251,8 +256,8 @@ export class RemoteExecutorService {
   ): Promise<Buffer> {
     return new Promise((resolve, reject) => {
       let settled = false;
-      let sftpRef: any = null;
-      let readStreamRef: any = null;
+      let sftpRef: SFTPWrapper | null = null;
+      let readStreamRef: SftpReadStream | null = null;
       const settle = (fn: () => void) => {
         if (!settled) {
           settled = true;
@@ -335,9 +340,9 @@ export class RemoteExecutorService {
   ): Promise<void> {
     return new Promise((resolve, reject) => {
       let settled = false;
-      let sftpRef: any = null;
-      let readStreamRef: any = null;
-      let writeStreamRef: any = null;
+      let sftpRef: SFTPWrapper | null = null;
+      let readStreamRef: SftpReadStream | null = null;
+      let writeStreamRef: ReturnType<typeof createWriteStream> | null = null;
       const settle = (fn: () => void) => {
         if (!settled) {
           settled = true;
@@ -435,8 +440,8 @@ export class RemoteExecutorService {
   ): Promise<void> {
     return new Promise((resolve, reject) => {
       let settled = false;
-      let sftpRef: any = null;
-      let writeStreamRef: any = null;
+      let sftpRef: SFTPWrapper | null = null;
+      let writeStreamRef: SftpWriteStream | null = null;
       const settle = (fn: () => void) => {
         if (!settled) {
           settled = true;

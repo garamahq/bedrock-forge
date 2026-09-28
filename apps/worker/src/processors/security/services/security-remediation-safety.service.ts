@@ -1,5 +1,6 @@
 import { Injectable, Logger, BadRequestException, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../../../prisma/prisma.service";
+import type { Server } from "@prisma/client";
 import { SshKeyService } from "../../../services/ssh-key.service";
 import { createRemoteExecutor } from "@bedrock-forge/remote-executor";
 import { FindingDeduplicationService } from "./finding-deduplication.service";
@@ -162,7 +163,7 @@ export class SecurityRemediationSafetyService {
     );
 
     // Resolve server SSH connection
-    let server: any = null;
+    let server: Server | null = null;
     if (params.targetType === "server") {
       server = await this.prisma.server.findUnique({ where: { id: BigInt(params.targetId) } });
     } else {
@@ -170,7 +171,7 @@ export class SecurityRemediationSafetyService {
         where: { id: BigInt(params.targetId) },
         include: { server: true },
       });
-      server = env?.server;
+      server = env?.server ?? null;
     }
 
     if (!server) {

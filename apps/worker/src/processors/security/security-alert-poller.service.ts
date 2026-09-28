@@ -18,6 +18,10 @@ type FileSnapshotEntry = {
 
 type FileSnapshot = Record<string, FileSnapshotEntry>;
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 type FileChangeBatch = {
   added: string[];
   modified: string[];
@@ -239,7 +243,7 @@ export class SecurityAlertPollerService {
     await this.prisma.serverSecurityAlertSetting.update({
       where: { id: setting.id },
       data: {
-        file_snapshot: nextSnapshot as any,
+        file_snapshot: nextSnapshot,
       },
     });
 
@@ -416,9 +420,26 @@ done
   }
 
   private asFileSnapshot(value: unknown): FileSnapshot | null {
-    if (!value || typeof value !== "object" || Array.isArray(value))
-      return null;
-    return value as FileSnapshot;
+    if (!isRecord(value)) return null;
+    const snapshot: FileSnapshot = {};
+    for (const [path, entry] of Object.entries(value)) {
+      if (
+        !isRecord(entry) ||
+        typeof entry.hash !== "string" ||
+        typeof entry.size !== "number" ||
+        !Number.isFinite(entry.size) ||
+        typeof entry.mtime !== "number" ||
+        !Number.isFinite(entry.mtime)
+      ) {
+        return null;
+      }
+      snapshot[path] = {
+        hash: entry.hash,
+        size: entry.size,
+        mtime: entry.mtime,
+      };
+    }
+    return snapshot;
   }
 
   private expandWatchPaths(

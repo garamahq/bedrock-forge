@@ -1,4 +1,6 @@
 import { Logger } from "@nestjs/common";
+import type { Queue } from "bullmq";
+import type { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import type { ExecuteResult } from "@bedrock-forge/remote-executor";
 
@@ -57,7 +59,7 @@ export class StepTracker {
   private readonly jobId: string | number;
   private readonly job: {
     id?: string | number;
-    updateProgress?: (val: number | any) => Promise<any>;
+    updateProgress?: (value: number | object) => Promise<void>;
   } | null;
 
   constructor(
@@ -69,7 +71,7 @@ export class StepTracker {
       | number
       | {
           id?: string | number;
-          updateProgress?: (val: number | any) => Promise<any>;
+          updateProgress?: (value: number | object) => Promise<void>;
         },
   ) {
     if (jobOrId && typeof jobOrId === "object") {
@@ -93,7 +95,7 @@ export class StepTracker {
       | number
       | {
           id?: string | number;
-          updateProgress?: (val: number | any) => Promise<any>;
+          updateProgress?: (value: number | object) => Promise<void>;
         },
   ): Promise<StepTracker> {
     const tracker = new StepTracker(
@@ -173,7 +175,7 @@ export class StepTracker {
    */
   async complete(data?: {
     progress?: number;
-    executionLog?: any;
+    executionLog?: Prisma.InputJsonValue;
   }): Promise<void> {
     await this.prisma.jobExecution.update({
       where: { id: this.jobExecutionId },
@@ -213,7 +215,7 @@ export class StepTracker {
   /**
    * Checks the queue's Redis client for the cancellation key (forge:cancel:${jobId})
    */
-  async isCancelled(queue: { client: Promise<any> }): Promise<boolean> {
+  async isCancelled(queue: Pick<Queue, "client">): Promise<boolean> {
     if (!this.jobId) return false;
     const redis = await queue.client;
     return (await redis.get(`forge:cancel:${this.jobId}`)) === "1";

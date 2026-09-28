@@ -89,7 +89,7 @@ export class SecurityAlertRuleEngineService {
               server_id: BigInt(serverId),
               title: `Alert Rule: ${rule.name}`,
               summary: `Triggered by ${matchingFindings.length} finding(s) matching alert rule "${rule.name}".`,
-              severity: (rule.min_severity as any) || "high",
+              severity: rule.min_severity ?? "high",
               confidence: "high",
               status: "open",
             },
@@ -110,8 +110,10 @@ export class SecurityAlertRuleEngineService {
               category: f.category,
             })),
           });
-        } catch (err: any) {
-          this.logger.warn(`Failed to enqueue notification for rule ${rule.id}: ${err.message}`);
+        } catch (err) {
+          this.logger.warn(
+            `Failed to enqueue notification for rule ${rule.id}: ${err instanceof Error ? err.message : String(err)}`,
+          );
         }
 
         triggeredCount++;

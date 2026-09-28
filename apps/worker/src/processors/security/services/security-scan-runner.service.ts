@@ -114,7 +114,7 @@ export class SecurityScanRunnerService {
               data: {
                 status: "completed",
                 score,
-                summary: summary as any,
+                summary,
                 findings: findings as unknown as Parameters<
                   typeof this.prisma.securityScan.update
                 >[0]["data"]["findings"],
@@ -233,7 +233,7 @@ export class SecurityScanRunnerService {
               data: {
                 status: "completed",
                 score,
-                summary: summary as any,
+                summary,
                 findings: findings as unknown as Parameters<
                   typeof this.prisma.securityScan.update
                 >[0]["data"]["findings"],

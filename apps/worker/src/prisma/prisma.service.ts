@@ -3,6 +3,39 @@ import { PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import pg from "pg";
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isTransientDatabaseError(error: unknown): boolean {
+  const code = isRecord(error) && typeof error.code === "string" ? error.code : "";
+  const message = error instanceof Error ? error.message : "";
+  return (
+    ["P1001", "P1017"].includes(code) ||
+    /ECONNRESET|ETIMEDOUT|connection pool|Pool timeout|too many connections/i.test(message)
+  );
+}
+
+function isRetryableReadOperation(operation: string): boolean {
+  return [
+    "findUnique",
+    "findUniqueOrThrow",
+    "findFirst",
+    "findFirstOrThrow",
+    "findMany",
+    "count",
+    "aggregate",
+    "groupBy",
+  ].includes(operation);
+}
+
+type ExtendedPrismaLifecycle = {
+  onModuleInit: () => Promise<void>;
+  onModuleDestroy: () => Promise<void>;
+  $connect: () => Promise<void>;
+  $disconnect: () => Promise<void>;
+};
+
 @Injectable()
 export class PrismaService
   extends PrismaClient
@@ -14,34 +47,29 @@ export class PrismaService
     const pool = new pg.Pool({
       connectionString: process.env.DATABASE_URL ?? "",
     });
-    const adapter = new PrismaPg(pool as any);
+    const adapter = new PrismaPg(pool);
     super({ adapter });
 
     const maxRetries = 3;
-    const transientErrorCodes = ["P1001", "P1017", "P2025"];
-
     const client = this.$extends({
       query: {
         $allOperations({ operation, args, query }) {
           let delay = 100;
-          const execute = async (attempt: number): Promise<any> => {
+          const canRetry = isRetryableReadOperation(operation);
+          const execute = async (attempt: number): Promise<unknown> => {
             try {
               return await query(args);
-            } catch (err: any) {
-              const isTransient =
-                transientErrorCodes.includes(err.code) ||
-                err.message?.includes("ECONNRESET") ||
-                err.message?.includes("ETIMEDOUT") ||
-                err.message?.includes("connection pool") ||
-                err.message?.includes("Pool timeout") ||
-                err.message?.includes("too many connections");
-
-              if (isTransient && attempt < maxRetries) {
+            } catch (error: unknown) {
+              if (
+                canRetry &&
+                isTransientDatabaseError(error) &&
+                attempt < maxRetries
+              ) {
                 await new Promise((res) => setTimeout(res, delay));
                 delay *= 2;
                 return execute(attempt + 1);
               }
-              throw err;
+              throw error;
             }
           };
           return execute(1);
@@ -49,17 +77,20 @@ export class PrismaService
       },
     });
 
-    (client as any).onModuleInit = async () => {
-      await (client as any).$connect();
+    // Prisma's extension type omits Nest lifecycle methods although the
+    // runtime proxy still supports the base client's connect methods.
+    const lifecycleClient = client as unknown as ExtendedPrismaLifecycle;
+    lifecycleClient.onModuleInit = async () => {
+      await lifecycleClient.$connect();
       this.logger.log("Database connected");
     };
 
-    (client as any).onModuleDestroy = async () => {
-      await (client as any).$disconnect();
+    lifecycleClient.onModuleDestroy = async () => {
+      await lifecycleClient.$disconnect();
       this.logger.log("Database disconnected");
     };
 
-    return client as any;
+    return client as unknown as PrismaService;
   }
 
   // Dummy methods to satisfy TypeScript implements clause

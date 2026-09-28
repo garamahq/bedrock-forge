@@ -9,12 +9,38 @@ import {
   JOB_TYPES,
   type SecurityServerHardeningPayload,
   type SecurityEnvironmentHardeningPayload,
+  type SecurityScanType,
 } from "@bedrock-forge/shared";
 import {
   applyServerHardeningActions,
   applyEnvironmentHardeningActions,
 } from "../hardening-actions";
 import { StepTracker } from "../../../services/step-tracker";
+
+interface StoredScanFinding {
+  category: string;
+  title: string;
+  severity: string;
+  metadata?: Record<string, unknown>;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isStoredScanFinding(value: unknown): value is StoredScanFinding {
+  return (
+    isRecord(value) &&
+    typeof value.category === "string" &&
+    typeof value.title === "string" &&
+    typeof value.severity === "string" &&
+    (value.metadata === undefined || isRecord(value.metadata))
+  );
+}
+
+function parseStoredScanFindings(value: unknown): StoredScanFinding[] {
+  return Array.isArray(value) ? value.filter(isStoredScanFinding) : [];
+}
 
 @Injectable()
 export class SecurityHardeningService {
@@ -226,7 +252,7 @@ export class SecurityHardeningService {
     for (const scanType of scanTypes) {
       const scan = await this.prisma.securityScan.create({
         data: {
-          scan_type: scanType as any,
+          scan_type: scanType,
           server_id: BigInt(serverId),
           environment_id:
             targetType === "environment" ? BigInt(targetId) : undefined,
@@ -277,9 +303,9 @@ export class SecurityHardeningService {
   private deriveVerificationScanTypes(
     targetType: "server" | "environment",
     appliedActions: string[],
-  ): string[] {
+  ): SecurityScanType[] {
     const actionSet = new Set(appliedActions);
-    const scanTypes = new Set<string>();
+    const scanTypes = new Set<SecurityScanType>();
 
     if (targetType === "server") {
       // SSH / auth hardening → audit SSH config
@@ -375,7 +401,7 @@ export class SecurityHardeningService {
       orderBy: { completed_at: "desc" },
     });
     if (!latestScan || !latestScan.findings) return [];
-    const findings = latestScan.findings as any[];
+    const findings = parseStoredScanFindings(latestScan.findings);
 
     const acks = await this.prisma.securityFindingAck.findMany({
       where: { server_id: BigInt(serverId) },
@@ -453,7 +479,7 @@ export class SecurityHardeningService {
     const scopeKey = `environment:${environmentId}`;
     for (const scan of scanMap.values()) {
       if (!scan.findings) continue;
-      const findings = scan.findings as any[];
+      const findings = parseStoredScanFindings(scan.findings);
       for (const f of findings) {
         const ackKey = `${scopeKey}::${f.category}::${f.title}`;
         if (ackKeys.has(ackKey)) {

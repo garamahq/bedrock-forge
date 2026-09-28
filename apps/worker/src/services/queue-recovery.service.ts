@@ -36,18 +36,20 @@ export class QueueRecoveryService implements OnApplicationBootstrap {
             const lockKey = `bull:${queueName}:${job.id}:lock`;
             // BullMQ client access
             const client = await queue.client;
-            const hasLock = await client.exists(lockKey);
+            const hasLock = Boolean(await client.get(lockKey));
             if (!hasLock) {
               this.logger.warn(
                 `[${queueName}] Reclaiming orphaned active job ${job.id} on startup`,
               );
-              await job.moveToFailed(
-                new Error("Process interrupted — forge was restarted"),
-                "0",
-                true,
-              ).catch(async () => {
-                await job.remove().catch(() => {});
-              });
+              await job
+                .moveToFailed(
+                  new Error("Process interrupted — forge was restarted"),
+                  "0",
+                  true,
+                )
+                .catch(async () => {
+                  await job.remove().catch(() => {});
+                });
             }
           } catch (jobErr) {
             this.logger.debug(
@@ -82,7 +84,9 @@ export class QueueRecoveryService implements OnApplicationBootstrap {
         );
       }
     } catch (err) {
-      this.logger.warn(`Failed to clean stale active DB job executions: ${err}`);
+      this.logger.warn(
+        `Failed to clean stale active DB job executions: ${err}`,
+      );
     }
   }
 }

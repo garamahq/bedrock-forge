@@ -9,7 +9,15 @@ import * as tls from "tls";
 import * as dns from "dns";
 import { PrismaService } from "../../prisma/prisma.service";
 import { EncryptionService } from "../../encryption/encryption.service";
-import { isHttpStatusWorking, JOB_TYPES, QUEUES } from "@bedrock-forge/shared";
+import {
+  isHttpStatusWorking,
+  JOB_TYPES,
+  LighthouseAuditPayloadSchema,
+  MonitorCheckPayloadSchema,
+  QUEUES,
+  type LighthouseAuditPayload,
+} from "@bedrock-forge/shared";
+import { toPrismaJsonValue } from "../../utils/prisma-json";
 
 interface HttpCheckResult {
   statusCode: number;
@@ -23,15 +31,16 @@ interface SslCheckResult {
   issuer: string | null;
 }
 
-type LighthouseStrategy = "mobile" | "desktop";
+type LighthouseStrategy = LighthouseAuditPayload["strategy"];
+
 type LighthouseProvider = "auto" | "local" | "pagespeed";
 
-interface LighthouseAuditPayload {
-  auditId: number;
-  environmentId: number;
-  url: string;
-  strategy: LighthouseStrategy;
-  jobExecutionId?: number;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function recordOrEmpty(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {};
 }
 
 // concurrency=3: HTTP pings are I/O-bound and fast — 3 concurrent is safe.
@@ -53,11 +62,12 @@ export class MonitorProcessor extends WorkerHost {
 
   async process(job: Job) {
     if (job.name === JOB_TYPES.LIGHTHOUSE_AUDIT) {
-      await this.processLighthouseAudit(job.data as LighthouseAuditPayload);
+      const payload = LighthouseAuditPayloadSchema.parse(job.data);
+      await this.processLighthouseAudit(payload);
       return;
     }
 
-    const { monitorId } = job.data;
+    const { monitorId } = MonitorCheckPayloadSchema.parse(job.data);
     const timeout = 30_000;
     const checkedAt = new Date();
     let statusCode: number | null = null;
@@ -79,21 +89,28 @@ export class MonitorProcessor extends WorkerHost {
     });
     if (!monitor) return;
 
-    const isProjectArchived = monitor.environment?.project?.status === "archived";
+    const isProjectArchived =
+      monitor.environment?.project?.status === "archived";
 
     if (!monitor.enabled || isProjectArchived) {
-      this.logger.log(`Monitor ${monitorId} is disabled or project is archived (${isProjectArchived}) — skipping check and removing repeatable job`);
+      this.logger.log(
+        `Monitor ${monitorId} is disabled or project is archived (${isProjectArchived}) — skipping check and removing repeatable job`,
+      );
       const jobId = `monitor-${monitor.id}`;
       try {
         const repeatableJobs = await this.monitorsQueue.getRepeatableJobs();
         for (const rj of repeatableJobs) {
           if (rj.id === jobId) {
             await this.monitorsQueue.removeRepeatableByKey(rj.key);
-            this.logger.log(`Self-healed: removed repeatable job key ${rj.key} for disabled/archived monitor ${monitor.id}`);
+            this.logger.log(
+              `Self-healed: removed repeatable job key ${rj.key} for disabled/archived monitor ${monitor.id}`,
+            );
           }
         }
       } catch (err) {
-        this.logger.warn(`Failed to remove repeatable job for disabled/archived monitor ${monitor.id}: ${err}`);
+        this.logger.warn(
+          `Failed to remove repeatable job for disabled/archived monitor ${monitor.id}: ${err}`,
+        );
       }
       return;
     }
@@ -531,11 +548,13 @@ export class MonitorProcessor extends WorkerHost {
     if (apiKey) endpoint.searchParams.set("key", apiKey);
 
     const res = await fetch(endpoint, { signal: AbortSignal.timeout(120_000) });
-    const body = await res.json().catch(() => null);
+    const body: unknown = await res.json().catch(() => null);
     if (!res.ok) {
+      const error = isRecord(body) ? body.error : undefined;
       const rawMessage =
-        body?.error?.message ??
-        `PageSpeed request failed with HTTP ${res.status}`;
+        isRecord(error) && typeof error.message === "string"
+          ? error.message
+          : `PageSpeed request failed with HTTP ${res.status}`;
       const message = /quota/i.test(rawMessage)
         ? `PageSpeed quota exceeded. Configure a Google PageSpeed API key in Settings > Integrations > PageSpeed, switch LIGHTHOUSE_PROVIDER=local, or wait for Google quota reset. ${rawMessage}`
         : rawMessage;
@@ -547,7 +566,7 @@ export class MonitorProcessor extends WorkerHost {
   private async runLighthouseAudit(
     url: string,
     strategy: LighthouseStrategy,
-  ): Promise<{ provider: "local" | "pagespeed"; result: any }> {
+  ): Promise<{ provider: "local" | "pagespeed"; result: unknown }> {
     const { apiKey, provider } = await this.getResolvedPagespeedConfig();
 
     if (!["auto", "local", "pagespeed"].includes(provider)) {
@@ -591,22 +610,37 @@ export class MonitorProcessor extends WorkerHost {
 
   private async runLocalLighthouse(url: string, strategy: LighthouseStrategy) {
     const mod = await import("lighthouse");
+    const { launch: launchChrome } = await import("chrome-launcher");
     const lighthouse = mod.default;
     const chromePath = this.config.get<string>("pagespeed.chromePath");
-    const result = await lighthouse(url, {
-      output: "json",
-      logLevel: "error",
-      onlyCategories: ["performance", "accessibility", "best-practices", "seo"],
-      formFactor: strategy,
-      screenEmulation: strategy === "desktop" ? { disabled: true } : undefined,
+    const chrome = await launchChrome({
+      chromePath,
+      logLevel: "silent",
       chromeFlags: [
         "--headless=new",
         "--no-sandbox",
         "--disable-dev-shm-usage",
         "--disable-gpu",
       ],
-      chromePath,
-    } as any);
+    });
+    let result: Awaited<ReturnType<typeof lighthouse>>;
+    try {
+      result = await lighthouse(url, {
+        port: chrome.port,
+        output: "json",
+        logLevel: "error",
+        onlyCategories: [
+          "performance",
+          "accessibility",
+          "best-practices",
+          "seo",
+        ],
+        formFactor: strategy,
+        screenEmulation: strategy === "desktop" ? { disabled: true } : undefined,
+      });
+    } finally {
+      chrome.kill();
+    }
     if (!result?.lhr) {
       throw new Error("Local Lighthouse returned no report");
     }
@@ -617,29 +651,42 @@ export class MonitorProcessor extends WorkerHost {
     };
   }
 
-  private mapLighthouseResult(result: any) {
-    const lighthouse = result?.lighthouseResult ?? {};
-    const categories = lighthouse.categories ?? {};
-    const audits = lighthouse.audits ?? {};
+  private mapLighthouseResult(result: unknown) {
+    const response = recordOrEmpty(result);
+    const lighthouse = recordOrEmpty(response.lighthouseResult);
+    if (Object.keys(lighthouse).length === 0) {
+      throw new Error("Lighthouse returned an invalid report");
+    }
+    const categories = recordOrEmpty(lighthouse.categories);
+    const audits = recordOrEmpty(lighthouse.audits);
     const score = (category: string) => {
-      const raw = categories[category]?.score;
+      const raw = recordOrEmpty(categories[category]).score;
       return typeof raw === "number" ? Math.round(raw * 100) : null;
     };
     const numericAudit = (id: string) => {
-      const value = audits[id]?.numericValue;
+      const value = recordOrEmpty(audits[id]).numericValue;
       return typeof value === "number" ? Math.round(value) : null;
     };
-    const clsValue = audits["cumulative-layout-shift"]?.numericValue;
-    const opportunities = Object.values(audits)
-      .filter((audit: any) => audit?.details?.type === "opportunity")
-      .map((audit: any) => ({
-        id: audit.id,
-        title: audit.title,
-        description: audit.description,
-        score: audit.score,
-        displayValue: audit.displayValue,
-        numericValue: audit.numericValue,
-      }))
+    const clsValue = recordOrEmpty(audits["cumulative-layout-shift"]).numericValue;
+    const opportunities = Object.entries(audits)
+      .filter(([, rawAudit]) => {
+        const details = recordOrEmpty(recordOrEmpty(rawAudit).details);
+        return details.type === "opportunity";
+      })
+      .map(([id, rawAudit]) => {
+        const audit = recordOrEmpty(rawAudit);
+        return {
+          id,
+          title: typeof audit.title === "string" ? audit.title : id,
+          description:
+            typeof audit.description === "string" ? audit.description : "",
+          score: typeof audit.score === "number" ? audit.score : null,
+          displayValue:
+            typeof audit.displayValue === "string" ? audit.displayValue : null,
+          numericValue:
+            typeof audit.numericValue === "number" ? audit.numericValue : null,
+        };
+      })
       .slice(0, 10);
 
     return {
@@ -652,16 +699,28 @@ export class MonitorProcessor extends WorkerHost {
       cls: typeof clsValue === "number" ? clsValue : null,
       tbtMs: numericAudit("total-blocking-time"),
       speedIndexMs: numericAudit("speed-index"),
-      opportunities,
-      summary: {
-        fetchTime: lighthouse.fetchTime,
-        finalUrl: lighthouse.finalDisplayedUrl ?? lighthouse.finalUrl,
-        requestedUrl: result?.id,
-      },
-      rawResult: {
-        id: result?.id,
-        analysisUTCTimestamp: result?.analysisUTCTimestamp,
-        lighthouseVersion: lighthouse.lighthouseVersion,
+      opportunities: toPrismaJsonValue(opportunities),
+      summary: toPrismaJsonValue({
+        fetchTime:
+          typeof lighthouse.fetchTime === "string" ? lighthouse.fetchTime : null,
+        finalUrl:
+          typeof lighthouse.finalDisplayedUrl === "string"
+            ? lighthouse.finalDisplayedUrl
+            : typeof lighthouse.finalUrl === "string"
+              ? lighthouse.finalUrl
+              : null,
+        requestedUrl: typeof response.id === "string" ? response.id : null,
+      }),
+      rawResult: toPrismaJsonValue({
+        id: typeof response.id === "string" ? response.id : null,
+        analysisUTCTimestamp:
+          typeof response.analysisUTCTimestamp === "string"
+            ? response.analysisUTCTimestamp
+            : null,
+        lighthouseVersion:
+          typeof lighthouse.lighthouseVersion === "string"
+            ? lighthouse.lighthouseVersion
+            : null,
         categories,
         audits: {
           "first-contentful-paint": audits["first-contentful-paint"],
@@ -670,7 +729,7 @@ export class MonitorProcessor extends WorkerHost {
           "total-blocking-time": audits["total-blocking-time"],
           "speed-index": audits["speed-index"],
         },
-      },
+      }),
     };
   }
 
@@ -769,17 +828,19 @@ export class MonitorProcessor extends WorkerHost {
                 resource_type: "server",
                 server: {
                   environments: {
-                    some: { id: envId }
-                  }
+                    some: { id: envId },
+                  },
                 },
                 starts_at: { lte: now },
                 ends_at: { gte: now },
-              }
-            ]
-          }
+              },
+            ],
+          },
         });
         if (activeMaintenance > 0) {
-          this.logger.log(`Suppressing notification ${eventType} for environment ${payload.environmentId} due to active maintenance window.`);
+          this.logger.log(
+            `Suppressing notification ${eventType} for environment ${payload.environmentId} due to active maintenance window.`,
+          );
           return;
         }
       }

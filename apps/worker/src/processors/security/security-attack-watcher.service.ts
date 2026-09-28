@@ -4,6 +4,35 @@ import { Queue } from "bullmq";
 import { PrismaService } from "../../prisma/prisma.service";
 import { QUEUES, JOB_TYPES } from "@bedrock-forge/shared";
 
+interface ScannedFinding {
+  severity: string;
+  title: string;
+  resource?: string;
+}
+
+type SecurityAttack =
+  | {
+      type: "batch_pattern";
+      signature: string;
+      targets: string[];
+      title: string;
+      count: number;
+    }
+  | { type: "mass_infection"; criticalCount: number; targetCount: number };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isScannedFinding(value: unknown): value is ScannedFinding {
+  return (
+    isRecord(value) &&
+    typeof value.severity === "string" &&
+    typeof value.title === "string" &&
+    (value.resource === undefined || typeof value.resource === "string")
+  );
+}
+
 @Injectable()
 export class SecurityAttackWatcherService {
   private readonly logger = new Logger(SecurityAttackWatcherService.name);
@@ -37,7 +66,12 @@ export class SecurityAttackWatcherService {
     let totalCritical = 0;
 
     for (const scan of recentScans) {
-      const findings = (scan.findings as any[]) || [];
+      const findings: ScannedFinding[] = [];
+      if (Array.isArray(scan.findings)) {
+        for (const candidate of scan.findings as unknown[]) {
+          if (isScannedFinding(candidate)) findings.push(candidate);
+        }
+      }
       for (const f of findings) {
         if (f.severity === "critical" || f.severity === "high") {
           if (f.severity === "critical") totalCritical++;
@@ -58,12 +92,19 @@ export class SecurityAttackWatcherService {
     }
 
     // 3. Detect "Batch Attack": same signature on multiple targets
-    const attacks: any[] = [];
+    const attacks: SecurityAttack[] = [];
     for (const [sig, targets] of findingsBySignature.entries()) {
       if (targets.length >= 2) {
         attacks.push({
+          type: "batch_pattern",
           signature: sig,
-          targets: Array.from(new Set(targets.map((t) => t.env || t.server))),
+          targets: Array.from(
+            new Set(
+              targets
+                .map((target) => target.env || target.server)
+                .filter((target): target is string => target !== undefined),
+            ),
+          ),
           title: targets[0].title,
           count: targets.length,
         });

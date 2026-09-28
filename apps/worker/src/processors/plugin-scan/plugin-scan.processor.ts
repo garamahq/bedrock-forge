@@ -9,8 +9,10 @@ import { createRemoteExecutor } from "@bedrock-forge/remote-executor";
 import {
   QUEUES,
   JOB_TYPES,
-  PluginInfo,
-  PluginScanOutput,
+  PluginInfoSchema,
+  PluginScanOutputSchema,
+  type PluginInfo,
+  type PluginScanOutput,
   PluginManagePayload,
 } from "@bedrock-forge/shared";
 import { ConfigService } from "@nestjs/config";
@@ -19,6 +21,17 @@ import {
   shellQuote,
   pushRemoteScript,
 } from "../../utils/processor-utils";
+
+function parsePluginScanOutput(value: unknown): PluginScanOutput {
+  const output = PluginScanOutputSchema.safeParse(value);
+  if (output.success) return output.data;
+
+  const legacyPlugins = PluginInfoSchema.array().safeParse(value);
+  if (legacyPlugins.success) {
+    return { is_bedrock: false, plugins: legacyPlugins.data };
+  }
+  throw new Error("Plugin scan returned an invalid response");
+}
 
 function normalizeGithubRepoUrl(
   value: string | null | undefined,
@@ -209,12 +222,9 @@ export class PluginScanProcessor extends WorkerHost {
 
       await tracker.track({ step: "Parsing plugin results", level: "info" });
       // Handle both legacy array output and new { is_bedrock, plugins } format
-      const rawParsed: PluginScanOutput | PluginInfo[] = JSON.parse(
-        result.stdout,
+      const scanOutput = parsePluginScanOutput(
+        JSON.parse(result.stdout) as unknown,
       );
-      const scanOutput: PluginScanOutput = Array.isArray(rawParsed)
-        ? { is_bedrock: false, plugins: rawParsed }
-        : (rawParsed as PluginScanOutput);
       const plugins = scanOutput.plugins;
 
       await job.updateProgress(80);
@@ -487,11 +497,8 @@ export class PluginScanProcessor extends WorkerHost {
       let isPublicDomain = false;
       let matchedPlugin: PluginInfo | undefined;
       if (latestScan && latestScan.plugins) {
-        const output = latestScan.plugins as any;
-        const pluginsList = Array.isArray(output)
-          ? output
-          : output.plugins || [];
-        matchedPlugin = pluginsList.find((p: any) => p.slug === slug);
+        const storedOutput = parsePluginScanOutput(latestScan.plugins);
+        matchedPlugin = storedOutput.plugins.find((plugin) => plugin.slug === slug);
         if (matchedPlugin) {
           if (matchedPlugin.managed_by_composer) {
             isComposerManaged = true;

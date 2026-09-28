@@ -5,21 +5,26 @@ import { createRemoteExecutor } from "@bedrock-forge/remote-executor";
 import { FindingDeduplicationService } from "./finding-deduplication.service";
 import { makeFinding } from "../scoring";
 import { createHash } from "crypto";
+import { toPrismaJsonValue } from "../../../utils/prisma-json";
 
 export interface BaselineItemData {
   category: string;
   key: string;
-  value: Record<string, unknown> | string | number | boolean;
+  value: unknown;
 }
 
 export interface DriftDiff {
   category: string;
   key: string;
   change_type: "added" | "removed" | "modified";
-  old_value?: any;
-  new_value?: any;
+  old_value?: unknown;
+  new_value?: unknown;
   severity: "critical" | "high" | "medium" | "low" | "info";
   description: string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 @Injectable()
@@ -62,7 +67,7 @@ export class SecurityBaselineService {
             baseline_id: baseline.id,
             category: item.category,
             key: item.key,
-            value: item.value as any,
+            value: toPrismaJsonValue(item.value),
           })),
         });
       }
@@ -101,12 +106,12 @@ export class SecurityBaselineService {
 
     const currentItems = await this.collectCurrentState(targetType, targetId);
     const DELIM = ":::";
-    const baselineMap = new Map<string, any>();
+    const baselineMap = new Map<string, unknown>();
     for (const item of latestBaseline.items) {
       baselineMap.set(`${item.category}${DELIM}${item.key}`, item.value);
     }
 
-    const currentMap = new Map<string, any>();
+    const currentMap = new Map<string, unknown>();
     for (const item of currentItems) {
       currentMap.set(`${item.category}${DELIM}${item.key}`, item.value);
     }
@@ -175,8 +180,12 @@ export class SecurityBaselineService {
           category: diff.category,
           key: diff.key,
           change_type: diff.change_type,
-          old_value: diff.old_value ? (diff.old_value as any) : undefined,
-          new_value: diff.new_value ? (diff.new_value as any) : undefined,
+          ...(diff.old_value !== undefined && {
+            old_value: toPrismaJsonValue(diff.old_value),
+          }),
+          ...(diff.new_value !== undefined && {
+            new_value: toPrismaJsonValue(diff.new_value),
+          }),
         },
       });
       driftEventsCreated.push(driftEvent);
@@ -426,13 +435,18 @@ export class SecurityBaselineService {
   private assessDriftSeverity(
     category: string,
     changeType: string,
-    value: any,
+    value: unknown,
   ): "critical" | "high" | "medium" | "low" | "info" {
     if (category === "ssh_keys") {
       return changeType === "added" ? "critical" : "medium";
     }
     if (category === "users") {
-      if (value?.uid === 0 || value?.shell?.includes("bash") || value?.shell?.includes("sh")) {
+      if (
+        isRecord(value) &&
+        (value.uid === 0 ||
+          (typeof value.shell === "string" &&
+            (value.shell.includes("bash") || value.shell.includes("sh"))))
+      ) {
         return "critical";
       }
       return "high";

@@ -131,10 +131,19 @@ export type SyncPushPayload = z.infer<typeof SyncPushPayloadSchema>;
 
 export const MonitorCheckPayloadSchema = z.object({
   monitorId: z.number().int().positive(),
-  environmentId: z.number().int().positive(),
-  url: z.string().url(),
 });
 export type MonitorCheckPayload = z.infer<typeof MonitorCheckPayloadSchema>;
+
+export const LighthouseAuditPayloadSchema = z.object({
+  auditId: z.number().int().positive(),
+  environmentId: z.number().int().positive(),
+  url: z.string().url(),
+  strategy: z.enum(["mobile", "desktop"]),
+  jobExecutionId: z.number().int().positive().optional(),
+});
+export type LighthouseAuditPayload = z.infer<
+  typeof LighthouseAuditPayloadSchema
+>;
 
 // ─── Monitor HTTP Status Classification ─────────────────────────────────────
 
@@ -208,7 +217,9 @@ export const EnvironmentDecommissionPayloadSchema = z.object({
   jobExecutionId: z.number().int().positive(),
   deleteFromCyberpanel: z.boolean().default(true),
 });
-export type EnvironmentDecommissionPayload = z.infer<typeof EnvironmentDecommissionPayloadSchema>;
+export type EnvironmentDecommissionPayload = z.infer<
+  typeof EnvironmentDecommissionPayloadSchema
+>;
 
 // ─── WS Payload Types ─────────────────────────────────────────────────────────
 
@@ -314,33 +325,35 @@ export type WpCoreUpdatePayload = z.infer<typeof WpCoreUpdatePayloadSchema>;
  * `active` is intentionally absent — the PHP script cannot determine
  * activation status without WordPress DB access.
  */
-export interface PluginInfo {
-  slug: string;
-  name: string;
-  version: string;
-  latest_version: string | null;
-  update_available: boolean;
-  author: string | null;
-  plugin_uri: string | null;
-  description: string | null;
+export const PluginInfoSchema = z.object({
+  slug: z.string(),
+  name: z.string(),
+  version: z.string(),
+  latest_version: z.string().nullable(),
+  update_available: z.boolean(),
+  author: z.string().nullable(),
+  plugin_uri: z.string().nullable(),
+  description: z.string().nullable(),
   /** True when the plugin entry exists in composer.json (Bedrock only) */
-  managed_by_composer: boolean;
+  managed_by_composer: z.boolean(),
   /** Composer version constraint from composer.json e.g. "^1.5.0" */
-  composer_constraint: string | null;
+  composer_constraint: z.string().nullable(),
   /** True for must-use plugins (mu-plugins) — auto-loaded, cannot be managed via composer */
-  is_mu_plugin?: boolean;
+  is_mu_plugin: z.boolean().optional(),
   /** True when the plugin is managed via satusdev/monorepo-fetcher (extra.monorepo-sources) */
-  managed_by_monorepo?: boolean;
+  managed_by_monorepo: z.boolean().optional(),
   /** GitHub repo URL for the monorepo source managing this plugin */
-  monorepo_repo_url?: string | null;
-  status: "active" | "inactive";
-}
+  monorepo_repo_url: z.string().nullable().optional(),
+  status: z.enum(["active", "inactive"]),
+});
+export type PluginInfo = z.infer<typeof PluginInfoSchema>;
 
 /** Top-level output from plugin-scan.php (new format) */
-export interface PluginScanOutput {
-  is_bedrock: boolean;
-  plugins: PluginInfo[];
-}
+export const PluginScanOutputSchema = z.object({
+  is_bedrock: z.boolean(),
+  plugins: z.array(PluginInfoSchema),
+});
+export type PluginScanOutput = z.infer<typeof PluginScanOutputSchema>;
 
 // ─── Theme Types ──────────────────────────────────────────────────────────────
 
@@ -470,14 +483,18 @@ export const BillingSettingsResponseSchema = z.object({
   currency_code: z.string(),
   currency_locale: z.string(),
 });
-export type BillingSettingsResponse = z.infer<typeof BillingSettingsResponseSchema>;
+export type BillingSettingsResponse = z.infer<
+  typeof BillingSettingsResponseSchema
+>;
 
 export const CloudflareConfigResponseSchema = z.object({
   configured: z.boolean(),
   zone_id: z.string().nullable(),
   zone_name: z.string().nullable(),
 });
-export type CloudflareConfigResponse = z.infer<typeof CloudflareConfigResponseSchema>;
+export type CloudflareConfigResponse = z.infer<
+  typeof CloudflareConfigResponseSchema
+>;
 
 export const GdriveConfigResponseSchema = z.object({
   configured: z.boolean(),
@@ -529,7 +546,7 @@ export interface ProjectEnvironment {
   git_branch?: string | null;
   git_current_commit?: string | null;
   git_last_deployed_at?: string | null;
-  deploy_webhook_token?: string | null;
+  has_deploy_webhook_token?: boolean;
   created_at?: string;
   updated_at?: string;
 }
@@ -583,17 +600,23 @@ export type GitDeployPayload = z.infer<typeof GitDeployPayloadSchema>;
 export const SecureGuardInstallPayloadSchema = z.object({
   environmentId: z.number().int().positive(),
   jobExecutionId: z.number().int().positive(),
-  preset: z.enum(["beginner", "balanced", "maximum", "custom"]).default("balanced"),
+  preset: z
+    .enum(["beginner", "balanced", "maximum", "custom"])
+    .default("balanced"),
   deployWatchdog: z.boolean().default(true),
 });
-export type SecureGuardInstallPayload = z.infer<typeof SecureGuardInstallPayloadSchema>;
+export type SecureGuardInstallPayload = z.infer<
+  typeof SecureGuardInstallPayloadSchema
+>;
 
 export const SecureGuardWatchdogPayloadSchema = z.object({
   environmentId: z.number().int().positive(),
   jobExecutionId: z.number().int().positive(),
   action: z.enum(["deploy", "remove", "verify"]).default("deploy"),
 });
-export type SecureGuardWatchdogPayload = z.infer<typeof SecureGuardWatchdogPayloadSchema>;
+export type SecureGuardWatchdogPayload = z.infer<
+  typeof SecureGuardWatchdogPayloadSchema
+>;
 
 // ─── WP-CLI & DB Tool Payloads ────────────────────────────────────────────────
 
@@ -611,7 +634,9 @@ export const WpSearchReplacePayloadSchema = z.object({
   skipTransients: z.boolean().default(true),
   tables: z.string().optional(),
 });
-export type WpSearchReplacePayload = z.infer<typeof WpSearchReplacePayloadSchema>;
+export type WpSearchReplacePayload = z.infer<
+  typeof WpSearchReplacePayloadSchema
+>;
 
 export const WpDbExportPayloadSchema = z.object({
   environmentId: z.number().int().positive(),
