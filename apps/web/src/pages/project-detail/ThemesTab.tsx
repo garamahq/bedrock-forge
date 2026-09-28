@@ -41,6 +41,7 @@ import {
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useWebSocketEvent, useSubscribeEnvironment } from "@/lib/websocket";
+import { ErrorState } from "@/components/crud";
 
 interface Environment {
   id: number;
@@ -282,7 +283,12 @@ export function ThemesTab({
     }
   });
 
-  const { data: scans, isLoading } = useQuery({
+  const {
+    data: scans,
+    isLoading,
+    isError,
+    refetch,
+  } = useQuery({
     queryKey: ["theme-scans", selectedEnvId],
     enabled: !!selectedEnvId,
     queryFn: () =>
@@ -522,6 +528,11 @@ export function ThemesTab({
             <Skeleton key={i} className="h-16 w-full rounded-lg" />
           ))}
         </div>
+      ) : isError ? (
+        <ErrorState
+          title="Could not load theme scan history"
+          onRetry={() => void refetch()}
+        />
       ) : !latestScan ? (
         <Card>
           <CardContent className="py-12 flex flex-col items-center gap-3 text-muted-foreground">

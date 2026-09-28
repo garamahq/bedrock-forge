@@ -34,7 +34,7 @@ export function useJobExecutionLog(
 export function useCustomCatalog() {
   return useQuery<CustomPlugin[]>({
     queryKey: ["custom-plugins"],
-    queryFn: () => pluginsApi.getCustomCatalog().catch(() => []),
+    queryFn: () => pluginsApi.getCustomCatalog(),
   });
 }
 
@@ -42,14 +42,14 @@ export function useEnvCustomPlugins(envId: number | null) {
   return useQuery<EnvironmentCustomPlugin[]>({
     queryKey: ["env-custom-plugins", envId],
     enabled: !!envId,
-    queryFn: () => pluginsApi.getEnvCustomPlugins(envId!).catch(() => []),
+    queryFn: () => pluginsApi.getEnvCustomPlugins(envId!),
   });
 }
 
 export function usePluginUpdateSchedule(envId: number) {
   return useQuery<PluginUpdateSchedule | null>({
     queryKey: ["plugin-update-schedule", envId],
-    queryFn: () => pluginsApi.getPluginUpdateSchedule(envId).catch(() => null),
+    queryFn: () => pluginsApi.getPluginUpdateSchedule(envId),
   });
 }
 

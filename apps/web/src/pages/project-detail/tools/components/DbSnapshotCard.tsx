@@ -60,7 +60,7 @@ export function DbSnapshotCard({
         description: `Exported ${data.filename} (${formatBytes(data.sizeBytes)}) in ${(data.durationMs / 1000).toFixed(1)}s`,
       });
     },
-    onError: (err: any) => {
+    onError: (err) => {
       toast({
         title: "Snapshot Failed",
         description: err?.message || "Failed to create database export",
@@ -91,10 +91,13 @@ export function DbSnapshotCard({
       a.download = snapshot.filename;
       a.click();
       URL.revokeObjectURL(url);
-    } catch (err: any) {
+    } catch (err) {
       toast({
         title: "Download Failed",
-        description: err?.message || "Could not retrieve snapshot file",
+        description:
+          err instanceof Error
+            ? err.message
+            : "Could not retrieve snapshot file",
         variant: "destructive",
       });
     }

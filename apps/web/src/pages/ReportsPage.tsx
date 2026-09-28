@@ -27,6 +27,7 @@ import {
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
+import { ErrorState } from "@/components/crud";
 import {
   ExecutionLogPanel,
   ExpandLogButton,
@@ -156,18 +157,33 @@ export function ReportsPage() {
 
   // ── Queries ──────────────────────────────────────────────────────────────
 
-  const { data: channels = [], isLoading: channelsLoading } = useQuery({
+  const {
+    data: channels = [],
+    isLoading: channelsLoading,
+    isError: channelsError,
+    refetch: refetchChannels,
+  } = useQuery({
     queryKey: ["report-channels"],
     queryFn: () => api.get<ReportChannel[]>("/reports/channels"),
   });
 
-  const { data: history = [], isLoading: historyLoading } = useQuery({
+  const {
+    data: history = [],
+    isLoading: historyLoading,
+    isError: historyError,
+    refetch: refetchHistory,
+  } = useQuery({
     queryKey: ["report-history"],
     queryFn: () => api.get<ReportExecutionRow[]>("/reports/history"),
     refetchInterval: 15_000,
   });
 
-  const { data: scheduleConfig, isLoading: scheduleLoading } = useQuery({
+  const {
+    data: scheduleConfig,
+    isLoading: scheduleLoading,
+    isError: scheduleError,
+    refetch: refetchSchedule,
+  } = useQuery({
     queryKey: ["report-config"],
     queryFn: () => api.get<ReportScheduleConfig | null>("/reports/config"),
   });
@@ -292,7 +308,13 @@ export function ReportsPage() {
                 (leave empty to send to all subscribed)
               </span>
             </Label>
-            {channelsLoading ? (
+            {channelsError ? (
+              <ErrorState
+                title="Could not load report channels"
+                onRetry={() => void refetchChannels()}
+                className="py-8"
+              />
+            ) : channelsLoading ? (
               <div className="text-sm text-muted-foreground flex items-center gap-2">
                 <Loader2 className="h-4 w-4 animate-spin" /> Loading…
               </div>
@@ -359,7 +381,13 @@ export function ReportsPage() {
           Toggle which messaging channels automatically receive scheduled weekly
           reports.
         </p>
-        {channelsLoading ? (
+        {channelsError ? (
+          <ErrorState
+            title="Could not load channel subscriptions"
+            onRetry={() => void refetchChannels()}
+            className="py-8"
+          />
+        ) : channelsLoading ? (
           <div className="text-sm text-muted-foreground flex items-center gap-2">
             <Loader2 className="h-4 w-4 animate-spin" /> Loading…
           </div>
@@ -424,7 +452,13 @@ export function ReportsPage() {
           </Button>
         </div>
 
-        {historyLoading ? (
+        {historyError ? (
+          <ErrorState
+            title="Could not load report history"
+            onRetry={() => void refetchHistory()}
+            className="py-8"
+          />
+        ) : historyLoading ? (
           <div className="flex items-center gap-2 px-5 py-6 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" />
             Loading history…
@@ -538,7 +572,13 @@ export function ReportsPage() {
           in the Channel Subscriptions card above.
         </p>
 
-        {scheduleLoading ? (
+        {scheduleError ? (
+          <ErrorState
+            title="Could not load report schedule"
+            onRetry={() => void refetchSchedule()}
+            className="py-8"
+          />
+        ) : scheduleLoading ? (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" /> Loading schedule…
           </div>
@@ -606,7 +646,9 @@ export function ReportsPage() {
 
         <Button
           onClick={() => scheduleMutation.mutate()}
-          disabled={scheduleMutation.isPending || scheduleLoading}
+          disabled={
+            scheduleMutation.isPending || scheduleLoading || scheduleError
+          }
         >
           {scheduleMutation.isPending ? (
             <>

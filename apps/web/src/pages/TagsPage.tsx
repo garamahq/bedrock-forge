@@ -5,6 +5,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { Tag, Pencil, Trash2, Plus } from "lucide-react";
 import { api } from "@/lib/api-client";
+import { useAuthStore } from "@/store/auth.store";
 import { toast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -191,6 +192,9 @@ function TagFormDialog({
 
 export function TagsPage() {
   const qc = useQueryClient();
+  const isAdmin = useAuthStore(
+    (s) => s.user?.roles?.includes("admin") ?? false,
+  );
   const [createOpen, setCreateOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<TagItem | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<TagItem | null>(null);
@@ -265,7 +269,7 @@ export function TagsPage() {
     <div className="space-y-4 max-w-3xl">
       <PageHeader
         title="Tags"
-        onCreate={() => setCreateOpen(true)}
+        onCreate={isAdmin ? () => setCreateOpen(true) : undefined}
         createLabel="New Tag"
       >
         <div className="text-sm text-muted-foreground">
@@ -283,31 +287,37 @@ export function TagsPage() {
         emptyMessage="No tags yet"
         emptyDescription="Create tags to organize and filter your clients."
         emptyAction={
-          <Button className="mt-2" onClick={() => setCreateOpen(true)}>
-            <Tag className="h-4 w-4 mr-2" />
-            Create Tag
-          </Button>
+          isAdmin ? (
+            <Button className="mt-2" onClick={() => setCreateOpen(true)}>
+              <Tag className="h-4 w-4 mr-2" />
+              Create Tag
+            </Button>
+          ) : undefined
         }
-        renderActions={(t) => (
-          <div className="flex items-center gap-1">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-7 w-7"
-              onClick={() => setEditTarget(t)}
-            >
-              <Pencil className="h-3.5 w-3.5" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-7 w-7 text-destructive hover:text-destructive"
-              onClick={() => setDeleteTarget(t)}
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-            </Button>
-          </div>
-        )}
+        renderActions={
+          isAdmin
+            ? (t) => (
+                <div className="flex items-center gap-1">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7"
+                    onClick={() => setEditTarget(t)}
+                  >
+                    <Pencil className="h-3.5 w-3.5" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 text-destructive hover:text-destructive"
+                    onClick={() => setDeleteTarget(t)}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              )
+            : undefined
+        }
       />
 
       <TagFormDialog

@@ -6,6 +6,7 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ErrorState } from "@/components/crud";
 import {
   Select,
   SelectContent,
@@ -38,8 +39,12 @@ export function BackupScheduleSection({
     retention_days: null,
   });
 
-  const { data: scheduleData, isLoading: scheduleLoading } =
-    useBackupScheduleQuery(selectedEnvId);
+  const {
+    data: scheduleData,
+    isLoading: scheduleLoading,
+    isError: scheduleError,
+    refetch: refetchSchedule,
+  } = useBackupScheduleQuery(selectedEnvId);
   const upsertScheduleMutation = useUpsertScheduleMutation(selectedEnvId);
   const deleteScheduleMutation = useDeleteScheduleMutation(selectedEnvId);
 
@@ -81,7 +86,7 @@ export function BackupScheduleSection({
           <Clock className="h-4 w-4 text-muted-foreground" />
           Backup Schedule
         </div>
-        {!scheduleFormOpen && (
+        {!scheduleFormOpen && !scheduleError && (
           <Button
             size="sm"
             variant="outline"
@@ -104,81 +109,96 @@ export function BackupScheduleSection({
 
       <div className="p-4">
         {/* Current schedule summary */}
-        {!scheduleFormOpen && !scheduleLoading && scheduleData && (
-          <div className="flex flex-wrap items-center gap-4 text-sm">
-            <div className="flex items-center gap-1.5">
-              <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
-              <span className="capitalize font-medium">
-                {scheduleData.frequency}
-              </span>
-              {scheduleData.frequency === "weekly" &&
-                scheduleData.day_of_week != null && (
-                  <span className="text-muted-foreground">
-                    —{" "}
-                    {
-                      ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][
-                        scheduleData.day_of_week
-                      ]
-                    }
-                  </span>
-                )}
-              {scheduleData.frequency === "monthly" &&
-                scheduleData.day_of_month && (
-                  <span className="text-muted-foreground">
-                    — day {scheduleData.day_of_month}
-                  </span>
-                )}
-              <span className="text-muted-foreground">
-                at {String(scheduleData.hour).padStart(2, "0")}:
-                {String(scheduleData.minute).padStart(2, "0")} UTC
-              </span>
+        {!scheduleFormOpen &&
+          !scheduleLoading &&
+          !scheduleError &&
+          scheduleData && (
+            <div className="flex flex-wrap items-center gap-4 text-sm">
+              <div className="flex items-center gap-1.5">
+                <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
+                <span className="capitalize font-medium">
+                  {scheduleData.frequency}
+                </span>
+                {scheduleData.frequency === "weekly" &&
+                  scheduleData.day_of_week != null && (
+                    <span className="text-muted-foreground">
+                      —{" "}
+                      {
+                        ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][
+                          scheduleData.day_of_week
+                        ]
+                      }
+                    </span>
+                  )}
+                {scheduleData.frequency === "monthly" &&
+                  scheduleData.day_of_month && (
+                    <span className="text-muted-foreground">
+                      — day {scheduleData.day_of_month}
+                    </span>
+                  )}
+                <span className="text-muted-foreground">
+                  at {String(scheduleData.hour).padStart(2, "0")}:
+                  {String(scheduleData.minute).padStart(2, "0")} UTC
+                </span>
+              </div>
+              <Badge variant="outline" className="text-xs capitalize">
+                {scheduleData.type.replace("_", " ")}
+              </Badge>
+              <Badge
+                variant={scheduleData.enabled ? "success" : "secondary"}
+                className="text-xs"
+              >
+                {scheduleData.enabled ? "Enabled" : "Disabled"}
+              </Badge>
+              {scheduleData.last_run_at && (
+                <span className="text-xs text-muted-foreground">
+                  Last ran {new Date(scheduleData.last_run_at).toLocaleString()}
+                </span>
+              )}
+              {(scheduleData.retention_count ||
+                scheduleData.retention_days) && (
+                <span className="text-xs text-muted-foreground">
+                  Retention:
+                  {scheduleData.retention_count
+                    ? ` keep last ${scheduleData.retention_count}`
+                    : ""}
+                  {scheduleData.retention_count && scheduleData.retention_days
+                    ? " ·"
+                    : ""}
+                  {scheduleData.retention_days
+                    ? ` delete after ${scheduleData.retention_days}d`
+                    : ""}
+                </span>
+              )}
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-6 text-xs text-destructive hover:text-destructive ml-auto"
+                onClick={() => deleteScheduleMutation.mutate()}
+                disabled={deleteScheduleMutation.isPending}
+              >
+                <Trash2 className="h-3 w-3 mr-1" />
+                Remove
+              </Button>
             </div>
-            <Badge variant="outline" className="text-xs capitalize">
-              {scheduleData.type.replace("_", " ")}
-            </Badge>
-            <Badge
-              variant={scheduleData.enabled ? "success" : "secondary"}
-              className="text-xs"
-            >
-              {scheduleData.enabled ? "Enabled" : "Disabled"}
-            </Badge>
-            {scheduleData.last_run_at && (
-              <span className="text-xs text-muted-foreground">
-                Last ran {new Date(scheduleData.last_run_at).toLocaleString()}
-              </span>
-            )}
-            {(scheduleData.retention_count || scheduleData.retention_days) && (
-              <span className="text-xs text-muted-foreground">
-                Retention:
-                {scheduleData.retention_count
-                  ? ` keep last ${scheduleData.retention_count}`
-                  : ""}
-                {scheduleData.retention_count && scheduleData.retention_days
-                  ? " ·"
-                  : ""}
-                {scheduleData.retention_days
-                  ? ` delete after ${scheduleData.retention_days}d`
-                  : ""}
-              </span>
-            )}
-            <Button
-              size="sm"
-              variant="ghost"
-              className="h-6 text-xs text-destructive hover:text-destructive ml-auto"
-              onClick={() => deleteScheduleMutation.mutate()}
-              disabled={deleteScheduleMutation.isPending}
-            >
-              <Trash2 className="h-3 w-3 mr-1" />
-              Remove
-            </Button>
-          </div>
+          )}
+
+        {scheduleError && (
+          <ErrorState
+            title="Could not load the backup schedule"
+            onRetry={() => void refetchSchedule()}
+            className="py-8"
+          />
         )}
 
-        {!scheduleFormOpen && !scheduleLoading && !scheduleData && (
-          <p className="text-sm text-muted-foreground">
-            No schedule configured — backups are created manually only.
-          </p>
-        )}
+        {!scheduleFormOpen &&
+          !scheduleLoading &&
+          !scheduleError &&
+          !scheduleData && (
+            <p className="text-sm text-muted-foreground">
+              No schedule configured — backups are created manually only.
+            </p>
+          )}
 
         {scheduleLoading && <Skeleton className="h-6 w-64" />}
 

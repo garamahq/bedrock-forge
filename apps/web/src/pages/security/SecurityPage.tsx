@@ -27,11 +27,17 @@ import { AlertRulesTab } from "./tabs/AlertRulesTab";
 import { WatcherTab } from "./tabs/WatcherTab";
 import { ServerSchedulesTab, ProjectSchedulesTab } from "./tabs/ScheduleTabs";
 import { SecurityScanProgress } from "./components/SecurityScanProgress";
+import { ErrorState } from "@/components/crud";
 
 export function SecurityPage() {
   const queryClient = useQueryClient();
 
-  const { data: overview, isFetching } = useQuery<OverviewData>({
+  const {
+    data: overview,
+    isFetching,
+    isError,
+    refetch,
+  } = useQuery<OverviewData>({
     queryKey: ["security", "overview"],
     queryFn: () => api.get("/security/overview"),
     refetchInterval: 30_000,
@@ -100,6 +106,13 @@ export function SecurityPage() {
         </TabsList>
 
         <div className="mt-4">
+          {isError && !overview && (
+            <ErrorState
+              title="Security overview could not be loaded"
+              description="Security features are unavailable until the overview request succeeds."
+              onRetry={() => void refetch()}
+            />
+          )}
           {!overview && isFetching && (
             <div className="flex justify-center py-16">
               <RefreshCw className="h-6 w-6 animate-spin text-muted-foreground" />

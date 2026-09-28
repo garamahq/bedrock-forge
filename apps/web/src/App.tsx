@@ -100,7 +100,9 @@ const TagsPage = lazy(() =>
   import("@/pages/TagsPage").then((m) => ({ default: m.TagsPage })),
 );
 const MaintenanceWindowsPage = lazy(() =>
-  import("@/pages/MaintenanceWindowsPage").then((m) => ({ default: m.MaintenanceWindowsPage })),
+  import("@/pages/MaintenanceWindowsPage").then((m) => ({
+    default: m.MaintenanceWindowsPage,
+  })),
 );
 const NotFoundPage = lazy(() =>
   import("@/pages/NotFoundPage").then((m) => ({ default: m.NotFoundPage })),
@@ -217,7 +219,19 @@ function MaintainerRoute({ children }: { children: React.ReactNode }) {
     user.roles.includes("maintainer") ? (
     <>{children}</>
   ) : (
-    <Navigate to="/dashboard" replace />
+    <Navigate to="/access-denied" replace />
+  );
+}
+
+function AccessDeniedPage() {
+  return (
+    <main className="mx-auto flex min-h-[60vh] max-w-2xl flex-col justify-center gap-3 p-8">
+      <h1 className="text-2xl font-semibold">Operator access required</h1>
+      <p className="text-muted-foreground">
+        This installation is for one trusted operator team. Client accounts do
+        not have access to installation-wide operational data.
+      </p>
+    </main>
   );
 }
 
@@ -313,18 +327,103 @@ export default function App() {
               }
             >
               <Route index element={<Navigate to="/dashboard" replace />} />
-              <Route path="dashboard" element={<DashboardPage />} />
-              <Route path="clients" element={<ClientsPage />} />
-              <Route path="clients/:id" element={<ClientDetailPage />} />
-              <Route path="servers" element={<ServersPage />} />
-              <Route path="servers/:id" element={<ServerDetailPage />} />
-              <Route path="projects" element={<ProjectsPage />} />
-              <Route path="projects/:id" element={<ProjectDetailPage />} />
-              <Route path="backups" element={<BackupsPage />} />
-              <Route path="monitors" element={<MonitorsPage />} />
-              <Route path="lighthouse" element={<LighthousePage />} />
-              <Route path="monitors/:id" element={<MonitorDetailPage />} />
-              <Route path="activity" element={<ActivityPage />} />
+              <Route
+                path="dashboard"
+                element={
+                  <MaintainerRoute>
+                    <DashboardPage />
+                  </MaintainerRoute>
+                }
+              />
+              <Route path="access-denied" element={<AccessDeniedPage />} />
+              <Route
+                path="clients"
+                element={
+                  <ManagerRoute>
+                    <ClientsPage />
+                  </ManagerRoute>
+                }
+              />
+              <Route
+                path="clients/:id"
+                element={
+                  <ManagerRoute>
+                    <ClientDetailPage />
+                  </ManagerRoute>
+                }
+              />
+              <Route
+                path="servers"
+                element={
+                  <ManagerRoute>
+                    <ServersPage />
+                  </ManagerRoute>
+                }
+              />
+              <Route
+                path="servers/:id"
+                element={
+                  <ManagerRoute>
+                    <ServerDetailPage />
+                  </ManagerRoute>
+                }
+              />
+              <Route
+                path="projects"
+                element={
+                  <ManagerRoute>
+                    <ProjectsPage />
+                  </ManagerRoute>
+                }
+              />
+              <Route
+                path="projects/:id"
+                element={
+                  <ManagerRoute>
+                    <ProjectDetailPage />
+                  </ManagerRoute>
+                }
+              />
+              <Route
+                path="backups"
+                element={
+                  <ManagerRoute>
+                    <BackupsPage />
+                  </ManagerRoute>
+                }
+              />
+              <Route
+                path="monitors"
+                element={
+                  <ManagerRoute>
+                    <MonitorsPage />
+                  </ManagerRoute>
+                }
+              />
+              <Route
+                path="lighthouse"
+                element={
+                  <ManagerRoute>
+                    <LighthousePage />
+                  </ManagerRoute>
+                }
+              />
+              <Route
+                path="monitors/:id"
+                element={
+                  <ManagerRoute>
+                    <MonitorDetailPage />
+                  </ManagerRoute>
+                }
+              />
+              <Route
+                path="activity"
+                element={
+                  <MaintainerRoute>
+                    <ActivityPage />
+                  </MaintainerRoute>
+                }
+              />
               <Route
                 path="problems"
                 element={
@@ -390,7 +489,14 @@ export default function App() {
                   </AdminRoute>
                 }
               />
-              <Route path="domains" element={<DomainsPage />} />
+              <Route
+                path="domains"
+                element={
+                  <ManagerRoute>
+                    <DomainsPage />
+                  </ManagerRoute>
+                }
+              />
               <Route
                 path="security"
                 element={

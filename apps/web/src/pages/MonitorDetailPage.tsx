@@ -29,7 +29,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Pagination } from "@/components/crud";
+import { ErrorState, Pagination } from "@/components/crud";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -290,38 +290,61 @@ export function MonitorDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const monitorId = Number(id);
+  const validMonitorId = Number.isInteger(monitorId) && monitorId > 0;
   const [logPage, setLogPage] = useState(1);
   const [resultsPage, setResultsPage] = useState(1);
 
-  const { data: monitor, isLoading } = useQuery({
+  const {
+    data: monitor,
+    isLoading,
+    isError: monitorError,
+    refetch: refetchMonitor,
+  } = useQuery({
     queryKey: ["monitor", monitorId],
     queryFn: () => api.get<MonitorDetail>(`/monitors/${monitorId}`),
     refetchInterval: 30_000,
+    enabled: validMonitorId,
   });
 
-  const { data: logsData, isLoading: logsLoading } = useQuery({
+  const {
+    data: logsData,
+    isLoading: logsLoading,
+    isError: logsError,
+    refetch: refetchLogs,
+  } = useQuery({
     queryKey: ["monitor-logs", monitorId, logPage],
     queryFn: () =>
       api.get<PaginatedLogs>(
         `/monitors/${monitorId}/logs?page=${logPage}&limit=10`,
       ),
     refetchInterval: 30_000,
+    enabled: validMonitorId,
   });
 
-  const { data: chartData } = useQuery({
+  const {
+    data: chartData,
+    isError: chartError,
+    refetch: refetchChart,
+  } = useQuery({
     queryKey: ["monitor-chart-results", monitorId],
     queryFn: () =>
       api.get<PaginatedResults>(`/monitors/${monitorId}/results?limit=100`),
     refetchInterval: 30_000,
+    enabled: validMonitorId,
   });
 
-  const { data: resultsData } = useQuery({
+  const {
+    data: resultsData,
+    isError: resultsError,
+    refetch: refetchResults,
+  } = useQuery({
     queryKey: ["monitor-results", monitorId, resultsPage],
     queryFn: () =>
       api.get<PaginatedResults>(
         `/monitors/${monitorId}/results?page=${resultsPage}&limit=10`,
       ),
     refetchInterval: 30_000,
+    enabled: validMonitorId,
   });
 
   const qc = useQueryClient();
@@ -343,6 +366,22 @@ export function MonitorDetailPage() {
     },
   });
 
+  if (!validMonitorId) {
+    return (
+      <div className="space-y-4">
+        <ErrorState
+          title="Invalid monitor link"
+          description="The monitor ID in this address is not valid."
+        />
+        <div className="flex justify-center">
+          <Button variant="outline" onClick={() => navigate("/monitors")}>
+            Back to monitors
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
   if (isLoading) {
     return (
       <div className="space-y-4">
@@ -358,16 +397,41 @@ export function MonitorDetailPage() {
     );
   }
 
+  if (monitorError) {
+    return (
+      <div className="space-y-4">
+        <ErrorState
+          title="Could not load monitor"
+          description="The monitor may be unavailable, or the request may have failed."
+          onRetry={() => void refetchMonitor()}
+        />
+        <div className="flex justify-center">
+          <Button variant="outline" onClick={() => navigate("/monitors")}>
+            Back to monitors
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
   if (!monitor) {
     return (
-      <div className="text-center py-8 text-muted-foreground">
-        Monitor not found.
+      <div className="space-y-4">
+        <p className="text-center py-8 text-muted-foreground">
+          Monitor not found.
+        </p>
+        <div className="flex justify-center">
+          <Button variant="outline" onClick={() => navigate("/monitors")}>
+            Back to monitors
+          </Button>
+        </div>
       </div>
     );
   }
 
   const uptimePct = parseFloat(String(monitor.uptime_pct ?? 0));
-  const results = resultsData?.items ?? monitor.monitor_results?.slice(0, 10) ?? [];
+  const results =
+    resultsData?.items ?? monitor.monitor_results?.slice(0, 10) ?? [];
   const chartResults = chartData?.items ?? monitor.monitor_results ?? [];
   const logs = logsData?.items ?? [];
 
@@ -420,7 +484,9 @@ export function MonitorDetailPage() {
           onClick={() => triggerMutation.mutate()}
           disabled={triggerMutation.isPending}
         >
-          <RefreshCw className={`h-4 w-4 ${triggerMutation.isPending ? "animate-spin" : ""}`} />
+          <RefreshCw
+            className={`h-4 w-4 ${triggerMutation.isPending ? "animate-spin" : ""}`}
+          />
           {triggerMutation.isPending ? "Checking..." : "Ping Now"}
         </Button>
       </div>
@@ -498,16 +564,12 @@ export function MonitorDetailPage() {
         <Card>
           <CardHeader className="pb-1 pt-3 px-4">
             <CardTitle className="text-xs text-muted-foreground font-normal flex items-center gap-1">
-              <Activity className="h-3 w-3" /> Incidents
+              <Activity className="h-3 w-3" /> Log entries
             </CardTitle>
           </CardHeader>
           <CardContent className="px-4 pb-3">
-            <p className="text-xl font-semibold">
-              {logs.filter((l) => l.event_type === "down").length}
-            </p>
-            <p className="text-xs text-muted-foreground">
-              {logsData?.total ?? 0} log entries
-            </p>
+            <p className="text-xl font-semibold">{logsData?.total ?? "—"}</p>
+            <p className="text-xs text-muted-foreground">Monitor history</p>
           </CardContent>
         </Card>
       </div>
@@ -617,7 +679,15 @@ export function MonitorDetailPage() {
           <CardTitle className="text-sm">Response Time History</CardTitle>
         </CardHeader>
         <CardContent>
-          <ResponseTimeChart results={chartResults} />
+          {chartError ? (
+            <ErrorState
+              title="Could not load response time history"
+              onRetry={() => void refetchChart()}
+              className="py-8"
+            />
+          ) : (
+            <ResponseTimeChart results={chartResults} />
+          )}
         </CardContent>
       </Card>
 
@@ -627,7 +697,13 @@ export function MonitorDetailPage() {
           <CardTitle className="text-sm">Incident History</CardTitle>
         </CardHeader>
         <CardContent className="px-4 pb-4">
-          {logsLoading ? (
+          {logsError ? (
+            <ErrorState
+              title="Could not load monitor history"
+              onRetry={() => void refetchLogs()}
+              className="py-8"
+            />
+          ) : logsLoading ? (
             <div className="space-y-3">
               {[1, 2, 3].map((i) => (
                 <Skeleton key={i} className="h-12 w-full" />
@@ -636,7 +712,7 @@ export function MonitorDetailPage() {
           ) : (
             <>
               <IncidentLog logs={logs} />
-               {logsData && logsData.total > 10 && (
+              {logsData && logsData.total > 10 && (
                 <div className="mt-4">
                   <Pagination
                     page={logPage}
@@ -690,65 +766,99 @@ export function MonitorDetailPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
-                {results.map((r) => (
-                  <tr
-                    key={r.id}
-                    className="hover:bg-muted/30 transition-colors"
-                  >
-                    <td className="px-4 py-2 text-muted-foreground font-mono">
-                      {new Date(r.checked_at).toLocaleString()}
+                {resultsError ? (
+                  <tr>
+                    <td
+                      colSpan={
+                        4 +
+                        Number(monitor.check_ssl) +
+                        Number(monitor.check_dns) +
+                        Number(monitor.check_keyword)
+                      }
+                      className="px-4 py-6"
+                    >
+                      <ErrorState
+                        title="Could not load recent checks"
+                        onRetry={() => void refetchResults()}
+                        className="py-4"
+                      />
                     </td>
-                    <td className="px-4 py-2">
-                      <div className="flex items-center gap-1.5">
-                        <StatusDot statusCode={r.status_code} />
-                        <span
-                           className={
-                            r.is_up
-                              ? "text-green-600 dark:text-green-400 font-medium"
-                              : "text-destructive font-medium"
-                          }
-                        >
-                          {r.is_up ? "UP" : "DOWN"}
-                        </span>
-                      </div>
-                    </td>
-                    <td className="px-4 py-2 font-mono text-muted-foreground">
-                      {r.status_code || "—"}
-                    </td>
-                    <td className="px-4 py-2 text-right font-mono">
-                      {r.response_ms}ms
-                    </td>
-                    {monitor.check_ssl && (
-                      <td className="px-4 py-2 text-right font-mono text-muted-foreground">
-                        {r.ssl_days_remaining != null
-                          ? `${r.ssl_days_remaining}d`
-                          : "—"}
-                      </td>
-                    )}
-                    {monitor.check_dns && (
-                      <td className="px-4 py-2 text-center">
-                        {r.dns_resolves == null ? (
-                          <span className="text-muted-foreground">—</span>
-                        ) : r.dns_resolves ? (
-                          <Globe className="h-3 w-3 text-green-500 mx-auto" />
-                        ) : (
-                          <Globe className="h-3 w-3 text-destructive mx-auto" />
-                        )}
-                      </td>
-                    )}
-                    {monitor.check_keyword && (
-                      <td className="px-4 py-2 text-center">
-                        {r.keyword_found == null ? (
-                          <span className="text-muted-foreground">—</span>
-                        ) : r.keyword_found ? (
-                          <Type className="h-3 w-3 text-green-500 mx-auto" />
-                        ) : (
-                          <Type className="h-3 w-3 text-destructive mx-auto" />
-                        )}
-                      </td>
-                    )}
                   </tr>
-                ))}
+                ) : results.length === 0 ? (
+                  <tr>
+                    <td
+                      colSpan={
+                        4 +
+                        Number(monitor.check_ssl) +
+                        Number(monitor.check_dns) +
+                        Number(monitor.check_keyword)
+                      }
+                      className="px-4 py-6 text-center text-muted-foreground"
+                    >
+                      No checks have been recorded yet.
+                    </td>
+                  </tr>
+                ) : (
+                  results.map((r) => (
+                    <tr
+                      key={r.id}
+                      className="hover:bg-muted/30 transition-colors"
+                    >
+                      <td className="px-4 py-2 text-muted-foreground font-mono">
+                        {new Date(r.checked_at).toLocaleString()}
+                      </td>
+                      <td className="px-4 py-2">
+                        <div className="flex items-center gap-1.5">
+                          <StatusDot statusCode={r.status_code} />
+                          <span
+                            className={
+                              r.is_up
+                                ? "text-green-600 dark:text-green-400 font-medium"
+                                : "text-destructive font-medium"
+                            }
+                          >
+                            {r.is_up ? "UP" : "DOWN"}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-4 py-2 font-mono text-muted-foreground">
+                        {r.status_code || "—"}
+                      </td>
+                      <td className="px-4 py-2 text-right font-mono">
+                        {r.response_ms}ms
+                      </td>
+                      {monitor.check_ssl && (
+                        <td className="px-4 py-2 text-right font-mono text-muted-foreground">
+                          {r.ssl_days_remaining != null
+                            ? `${r.ssl_days_remaining}d`
+                            : "—"}
+                        </td>
+                      )}
+                      {monitor.check_dns && (
+                        <td className="px-4 py-2 text-center">
+                          {r.dns_resolves == null ? (
+                            <span className="text-muted-foreground">—</span>
+                          ) : r.dns_resolves ? (
+                            <Globe className="h-3 w-3 text-green-500 mx-auto" />
+                          ) : (
+                            <Globe className="h-3 w-3 text-destructive mx-auto" />
+                          )}
+                        </td>
+                      )}
+                      {monitor.check_keyword && (
+                        <td className="px-4 py-2 text-center">
+                          {r.keyword_found == null ? (
+                            <span className="text-muted-foreground">—</span>
+                          ) : r.keyword_found ? (
+                            <Type className="h-3 w-3 text-green-500 mx-auto" />
+                          ) : (
+                            <Type className="h-3 w-3 text-destructive mx-auto" />
+                          )}
+                        </td>
+                      )}
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>

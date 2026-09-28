@@ -54,7 +54,7 @@ export function useTriggerBackupMutation() {
       qc.invalidateQueries({ queryKey: ["system-backups"] });
       toast({ title: "System backup started" });
     },
-    onError: (err: any) =>
+    onError: (err) =>
       toast({
         title: "Failed to start backup",
         description: err?.message,
@@ -80,7 +80,7 @@ export function useSaveBackupScheduleMutation(onSuccessCallback?: () => void) {
       if (onSuccessCallback) onSuccessCallback();
       toast({ title: "Backup schedule saved" });
     },
-    onError: (err: any) =>
+    onError: (err) =>
       toast({
         title: "Failed to save schedule",
         description: err?.message,

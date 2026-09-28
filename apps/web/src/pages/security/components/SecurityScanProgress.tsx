@@ -4,7 +4,45 @@ import { useWebSocketEvent } from "@/lib/websocket";
 import { Progress } from "@/components/ui/progress";
 import { Card, CardContent } from "@/components/ui/card";
 import { Shield, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
-import { WS_EVENTS } from "@bedrock-forge/shared";
+import {
+  WS_EVENTS,
+  type JobCompletedEvent,
+  type JobFailedEvent,
+  type JobProgressEvent,
+} from "@bedrock-forge/shared";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isJobProgressEvent(value: unknown): value is JobProgressEvent {
+  return (
+    isRecord(value) &&
+    typeof value.jobId === "string" &&
+    typeof value.queueName === "string" &&
+    typeof value.progress === "number" &&
+    Number.isFinite(value.progress) &&
+    (value.step === undefined || typeof value.step === "string")
+  );
+}
+
+function isJobCompletedEvent(value: unknown): value is JobCompletedEvent {
+  return (
+    isRecord(value) &&
+    typeof value.jobId === "string" &&
+    typeof value.queueName === "string"
+  );
+}
+
+function isJobFailedEvent(value: unknown): value is JobFailedEvent {
+  return (
+    isRecord(value) &&
+    typeof value.jobId === "string" &&
+    typeof value.queueName === "string" &&
+    typeof value.error === "string" &&
+    typeof value.attempt === "number"
+  );
+}
 
 export function SecurityScanProgress() {
   const queryClient = useQueryClient();
@@ -12,31 +50,31 @@ export function SecurityScanProgress() {
     Record<string, { progress: number; step?: string }>
   >({});
 
-  useWebSocketEvent(WS_EVENTS.JOB_PROGRESS, (data: any) => {
-    if (data.queueName === "security") {
+  useWebSocketEvent(WS_EVENTS.JOB_PROGRESS, (payload) => {
+    if (isJobProgressEvent(payload) && payload.queueName === "security") {
       setActiveJobs((prev) => ({
         ...prev,
-        [data.jobId]: { progress: data.progress, step: data.step },
+        [payload.jobId]: { progress: payload.progress, step: payload.step },
       }));
     }
   });
 
-  useWebSocketEvent(WS_EVENTS.JOB_COMPLETED, (data: any) => {
-    if (data.queueName === "security") {
+  useWebSocketEvent(WS_EVENTS.JOB_COMPLETED, (payload) => {
+    if (isJobCompletedEvent(payload) && payload.queueName === "security") {
       setActiveJobs((prev) => {
         const next = { ...prev };
-        delete next[data.jobId];
+        delete next[payload.jobId];
         return next;
       });
       void queryClient.invalidateQueries({ queryKey: ["security"] });
     }
   });
 
-  useWebSocketEvent(WS_EVENTS.JOB_FAILED, (data: any) => {
-    if (data.queueName === "security") {
+  useWebSocketEvent(WS_EVENTS.JOB_FAILED, (payload) => {
+    if (isJobFailedEvent(payload) && payload.queueName === "security") {
       setActiveJobs((prev) => {
         const next = { ...prev };
-        delete next[data.jobId];
+        delete next[payload.jobId];
         return next;
       });
       void queryClient.invalidateQueries({ queryKey: ["security"] });

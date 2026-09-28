@@ -2,6 +2,7 @@ import { NavLink, useLocation } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/store/auth.store";
 import { useUiStore } from "@/store/ui.store";
+import { ROLE_HIERARCHY, type Role } from "@bedrock-forge/shared";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -39,7 +40,7 @@ interface NavItemDef {
   to: string;
   label: string;
   icon: React.ElementType;
-  minRole?: string;
+  minRole?: Role;
 }
 
 interface NavGroup {
@@ -51,25 +52,50 @@ const NAV_GROUPS: NavGroup[] = [
   {
     label: "Overview",
     items: [
-      { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-      { to: "/monitors", label: "Monitors", icon: Activity },
-      { to: "/lighthouse", label: "Lighthouse", icon: Gauge },
-      { to: "/activity", label: "Activity", icon: ClipboardList },
+      {
+        to: "/dashboard",
+        label: "Dashboard",
+        icon: LayoutDashboard,
+        minRole: "maintainer",
+      },
+      {
+        to: "/monitors",
+        label: "Monitors",
+        icon: Activity,
+        minRole: "manager",
+      },
+      {
+        to: "/lighthouse",
+        label: "Lighthouse",
+        icon: Gauge,
+        minRole: "manager",
+      },
+      {
+        to: "/activity",
+        label: "Activity",
+        icon: ClipboardList,
+        minRole: "maintainer",
+      },
     ],
   },
   {
     label: "Management",
     items: [
-      { to: "/projects", label: "Projects", icon: FolderKanban },
-      { to: "/clients", label: "Clients", icon: Users },
-      { to: "/servers", label: "Servers", icon: Server },
-      { to: "/domains", label: "Domains", icon: Globe },
+      {
+        to: "/projects",
+        label: "Projects",
+        icon: FolderKanban,
+        minRole: "manager",
+      },
+      { to: "/clients", label: "Clients", icon: Users, minRole: "manager" },
+      { to: "/servers", label: "Servers", icon: Server, minRole: "manager" },
+      { to: "/domains", label: "Domains", icon: Globe, minRole: "manager" },
     ],
   },
   {
     label: "Operations",
     items: [
-      { to: "/backups", label: "Backups", icon: HardDrive },
+      { to: "/backups", label: "Backups", icon: HardDrive, minRole: "manager" },
       {
         to: "/security",
         label: "Security",
@@ -145,7 +171,8 @@ function NavItem({
   onNavigate?: () => void;
 }) {
   const location = useLocation();
-  const isActive = to === "/" ? location.pathname === "/" : location.pathname.startsWith(to);
+  const isActive =
+    to === "/" ? location.pathname === "/" : location.pathname.startsWith(to);
 
   const link = (
     <NavLink
@@ -153,7 +180,9 @@ function NavItem({
       onClick={onNavigate}
       className={cn(
         "flex items-center text-sm font-medium transition-colors relative group w-full",
-        collapsed ? "justify-center px-0 py-3 rounded-none" : "rounded-md gap-3 px-3 py-2",
+        collapsed
+          ? "justify-center px-0 py-3 rounded-none"
+          : "rounded-md gap-3 px-3 py-2",
         isActive
           ? "bg-primary text-primary-foreground"
           : "text-muted-foreground hover:bg-accent hover:text-foreground",
@@ -181,7 +210,10 @@ interface SidebarInnerProps {
   onNavigate?: () => void;
 }
 
-export function SidebarInner({ collapsed = false, onNavigate }: SidebarInnerProps) {
+export function SidebarInner({
+  collapsed = false,
+  onNavigate,
+}: SidebarInnerProps) {
   const user = useAuthStore((s) => s.user);
   const { darkMode, toggleDarkMode } = useUiStore();
   const initials = user?.name
@@ -192,7 +224,15 @@ export function SidebarInner({ collapsed = false, onNavigate }: SidebarInnerProp
         .toUpperCase()
         .slice(0, 2)
     : (user?.email?.[0]?.toUpperCase() ?? "U");
-  const role = user?.roles?.[0] ?? "";
+  const role =
+    user?.roles?.reduce(
+      (highest, current) =>
+        (ROLE_HIERARCHY[current as Role] ?? 0) >
+        (ROLE_HIERARCHY[highest as Role] ?? 0)
+          ? current
+          : highest,
+      "",
+    ) ?? "";
 
   return (
     <TooltipProvider delayDuration={0}>
@@ -204,7 +244,12 @@ export function SidebarInner({ collapsed = false, onNavigate }: SidebarInnerProp
             collapsed ? "justify-center px-0" : "px-5",
           )}
         >
-          <div className={cn("flex items-center min-w-0", collapsed ? "justify-center" : "gap-2.5")}>
+          <div
+            className={cn(
+              "flex items-center min-w-0",
+              collapsed ? "justify-center" : "gap-2.5",
+            )}
+          >
             <div className="w-7 h-7 rounded-lg bg-primary text-primary-foreground flex items-center justify-center font-bold text-sm shrink-0">
               B
             </div>
@@ -224,21 +269,15 @@ export function SidebarInner({ collapsed = false, onNavigate }: SidebarInnerProp
           )}
         >
           {(() => {
-            const ROLE_WEIGHT: Record<string, number> = {
-              admin: 4,
-              manager: 3,
-              maintainer: 2,
-              client: 1,
-            };
             const userWeight = Math.max(
-              ...(user?.roles ?? []).map((r) => ROLE_WEIGHT[r] ?? 0),
+              ...(user?.roles ?? []).map((r) => ROLE_HIERARCHY[r as Role] ?? 0),
               0,
             );
             const visibleGroups = NAV_GROUPS.map((group) => ({
               ...group,
               items: group.items.filter((item) => {
                 const minW = item.minRole
-                  ? (ROLE_WEIGHT[item.minRole] ?? 0)
+                  ? (ROLE_HIERARCHY[item.minRole] ?? 0)
                   : 0;
                 return minW <= userWeight;
               }),

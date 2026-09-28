@@ -18,7 +18,8 @@ export const accountApi = {
   getSessions: () => api.get<ActiveSession[]>("/auth/sessions"),
   revokeSession: (id: number) => api.delete<void>(`/auth/sessions/${id}`),
   revokeAllSessions: () => api.post<void>("/auth/logout-all", {}),
-  setupMfa: () => api.post<{ secret: string; qrCodeDataUrl: string }>("/auth/mfa/setup", {}),
+  setupMfa: () =>
+    api.post<{ secret: string; qrCodeDataUrl: string }>("/auth/mfa/setup", {}),
   enableMfa: (code: string) => api.post<void>("/auth/mfa/enable", { code }),
-  disableMfa: () => api.post<void>("/auth/mfa/disable", {}),
+  disableMfa: (code: string) => api.post<void>("/auth/mfa/disable", { code }),
 };

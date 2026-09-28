@@ -34,7 +34,7 @@ export function useSaveGdrive() {
       queryClient.invalidateQueries({ queryKey: ["gdrive-status"] });
       toast({ title: "Google Drive token saved" });
     },
-    onError: (err: any) =>
+    onError: (err) =>
       toast({
         title: "Failed to save token",
         description:
@@ -48,7 +48,7 @@ export function useSaveGdrive() {
 export function useTestGdrive() {
   return useMutation({
     mutationFn: integrationsApi.testGdrive,
-    onError: (err: any) => {
+    onError: (err) => {
       toast({
         title: "Connection test failed",
         description: err?.message ?? "Google Drive connection test failed.",
@@ -158,7 +158,7 @@ export function useSavePagespeed() {
       queryClient.invalidateQueries({ queryKey: ["pagespeed-status"] });
       toast({ title: "PageSpeed & Lighthouse settings saved" });
     },
-    onError: (err: any) =>
+    onError: (err) =>
       toast({
         title: "Failed to save settings",
         description: err?.message ?? "An error occurred.",
@@ -170,7 +170,7 @@ export function useSavePagespeed() {
 export function useTestPagespeed() {
   return useMutation({
     mutationFn: integrationsApi.testPagespeed,
-    onError: (err: any) => {
+    onError: (err) => {
       toast({
         title: "PageSpeed test failed",
         description: err?.message ?? "Failed to connect to Google PageSpeed API.",

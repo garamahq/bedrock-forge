@@ -97,7 +97,7 @@ export function RemediationModal({
       void queryClient.invalidateQueries({ queryKey: ["security", "findings"] });
       void queryClient.invalidateQueries({ queryKey: ["security", "incidents"] });
     },
-    onError: (err: any) => {
+    onError: (err) => {
       toast({
         title: "Remediation failed",
         description: err.message,

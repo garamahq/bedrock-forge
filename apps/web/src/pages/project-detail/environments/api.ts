@@ -1,4 +1,4 @@
-import { api } from "@/lib/api-client";
+import { ApiError, api } from "@/lib/api-client";
 import {
   DbCredentials,
   Environment,
@@ -58,11 +58,14 @@ export const environmentsApi = {
     projectId: number,
     envId: number,
   ): Promise<DbCredentials | null> => {
-    return api
-      .get<DbCredentials | null>(
+    try {
+      return await api.get<DbCredentials | null>(
         `/projects/${projectId}/environments/${envId}/db-credentials`,
-      )
-      .catch(() => null);
+      );
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null;
+      throw error;
+    }
   },
 
   saveDbCredentials: async (

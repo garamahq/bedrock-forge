@@ -17,7 +17,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { ClientFormDialog } from "./ClientsPage";
 import { ResourceActivityFeed } from "@/components/ResourceActivityFeed";
-
+import { ErrorState } from "@/components/crud";
+import { useAuthStore } from "@/store/auth.store";
 
 interface TagItem {
   id: number;
@@ -57,6 +58,9 @@ export function ClientDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const qc = useQueryClient();
+  const isAdmin = useAuthStore(
+    (s) => s.user?.roles?.includes("admin") ?? false,
+  );
   const [editOpen, setEditOpen] = useState(false);
 
   const { data: tags = [] } = useQuery<TagItem[]>({
@@ -65,13 +69,23 @@ export function ClientDetailPage() {
     staleTime: 120_000,
   });
 
-  const { data: client, isLoading } = useQuery<ClientDetail>({
+  const {
+    data: client,
+    isLoading,
+    isError,
+    refetch: refetchClient,
+  } = useQuery<ClientDetail>({
     queryKey: ["client", id],
     queryFn: () => api.get(`/clients/${id}`),
     enabled: !!id,
   });
 
-  const { data: invoicesData } = useQuery<{ data: Invoice[]; total: number }>({
+  const {
+    data: invoicesData,
+    isLoading: invoicesLoading,
+    isError: invoicesError,
+    refetch: refetchInvoices,
+  } = useQuery<{ data: Invoice[]; total: number }>({
     queryKey: ["client-invoices", id],
     queryFn: () => api.get(`/invoices?client_id=${id}&limit=50&page=1`),
     enabled: !!id,
@@ -94,6 +108,26 @@ export function ClientDetailPage() {
         <Skeleton className="h-8 w-48" />
         <Skeleton className="h-4 w-64" />
         <Skeleton className="h-32 w-full" />
+      </div>
+    );
+  }
+
+  if (isError) {
+    return (
+      <div className="p-6 max-w-3xl">
+        <ErrorState
+          title="Client details could not be loaded"
+          description="Retry the request or return to the client list."
+          onRetry={() => void refetchClient()}
+        />
+        <Button
+          variant="outline"
+          onClick={() => navigate("/clients")}
+          className="mx-auto block"
+        >
+          <ArrowLeft className="h-4 w-4 mr-1.5" />
+          Back to Clients
+        </Button>
       </div>
     );
   }
@@ -133,10 +167,12 @@ export function ClientDetailPage() {
             </p>
           </div>
         </div>
-        <Button variant="outline" size="sm" onClick={() => setEditOpen(true)}>
-          <Pencil className="h-4 w-4 mr-1.5" />
-          Edit Client
-        </Button>
+        {isAdmin && (
+          <Button variant="outline" size="sm" onClick={() => setEditOpen(true)}>
+            <Pencil className="h-4 w-4 mr-1.5" />
+            Edit Client
+          </Button>
+        )}
       </div>
 
       {/* Info card */}
@@ -244,14 +280,28 @@ export function ClientDetailPage() {
         <div className="flex items-center justify-between mb-3">
           <h2 className="font-semibold flex items-center gap-2">
             <Receipt className="h-4 w-4" />
-            Invoices ({invoices.length})
+            Invoices (
+            {invoicesLoading
+              ? "…"
+              : invoicesError
+                ? "—"
+                : (invoicesData?.total ?? invoices.length)}
+            )
           </h2>
           <Button asChild variant="outline" size="sm">
             <Link to="/invoices">View All Invoices</Link>
           </Button>
         </div>
 
-        {invoices.length === 0 ? (
+        {invoicesError ? (
+          <ErrorState
+            title="Invoices could not be loaded"
+            onRetry={() => void refetchInvoices()}
+            className="py-8"
+          />
+        ) : invoicesLoading ? (
+          <p className="text-muted-foreground text-sm">Loading invoices…</p>
+        ) : invoices.length === 0 ? (
           <p className="text-muted-foreground text-sm">
             No invoices for this client.
           </p>
@@ -312,7 +362,6 @@ export function ClientDetailPage() {
       </div>
 
       {editOpen && (
-
         <ClientFormDialog
           open={editOpen}
           onOpenChange={setEditOpen}

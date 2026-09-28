@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Calendar, Clock, Loader2, Trash2 } from "lucide-react";
 import {
   usePluginUpdateSchedule,
@@ -7,6 +7,7 @@ import {
 } from "../hooks";
 import { toast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
+import { ErrorState } from "@/components/crud";
 import { Input } from "@/components/ui/input";
 import {
   Card,
@@ -34,10 +35,15 @@ export function PluginUpdateScheduleCard({ envId }: { envId: number }) {
   const [dayOfMonth, setDayOfMonth] = useState(1);
   const [initialized, setInitialized] = useState(false);
 
-  const { data: schedule, isLoading } = usePluginUpdateSchedule(envId);
+  const {
+    data: schedule,
+    isLoading,
+    isError,
+    refetch,
+  } = usePluginUpdateSchedule(envId);
 
-  // Sync form from loaded schedule
-  if (schedule && !initialized) {
+  useEffect(() => {
+    if (!schedule || initialized) return;
     setEnabled(schedule.enabled);
     setFrequency(schedule.frequency);
     setHour(schedule.hour);
@@ -45,7 +51,7 @@ export function PluginUpdateScheduleCard({ envId }: { envId: number }) {
     if (schedule.day_of_week != null) setDayOfWeek(schedule.day_of_week);
     if (schedule.day_of_month != null) setDayOfMonth(schedule.day_of_month);
     setInitialized(true);
-  }
+  }, [initialized, schedule]);
 
   const saveMutation = useSavePluginUpdateSchedule(envId, {
     onSuccess: () => {
@@ -83,7 +89,13 @@ export function PluginUpdateScheduleCard({ envId }: { envId: number }) {
         </CardDescription>
       </CardHeader>
       <CardContent>
-        {isLoading ? (
+        {isError ? (
+          <ErrorState
+            title="Could not load the auto-update schedule"
+            onRetry={() => void refetch()}
+            className="py-8"
+          />
+        ) : isLoading ? (
           <div className="space-y-2">
             <div className="h-8 bg-muted animate-pulse rounded" />
             <div className="h-8 bg-muted animate-pulse rounded w-3/4" />

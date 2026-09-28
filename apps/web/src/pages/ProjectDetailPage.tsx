@@ -31,6 +31,7 @@ import {
   GitBranch,
 } from "lucide-react";
 import { api } from "@/lib/api-client";
+import { useBillingSettings } from "@/hooks/useBillingSettings";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -52,7 +53,10 @@ import { GitDeployTab } from "./project-detail/GitDeployTab";
 import { EnvironmentQuickBar } from "./project-detail/EnvironmentQuickBar";
 import { ProjectFormDialog } from "./ProjectsPage";
 import { ResourceActivityFeed } from "@/components/ResourceActivityFeed";
-import { ArchiveDialog, RestoreDialog } from "@/components/ProjectArchiveDialogs";
+import {
+  ArchiveDialog,
+  RestoreDialog,
+} from "@/components/ProjectArchiveDialogs";
 import {
   Dialog,
   DialogContent,
@@ -75,7 +79,6 @@ import { useWebSocketEvent, useSubscribeEnvironment } from "@/lib/websocket";
 import { toast } from "@/hooks/use-toast";
 import { ExecutionLogPanel } from "@/components/ui/execution-log-panel";
 
-
 interface Server {
   id: number;
   name: string;
@@ -94,14 +97,29 @@ interface Environment {
   git_branch?: string | null;
   git_current_commit?: string | null;
   git_last_deployed_at?: string | null;
-  deploy_webhook_token?: string | null;
+  has_deploy_webhook_token?: boolean;
   server: Server;
 }
 
-interface ProjectLink {
-  label: string;
-  url: string;
-}
+type ProjectLink =
+  | { label: string; url: string; isText?: false; value?: never }
+  | { label: string; value: string; isText: true; url?: never };
+
+const VALID_PROJECT_TABS = [
+  "environments",
+  "deploy",
+  "backups",
+  "plugins",
+  "sync",
+  "restore",
+  "tools",
+  "drift",
+  "themes",
+  "files-config",
+  "wp-core",
+  "security",
+  "activity",
+];
 
 interface Project {
   id: number;
@@ -161,7 +179,10 @@ function ProjectHeader({
         );
       default:
         return (
-          <Badge variant="outline" className="font-semibold text-xs px-2.5 py-1 capitalize">
+          <Badge
+            variant="outline"
+            className="font-semibold text-xs px-2.5 py-1 capitalize"
+          >
             {status}
           </Badge>
         );
@@ -229,7 +250,6 @@ function ProjectHeader({
           )}
         </div>
       </div>
-
     </div>
   );
 }
@@ -252,6 +272,7 @@ export function ProjectDetailPage() {
   const navigate = useNavigate();
   const { id } = useParams<{ id: string }>();
   const projectId = Number(id);
+  const { formatMoney } = useBillingSettings();
   const qc = useQueryClient();
   const [editOpen, setEditOpen] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
@@ -274,16 +295,18 @@ export function ProjectDetailPage() {
       qc.invalidateQueries({ queryKey: ["project", projectId] });
       qc.invalidateQueries({ queryKey: ["projects"] });
     },
-    onError: (err: any) => {
+    onError: (err) => {
       toast({
         title: "Failed to update project",
-        description: err.response?.data?.message || err.message,
+        description: err.message,
         variant: "destructive",
       });
     },
   });
 
-  const [activeJobExecutionId, setActiveJobExecutionId] = useState<number | null>(null);
+  const [activeJobExecutionId, setActiveJobExecutionId] = useState<
+    number | null
+  >(null);
   const [activeBullJobId, setActiveBullJobId] = useState<string | null>(null);
   const [activeJobType, setActiveJobType] = useState<string | null>(null);
   const [jobProgress, setJobProgress] = useState<number | null>(null);
@@ -291,7 +314,10 @@ export function ProjectDetailPage() {
   const [jobStep, setJobStep] = useState<string | null>(null);
 
   const archiveMutation = useMutation({
-    mutationFn: (options: { createBackup: boolean; deleteFromCyberpanel: boolean }) =>
+    mutationFn: (options: {
+      createBackup: boolean;
+      deleteFromCyberpanel: boolean;
+    }) =>
       api.post<{ projectId: number; jobExecutionId: number; jobId: string }>(
         `/projects/${projectId}/archive`,
         options,
@@ -307,14 +333,15 @@ export function ProjectDetailPage() {
         setJobStep("Queueing archival task...");
         toast({
           title: "Archival process initiated",
-          description: "Project status changed to archived and deprovisioning task started.",
+          description:
+            "Project status changed to archived and deprovisioning task started.",
         });
       }
     },
-    onError: (err: any) => {
+    onError: (err) => {
       toast({
         title: "Archival failed to start",
-        description: err.response?.data?.message || err.message || "An unexpected error occurred",
+        description: err.message || "An unexpected error occurred",
         variant: "destructive",
       });
     },
@@ -337,14 +364,15 @@ export function ProjectDetailPage() {
         setJobStep("Queueing restoration task...");
         toast({
           title: "Restoration process initiated",
-          description: "Project status changed to active and reprovisioning task started.",
+          description:
+            "Project status changed to active and reprovisioning task started.",
         });
       }
     },
-    onError: (err: any) => {
+    onError: (err) => {
       toast({
         title: "Restoration failed to start",
-        description: err.response?.data?.message || err.message || "An unexpected error occurred",
+        description: err.message || "An unexpected error occurred",
         variant: "destructive",
       });
     },
@@ -404,10 +432,27 @@ export function ProjectDetailPage() {
   });
 
   const [searchParams, setSearchParams] = useSearchParams();
-  const currentTab = searchParams.get("tab") || "environments";
+  const requestedTab = searchParams.get("tab");
+  const currentTab =
+    requestedTab && VALID_PROJECT_TABS.includes(requestedTab)
+      ? requestedTab
+      : "environments";
   const [activatedTabs, setActivatedTabs] = useState<Set<string>>(
     new Set([currentTab]),
   );
+
+  useEffect(() => {
+    if (requestedTab && !VALID_PROJECT_TABS.includes(requestedTab)) {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.set("tab", "environments");
+          return next;
+        },
+        { replace: true },
+      );
+    }
+  }, [requestedTab, setSearchParams]);
 
   useEffect(() => {
     setActivatedTabs((prev) => {
@@ -485,9 +530,9 @@ export function ProjectDetailPage() {
   const initialEnvId = envParam ? Number(envParam) : null;
   const currentEnvId =
     environments.find((e) => e.id === initialEnvId)?.id ??
-    (environments.find((e) => e.type === "production")?.id ??
-      environments[0]?.id ??
-      null);
+    environments.find((e) => e.type === "production")?.id ??
+    environments[0]?.id ??
+    null;
 
   return (
     <div className="container mx-auto py-8 px-4 max-w-full space-y-6">
@@ -510,7 +555,9 @@ export function ProjectDetailPage() {
                 <Loader2 className="h-5 w-5 animate-spin text-primary" />
               )}
               <span className="capitalize">
-                {activeJobType === "project:archive" ? "Archiving Project" : "Restoring Project"}
+                {activeJobType === "project:archive"
+                  ? "Archiving Project"
+                  : "Restoring Project"}
               </span>
             </div>
             {jobStatus === "failed" && (
@@ -538,8 +585,8 @@ export function ProjectDetailPage() {
                   jobStatus === "failed"
                     ? "bg-destructive"
                     : jobStatus === "completed"
-                    ? "bg-green-500"
-                    : "bg-primary"
+                      ? "bg-green-500"
+                      : "bg-primary"
                 }`}
                 style={{ width: `${jobProgress ?? 0}%` }}
               />
@@ -578,7 +625,7 @@ export function ProjectDetailPage() {
                   {project.hosting_package.name}
                 </p>
                 <p className="text-xs text-muted-foreground/80 mt-0.5">
-                  ${project.hosting_package.price_monthly}/mo
+                  {formatMoney(project.hosting_package.price_monthly)}/mo
                 </p>
               </div>
             </div>
@@ -596,7 +643,7 @@ export function ProjectDetailPage() {
                   {project.support_package.name}
                 </p>
                 <p className="text-xs text-muted-foreground/80 mt-0.5">
-                  ${project.support_package.price_monthly}/mo
+                  {formatMoney(project.support_package.price_monthly)}/mo
                 </p>
               </div>
             </div>
@@ -627,12 +674,15 @@ export function ProjectDetailPage() {
         <div className="flex w-full">
           <Card className="border border-border/40 rounded-xl shadow-sm backdrop-blur-sm bg-card overflow-hidden w-full flex flex-col h-full">
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3 border-b border-border/20 px-5 py-4 shrink-0">
-              <CardTitle className="text-sm font-semibold tracking-tight">Project Notes</CardTitle>
+              <CardTitle className="text-sm font-semibold tracking-tight">
+                Project Notes
+              </CardTitle>
               {!isEditingNotes && (
                 <Button
                   variant="ghost"
                   size="icon"
                   className="h-8 w-8 hover:bg-muted"
+                  aria-label="Edit project notes"
                   onClick={() => setIsEditingNotes(true)}
                 >
                   <Pencil className="h-4 w-4 text-muted-foreground" />
@@ -643,11 +693,16 @@ export function ProjectDetailPage() {
               {isEditingNotes ? (
                 <div className="space-y-3 h-full flex flex-col">
                   <Textarea
-                    placeholder="Enter database credentials, production URLs, SSH keys, access info, or instructions..."
+                    placeholder="Record non-sensitive project context, handoff notes, or operational instructions..."
                     value={notesText}
                     onChange={(e) => setNotesText(e.target.value)}
                     className="flex-1 min-h-[100px] resize-none text-sm bg-muted/30 focus-visible:ring-primary/30"
                   />
+                  <p className="text-xs text-warning-foreground bg-warning/10 border border-warning/20 rounded-md px-3 py-2">
+                    Do not store passwords, API keys, tokens, SSH keys, or other
+                    secrets here. Use the relevant server, integration, or
+                    environment credential settings.
+                  </p>
                   <div className="flex items-center justify-end gap-2 shrink-0">
                     <Button
                       variant="ghost"
@@ -667,7 +722,7 @@ export function ProjectDetailPage() {
                       onClick={() => {
                         updateProjectMutation.mutate(
                           { notes: notesText },
-                          { onSuccess: () => setIsEditingNotes(false) }
+                          { onSuccess: () => setIsEditingNotes(false) },
                         );
                       }}
                       disabled={updateProjectMutation.isPending}
@@ -682,10 +737,14 @@ export function ProjectDetailPage() {
               ) : (
                 <div className="text-sm leading-relaxed text-foreground h-full flex flex-col">
                   {project.notes ? (
-                    <div className="whitespace-pre-wrap select-text">{project.notes}</div>
+                    <div className="whitespace-pre-wrap select-text">
+                      {project.notes}
+                    </div>
                   ) : (
                     <p className="text-muted-foreground italic text-xs">
-                      No project notes recorded yet. Click the edit icon to add passwords, configurations, or credentials.
+                      No project notes recorded yet. Click the edit icon to add
+                      handoff notes, non-sensitive configuration context, or
+                      operational instructions.
                     </p>
                   )}
                 </div>
@@ -698,11 +757,14 @@ export function ProjectDetailPage() {
         <div className="flex w-full">
           <Card className="border border-border/40 rounded-xl shadow-sm backdrop-blur-sm bg-card overflow-hidden w-full flex flex-col h-full">
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3 border-b border-border/20 px-5 py-4 shrink-0">
-              <CardTitle className="text-sm font-semibold tracking-tight">Quick Links & Custom Info</CardTitle>
+              <CardTitle className="text-sm font-semibold tracking-tight">
+                Quick Links & Custom Info
+              </CardTitle>
               <Button
                 variant="ghost"
                 size="icon"
                 className="h-8 w-8 hover:bg-muted"
+                aria-label="Add project reference"
                 onClick={() => {
                   setEditingLinkIndex(null);
                   setLinkLabel("");
@@ -718,11 +780,12 @@ export function ProjectDetailPage() {
             <CardContent className="p-5 flex-1 overflow-y-auto min-h-[160px]">
               {!project.links || project.links.length === 0 ? (
                 <p className="text-muted-foreground italic text-xs">
-                  No quick links or custom info added yet. Click the plus icon to save documentation, passwords, or instructions.
+                  No quick links or custom info added yet. Click the plus icon
+                  to add documentation links or non-sensitive reference info.
                 </p>
               ) : (
                 <div className="space-y-2.5">
-                  {project.links.map((link: any, idx) => (
+                  {project.links.map((link, idx) => (
                     <div
                       key={idx}
                       className="group flex items-center justify-between p-2.5 rounded-lg border border-border/20 bg-muted/10 hover:bg-muted/30 transition-all animate-in fade-in-50 duration-200"
@@ -772,8 +835,14 @@ export function ProjectDetailPage() {
                           size="icon"
                           className="h-7 w-7 hover:bg-destructive/10 rounded-md"
                           onClick={() => {
-                            if (confirm(`Are you sure you want to delete "${link.label}"?`)) {
-                              const updated = (project.links ?? []).filter((_, i) => i !== idx);
+                            if (
+                              confirm(
+                                `Are you sure you want to delete "${link.label}"?`,
+                              )
+                            ) {
+                              const updated = (project.links ?? []).filter(
+                                (_, i) => i !== idx,
+                              );
                               updateProjectMutation.mutate({ links: updated });
                             }
                           }}
@@ -819,201 +888,212 @@ export function ProjectDetailPage() {
             });
           }}
         >
-        <TabsList className="flex flex-nowrap overflow-x-auto no-scrollbar whitespace-nowrap h-auto gap-1 bg-muted/60 p-1.5 border border-border/40 rounded-xl shadow-sm backdrop-blur-sm max-w-full justify-start">
-          <TabsTrigger
-            value="environments"
-            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
+          <TabsList
+            aria-label="Project pages"
+            className="flex flex-wrap overflow-visible whitespace-normal h-auto gap-1 bg-muted/60 p-1.5 border border-border/40 rounded-xl shadow-sm backdrop-blur-sm max-w-full justify-start"
           >
-            <Globe className="h-3.5 w-3.5 opacity-70" />
-            Environments
-            {environments.length > 0 && (
-              <span className="ml-1 text-xs opacity-60 bg-muted px-1.5 py-0.5 rounded-full font-semibold border border-border/30">
-                {environments.length}
-              </span>
+            <TabsTrigger
+              value="environments"
+              className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
+            >
+              <Globe className="h-3.5 w-3.5 opacity-70" />
+              Environments
+              {environments.length > 0 && (
+                <span className="ml-1 text-xs opacity-60 bg-muted px-1.5 py-0.5 rounded-full font-semibold border border-border/30">
+                  {environments.length}
+                </span>
+              )}
+            </TabsTrigger>
+            <TabsTrigger
+              value="deploy"
+              className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
+            >
+              <GitBranch className="h-3.5 w-3.5 opacity-70" />
+              Git & Deploy
+            </TabsTrigger>
+            <TabsTrigger
+              value="backups"
+              className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
+            >
+              <History className="h-3.5 w-3.5 opacity-70" />
+              Backups
+            </TabsTrigger>
+            <TabsTrigger
+              value="plugins"
+              className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
+            >
+              <Puzzle className="h-3.5 w-3.5 opacity-70" />
+              Plugins
+            </TabsTrigger>
+            <TabsTrigger
+              value="sync"
+              className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
+            >
+              <RefreshCw className="h-3.5 w-3.5 opacity-70" />
+              Sync
+            </TabsTrigger>
+            <TabsTrigger
+              value="restore"
+              className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
+            >
+              <Undo2 className="h-3.5 w-3.5 opacity-70" />
+              Restore
+            </TabsTrigger>
+            <TabsTrigger
+              value="tools"
+              className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
+            >
+              <Wrench className="h-3.5 w-3.5 opacity-70" />
+              Tools
+            </TabsTrigger>
+            <TabsTrigger
+              value="drift"
+              className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
+            >
+              <GitCompare className="h-3.5 w-3.5 opacity-70" />
+              Drift
+            </TabsTrigger>
+            <TabsTrigger
+              value="themes"
+              className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
+            >
+              <Palette className="h-3.5 w-3.5 opacity-70" />
+              Themes
+            </TabsTrigger>
+            <TabsTrigger
+              value="files-config"
+              className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
+            >
+              <FileCog className="h-3.5 w-3.5 opacity-70" />
+              Files & Config
+            </TabsTrigger>
+            <TabsTrigger
+              value="wp-core"
+              className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
+            >
+              <Cpu className="h-3.5 w-3.5 opacity-70" />
+              WP Core
+            </TabsTrigger>
+            <TabsTrigger
+              value="security"
+              className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
+            >
+              <Shield className="h-3.5 w-3.5 opacity-70" />
+              Security
+            </TabsTrigger>
+            <TabsTrigger
+              value="activity"
+              className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
+            >
+              <ListChecks className="h-3.5 w-3.5 opacity-70" />
+              Activity
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="environments">
+            {activatedTabs.has("environments") && (
+              <EnvironmentsTab projectId={projectId} />
             )}
-          </TabsTrigger>
-          <TabsTrigger
-            value="deploy"
-            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
-          >
-            <GitBranch className="h-3.5 w-3.5 opacity-70" />
-            Git & Deploy
-          </TabsTrigger>
-          <TabsTrigger
-            value="backups"
-            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
-          >
-            <History className="h-3.5 w-3.5 opacity-70" />
-            Backups
-          </TabsTrigger>
-          <TabsTrigger
-            value="plugins"
-            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
-          >
-            <Puzzle className="h-3.5 w-3.5 opacity-70" />
-            Plugins
-          </TabsTrigger>
-          <TabsTrigger
-            value="sync"
-            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
-          >
-            <RefreshCw className="h-3.5 w-3.5 opacity-70" />
-            Sync
-          </TabsTrigger>
-          <TabsTrigger
-            value="restore"
-            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
-          >
-            <Undo2 className="h-3.5 w-3.5 opacity-70" />
-            Restore
-          </TabsTrigger>
-          <TabsTrigger
-            value="tools"
-            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
-          >
-            <Wrench className="h-3.5 w-3.5 opacity-70" />
-            Tools
-          </TabsTrigger>
-          <TabsTrigger
-            value="drift"
-            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
-          >
-            <GitCompare className="h-3.5 w-3.5 opacity-70" />
-            Drift
-          </TabsTrigger>
-          <TabsTrigger
-            value="themes"
-            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
-          >
-            <Palette className="h-3.5 w-3.5 opacity-70" />
-            Themes
-          </TabsTrigger>
-          <TabsTrigger
-            value="files-config"
-            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
-          >
-            <FileCog className="h-3.5 w-3.5 opacity-70" />
-            Files & Config
-          </TabsTrigger>
-          <TabsTrigger
-            value="wp-core"
-            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
-          >
-            <Cpu className="h-3.5 w-3.5 opacity-70" />
-            WP Core
-          </TabsTrigger>
-          <TabsTrigger
-            value="security"
-            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
-          >
-            <Shield className="h-3.5 w-3.5 opacity-70" />
-            Security
-          </TabsTrigger>
-          <TabsTrigger
-            value="activity"
-            className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
-          >
-            <ListChecks className="h-3.5 w-3.5 opacity-70" />
-            Activity
-          </TabsTrigger>
-        </TabsList>
+          </TabsContent>
 
+          <TabsContent value="deploy">
+            {activatedTabs.has("deploy") && (
+              <GitDeployTab
+                projectId={projectId}
+                environments={environments}
+                defaultRepo={project?.github_repo}
+              />
+            )}
+          </TabsContent>
 
-        <TabsContent value="environments">
-          {activatedTabs.has("environments") && (
-            <EnvironmentsTab projectId={projectId} />
-          )}
-        </TabsContent>
+          <TabsContent value="backups">
+            {activatedTabs.has("backups") && (
+              <BackupsTab projectId={projectId} environments={environments} />
+            )}
+          </TabsContent>
 
-        <TabsContent value="deploy">
-          {activatedTabs.has("deploy") && (
-            <GitDeployTab
-              projectId={projectId}
-              environments={environments}
-              defaultRepo={project?.github_repo}
-            />
-          )}
-        </TabsContent>
+          <TabsContent value="plugins">
+            {activatedTabs.has("plugins") && (
+              <PluginsTab projectId={projectId} environments={environments} />
+            )}
+          </TabsContent>
 
-        <TabsContent value="backups">
-          {activatedTabs.has("backups") && (
-            <BackupsTab projectId={projectId} environments={environments} />
-          )}
-        </TabsContent>
+          <TabsContent value="sync">
+            {activatedTabs.has("sync") && (
+              <SyncTab projectId={projectId} environments={environments} />
+            )}
+          </TabsContent>
 
-        <TabsContent value="plugins">
-          {activatedTabs.has("plugins") && (
-            <PluginsTab projectId={projectId} environments={environments} />
-          )}
-        </TabsContent>
+          <TabsContent value="restore">
+            {activatedTabs.has("restore") && (
+              <RestoreTab projectId={projectId} environments={environments} />
+            )}
+          </TabsContent>
 
-        <TabsContent value="sync">
-          {activatedTabs.has("sync") && (
-            <SyncTab projectId={projectId} environments={environments} />
-          )}
-        </TabsContent>
+          <TabsContent value="tools">
+            {activatedTabs.has("tools") && (
+              <ToolsTab environments={environments} />
+            )}
+          </TabsContent>
 
-        <TabsContent value="restore">
-          {activatedTabs.has("restore") && (
-            <RestoreTab projectId={projectId} environments={environments} />
-          )}
-        </TabsContent>
+          <TabsContent value="drift">
+            {activatedTabs.has("drift") && (
+              <DriftTab projectId={projectId} environments={environments} />
+            )}
+          </TabsContent>
 
-        <TabsContent value="tools">
-          {activatedTabs.has("tools") && (
-            <ToolsTab environments={environments} />
-          )}
-        </TabsContent>
+          <TabsContent value="themes">
+            {activatedTabs.has("themes") && (
+              <ThemesTab projectId={projectId} environments={environments} />
+            )}
+          </TabsContent>
 
-        <TabsContent value="drift">
-          {activatedTabs.has("drift") && (
-            <DriftTab projectId={projectId} environments={environments} />
-          )}
-        </TabsContent>
+          <TabsContent value="wp-core">
+            {activatedTabs.has("wp-core") && (
+              <WpCoreTab environments={environments} />
+            )}
+          </TabsContent>
 
-        <TabsContent value="themes">
-          {activatedTabs.has("themes") && (
-            <ThemesTab projectId={projectId} environments={environments} />
-          )}
-        </TabsContent>
+          <TabsContent value="files-config">
+            {activatedTabs.has("files-config") && (
+              <RemoteOpsTab
+                projectId={projectId}
+                projectName={project.name}
+                environments={environments}
+              />
+            )}
+          </TabsContent>
 
-        <TabsContent value="wp-core">
-          {activatedTabs.has("wp-core") && (
-            <WpCoreTab environments={environments} />
-          )}
-        </TabsContent>
+          <TabsContent value="security">
+            {activatedTabs.has("security") && (
+              <SecurityTab projectId={projectId} environments={environments} />
+            )}
+          </TabsContent>
 
-        <TabsContent value="files-config">
-          {activatedTabs.has("files-config") && (
-            <RemoteOpsTab
-              projectId={projectId}
-              projectName={project.name}
-              environments={environments}
-            />
-          )}
-        </TabsContent>
-
-        <TabsContent value="security">
-          {activatedTabs.has("security") && (
-            <SecurityTab projectId={projectId} environments={environments} />
-          )}
-        </TabsContent>
-
-        <TabsContent value="activity">
-          <div className="border rounded-xl p-5 bg-card shadow-sm">
-            <h3 className="text-sm font-semibold mb-4 text-muted-foreground uppercase tracking-wide">Project Activity Log</h3>
-            <ResourceActivityFeed resourceType="project" resourceId={projectId} />
-          </div>
-        </TabsContent>
-      </Tabs>
-    </div>
+          <TabsContent value="activity">
+            <div className="border rounded-xl p-5 bg-card shadow-sm">
+              <h3 className="text-sm font-semibold mb-4 text-muted-foreground uppercase tracking-wide">
+                Project Activity Log
+              </h3>
+              <ResourceActivityFeed
+                resourceType="project"
+                resourceId={projectId}
+              />
+            </div>
+          </TabsContent>
+        </Tabs>
+      </div>
 
       <Dialog open={linkDialogOpen} onOpenChange={setLinkDialogOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>{editingLinkIndex !== null ? "Edit Item" : "Add Reference Info"}</DialogTitle>
+            <DialogTitle>
+              {editingLinkIndex !== null ? "Edit Item" : "Add Reference Info"}
+            </DialogTitle>
             <DialogDescription>
-              Save web URLs, custom metadata, notes, or credentials to keep everything in one place.
+              Save web URLs and non-sensitive reference info. Common credential
+              formats are rejected; save secrets in the relevant credential
+              settings.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
@@ -1028,22 +1108,30 @@ export function ProjectDetailPage() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="link">Web Link / URL</SelectItem>
-                  <SelectItem value="text">Custom Info / Text Field</SelectItem>
+                  <SelectItem value="text">Non-sensitive Reference</SelectItem>
                 </SelectContent>
               </Select>
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="link-label" className="text-xs font-semibold">Label *</Label>
+              <Label htmlFor="link-label" className="text-xs font-semibold">
+                Label *
+              </Label>
               <Input
                 id="link-label"
-                placeholder={linkType === "link" ? "e.g. Staging phpMyAdmin, Client Portal" : "e.g. SFTP Port, Database Name"}
+                placeholder={
+                  linkType === "link"
+                    ? "e.g. Staging phpMyAdmin, Client Portal"
+                    : "e.g. Support hours, deployment window"
+                }
                 value={linkLabel}
                 onChange={(e) => setLinkLabel(e.target.value)}
               />
             </div>
             {linkType === "link" ? (
               <div className="space-y-1.5">
-                <Label htmlFor="link-url" className="text-xs font-semibold">URL *</Label>
+                <Label htmlFor="link-url" className="text-xs font-semibold">
+                  URL *
+                </Label>
                 <Input
                   id="link-url"
                   placeholder="e.g. https://domain.com/path"
@@ -1053,10 +1141,12 @@ export function ProjectDetailPage() {
               </div>
             ) : (
               <div className="space-y-1.5">
-                <Label htmlFor="link-value" className="text-xs font-semibold">Value / Text Content *</Label>
+                <Label htmlFor="link-value" className="text-xs font-semibold">
+                  Value / Text Content *
+                </Label>
                 <Textarea
                   id="link-value"
-                  placeholder="Enter custom metadata value, credentials, or instructions..."
+                  placeholder="Enter non-sensitive reference information..."
                   value={linkValue}
                   onChange={(e) => setLinkValue(e.target.value)}
                   className="min-h-[100px] resize-y"
@@ -1081,23 +1171,37 @@ export function ProjectDetailPage() {
                   return;
                 }
                 if (linkType === "link" && !linkUrl.trim()) {
-                  toast({ title: "URL is required for web links", variant: "destructive" });
+                  toast({
+                    title: "URL is required for web links",
+                    variant: "destructive",
+                  });
                   return;
                 }
                 if (linkType === "text" && !linkValue.trim()) {
-                  toast({ title: "Value is required for custom info", variant: "destructive" });
+                  toast({
+                    title: "Value is required for custom info",
+                    variant: "destructive",
+                  });
                   return;
                 }
 
-                let finalItem: any = {};
+                let finalItem: ProjectLink;
                 if (linkType === "link") {
                   let formattedUrl = linkUrl.trim();
                   if (!/^https?:\/\//i.test(formattedUrl)) {
                     formattedUrl = `https://${formattedUrl}`;
                   }
-                  finalItem = { label: linkLabel.trim(), url: formattedUrl, isText: false };
+                  finalItem = {
+                    label: linkLabel.trim(),
+                    url: formattedUrl,
+                    isText: false,
+                  };
                 } else {
-                  finalItem = { label: linkLabel.trim(), value: linkValue.trim(), isText: true };
+                  finalItem = {
+                    label: linkLabel.trim(),
+                    value: linkValue.trim(),
+                    isText: true,
+                  };
                 }
 
                 const updated = [...(project.links ?? [])];
@@ -1109,7 +1213,7 @@ export function ProjectDetailPage() {
 
                 updateProjectMutation.mutate(
                   { links: updated },
-                  { onSuccess: () => setLinkDialogOpen(false) }
+                  { onSuccess: () => setLinkDialogOpen(false) },
                 );
               }}
               disabled={updateProjectMutation.isPending}
@@ -1122,7 +1226,6 @@ export function ProjectDetailPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-
 
       <ProjectFormDialog
         open={editOpen}
@@ -1160,5 +1263,3 @@ export function ProjectDetailPage() {
     </div>
   );
 }
-
-

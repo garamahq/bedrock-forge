@@ -69,7 +69,13 @@ export function PageSpeedIntegration() {
     setTestResult({
       success: res.success,
       message: res.message,
-      score: (res.data as any)?.score,
+      score:
+        res.data !== null &&
+        typeof res.data === "object" &&
+        "score" in res.data &&
+        (typeof res.data.score === "number" || res.data.score === null)
+          ? res.data.score
+          : undefined,
     });
   }
 

@@ -19,9 +19,11 @@ import { AdvancedTab } from "./settings/AdvancedTab";
 import { BillingTab } from "./settings/BillingTab";
 
 export function SettingsPage() {
-  const role = useAuthStore((s) => s.user?.roles?.[0]);
+  const isAdmin = useAuthStore(
+    (s) => s.user?.roles?.includes("admin") ?? false,
+  );
 
-  if (role !== "admin") {
+  if (!isAdmin) {
     return (
       <div className="space-y-6 w-full">
         <h1 className="text-2xl font-bold">Settings</h1>

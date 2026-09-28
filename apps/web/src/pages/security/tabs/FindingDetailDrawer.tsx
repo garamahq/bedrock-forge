@@ -81,7 +81,7 @@ export function FindingDetailDrawer({
     enabled: findingId !== null,
   });
 
-  const transitionMutation = useMutation({
+  const transitionMutation = useMutation<SecurityFindingItem, Error, { status: FindingStatus; note?: string }>({
     mutationFn: ({
       status,
       note,
@@ -93,7 +93,7 @@ export function FindingDetailDrawer({
         status,
         note: note?.trim() || undefined,
       }),
-    onSuccess: (updated: any) => {
+    onSuccess: (updated) => {
       toast({
         title: "Finding updated",
         description: `Status changed to ${updated?.status || "updated"}`,
@@ -104,7 +104,7 @@ export function FindingDetailDrawer({
       void queryClient.invalidateQueries({ queryKey: ["security", "findings"] });
       void queryClient.invalidateQueries({ queryKey: ["security", "overview"] });
     },
-    onError: (err: any) => {
+    onError: (err) => {
       toast({
         title: "Failed to update status",
         description: err.message || "An error occurred",

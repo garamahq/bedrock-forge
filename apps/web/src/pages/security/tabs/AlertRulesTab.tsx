@@ -34,6 +34,7 @@ import {
 import { api } from "@/lib/api-client";
 import { toast } from "@/hooks/use-toast";
 import type { ServerSummary, Severity } from "../types";
+import { SEVERITY_LEVELS } from "../constants";
 
 export interface SecurityAlertRule {
   id: number;
@@ -53,7 +54,7 @@ export function AlertRulesTab({ servers }: { servers: ServerSummary[] }) {
   const queryClient = useQueryClient();
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [ruleName, setRuleName] = useState("");
-  const [minSeverity, setMinSeverity] = useState<string>("high");
+  const [minSeverity, setMinSeverity] = useState<Severity>("high");
   const [cooldownMinutes, setCooldownMinutes] = useState<number>(30);
   const [createIncident, setCreateIncident] = useState<boolean>(false);
 
@@ -74,7 +75,7 @@ export function AlertRulesTab({ servers }: { servers: ServerSummary[] }) {
       setRuleName("");
       void queryClient.invalidateQueries({ queryKey: ["security", "alert-rules"] });
     },
-    onError: (err: any) => {
+    onError: (err) => {
       toast({
         title: "Failed to create rule",
         description: err.message,
@@ -228,7 +229,13 @@ export function AlertRulesTab({ servers }: { servers: ServerSummary[] }) {
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
                 <Label className="text-xs">Minimum Severity</Label>
-                <Select value={minSeverity} onValueChange={setMinSeverity}>
+                <Select
+                  value={minSeverity}
+                  onValueChange={(value) => {
+                    const severity = SEVERITY_LEVELS.find((item) => item === value);
+                    if (severity) setMinSeverity(severity);
+                  }}
+                >
                   <SelectTrigger className="h-8 text-xs">
                     <SelectValue />
                   </SelectTrigger>
@@ -281,7 +288,7 @@ export function AlertRulesTab({ servers }: { servers: ServerSummary[] }) {
               onClick={() =>
                 createMutation.mutate({
                   name: ruleName.trim() || "Untitled Alert Rule",
-                  min_severity: minSeverity as any,
+                  min_severity: minSeverity,
                   cooldown_minutes: cooldownMinutes,
                   create_incident: createIncident,
                   enabled: true,

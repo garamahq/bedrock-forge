@@ -27,7 +27,7 @@ export function useScanAllPlugins() {
         description: `${data.count} environment scan${data.count === 1 ? "" : "s"} queued.`,
       });
     },
-    onError: (err: any) =>
+    onError: (err) =>
       toast({
         title: "Bulk scan failed",
         description: err?.message,
@@ -50,7 +50,7 @@ export function useCheckPluginVersions() {
           : "No GitHub release tag found.",
       });
     },
-    onError: (err: any) =>
+    onError: (err) =>
       toast({
         title: "Version check failed",
         description: err?.message,
@@ -71,7 +71,7 @@ export function useUpdateInstalledPlugins() {
         description: `${data.count} environment update${data.count === 1 ? "" : "s"} queued.`,
       });
     },
-    onError: (err: any) =>
+    onError: (err) =>
       toast({
         title: "Update failed",
         description: err?.message,
@@ -88,7 +88,7 @@ export function useCreatePlugin() {
       queryClient.invalidateQueries({ queryKey: ["custom-plugins"] });
       toast({ title: "Plugin registered" });
     },
-    onError: (err: any) =>
+    onError: (err) =>
       toast({
         title: "Failed to register plugin",
         description: err?.message,
@@ -106,7 +106,7 @@ export function useUpdatePlugin() {
       queryClient.invalidateQueries({ queryKey: ["custom-plugins"] });
       toast({ title: "Plugin updated" });
     },
-    onError: (err: any) =>
+    onError: (err) =>
       toast({
         title: "Update failed",
         description: err?.message,
@@ -123,7 +123,7 @@ export function useDeletePlugin() {
       queryClient.invalidateQueries({ queryKey: ["custom-plugins"] });
       toast({ title: "Plugin removed from catalog" });
     },
-    onError: (err: any) =>
+    onError: (err) =>
       toast({
         title: "Delete failed",
         description: err?.message,
@@ -142,7 +142,7 @@ export function useInstallCustomPlugin() {
       queryClient.invalidateQueries({ queryKey: ["custom-plugin-inventory", pluginId] });
       toast({ title: "Installation queued" });
     },
-    onError: (err: any) =>
+    onError: (err) =>
       toast({
         title: "Installation failed",
         description: err?.message,
@@ -161,7 +161,7 @@ export function useUninstallCustomPlugin() {
       queryClient.invalidateQueries({ queryKey: ["custom-plugin-inventory", pluginId] });
       toast({ title: "Uninstallation queued" });
     },
-    onError: (err: any) =>
+    onError: (err) =>
       toast({
         title: "Uninstallation failed",
         description: err?.message,
@@ -187,7 +187,7 @@ export function useBulkInstallCustomPlugins() {
         description: `Successfully queued installation on ${data.length} environment${data.length === 1 ? "" : "s"}.`,
       });
     },
-    onError: (err: any) =>
+    onError: (err) =>
       toast({
         title: "Bulk installation failed",
         description: err?.message,
@@ -213,7 +213,7 @@ export function useBulkUninstallCustomPlugins() {
         description: `Successfully queued uninstallation on ${data.length} environment${data.length === 1 ? "" : "s"}.`,
       });
     },
-    onError: (err: any) =>
+    onError: (err) =>
       toast({
         title: "Bulk uninstallation failed",
         description: err?.message,

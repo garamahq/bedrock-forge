@@ -92,7 +92,7 @@ export function EnvironmentQuickBar({
         description: `Object and rewrite cache cleared on ${currentEnv?.type || "environment"}.`,
       });
     },
-    onError: (err: any) => {
+    onError: (err) => {
       toast({
         title: "Cache Flush Failed",
         description: err?.message || "Failed to flush WordPress cache",
@@ -118,7 +118,7 @@ export function EnvironmentQuickBar({
         queryKey: ["wp-maintenance-status", currentEnv?.id],
       });
     },
-    onError: (err: any) => {
+    onError: (err) => {
       toast({
         title: "Maintenance Toggle Failed",
         description: err?.message || "Failed to update maintenance mode",

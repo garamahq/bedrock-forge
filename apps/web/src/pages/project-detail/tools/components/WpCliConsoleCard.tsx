@@ -92,7 +92,7 @@ export function WpCliConsoleCard({
         });
       }
     },
-    onError: (err: any) => {
+    onError: (err) => {
       toast({
         title: "Execution Error",
         description: err?.message || "Failed to execute WP-CLI command",

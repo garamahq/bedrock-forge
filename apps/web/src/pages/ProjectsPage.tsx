@@ -19,15 +19,24 @@ import {
 } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "@/lib/api-client";
+import { useAuthStore } from "@/store/auth.store";
 import { toast } from "@/hooks/use-toast";
-import { ArchiveDialog, RestoreDialog } from "@/components/ProjectArchiveDialogs";
+import {
+  ArchiveDialog,
+  RestoreDialog,
+} from "@/components/ProjectArchiveDialogs";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { AlertDialog } from "@/components/ui/alert-dialog";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
-import { PageHeader, SearchBar, Pagination } from "@/components/crud";
+import {
+  ErrorState,
+  PageHeader,
+  SearchBar,
+  Pagination,
+} from "@/components/crud";
 import {
   Dialog,
   DialogContent,
@@ -317,6 +326,7 @@ function ProjectCard({
   onBackupNow,
   selected,
   onSelect,
+  isAdmin,
 }: {
   project: Project;
   onEdit: () => void;
@@ -327,6 +337,7 @@ function ProjectCard({
   onBackupNow: (envId: number) => void;
   selected: boolean;
   onSelect: (val: boolean) => void;
+  isAdmin: boolean;
 }) {
   const servers = [
     ...new Map(
@@ -379,16 +390,18 @@ function ProjectCard({
       className={`group relative cursor-pointer hover:border-primary/50 transition-all duration-200 ${selected ? "border-primary bg-primary/5 ring-1 ring-primary" : ""}`}
       onClick={onClick}
     >
-      <div
-        className="absolute top-3 left-3 z-10"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <Checkbox
-          checked={selected}
-          onCheckedChange={(v) => onSelect(!!v)}
-          className={`transition-opacity ${selected ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
-        />
-      </div>
+      {isAdmin && (
+        <div
+          className="absolute top-3 left-3 z-10"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <Checkbox
+            checked={selected}
+            onCheckedChange={(v) => onSelect(!!v)}
+            className={`transition-opacity ${selected ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
+          />
+        </div>
+      )}
 
       <CardHeader className="pb-3 pl-10">
         <div className="flex items-start justify-between gap-2">
@@ -453,16 +466,18 @@ function ProjectCard({
                   </DropdownMenuItem>
                 )}
 
-                <DropdownMenuItem
-                  className="text-destructive focus:text-destructive"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDelete();
-                  }}
-                >
-                  <Trash2 className="h-4 w-4 mr-2" />
-                  Delete
-                </DropdownMenuItem>
+                {isAdmin && (
+                  <DropdownMenuItem
+                    className="text-destructive focus:text-destructive"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDelete();
+                    }}
+                  >
+                    <Trash2 className="h-4 w-4 mr-2" />
+                    Delete
+                  </DropdownMenuItem>
+                )}
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
@@ -738,16 +753,21 @@ function ProjectCardSkeleton() {
 export function ProjectsPage() {
   const qc = useQueryClient();
   const navigate = useNavigate();
+  const isAdmin = useAuthStore(
+    (s) => s.user?.roles?.includes("admin") ?? false,
+  );
   const [searchParams, setSearchParams] = useSearchParams();
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   const [searchInput, setSearchInput] = useState("");
-  const [clientFilter, setClientFilter] = useState(
-    searchParams.get("client_id") ?? "",
-  );
-  const [serverFilter, setServerFilter] = useState(
-    searchParams.get("server_id") ?? "",
-  );
+  const [clientFilter, setClientFilter] = useState(() => {
+    const value = searchParams.get("client_id") ?? "";
+    return value === "all-clients" ? "" : value;
+  });
+  const [serverFilter, setServerFilter] = useState(() => {
+    const value = searchParams.get("server_id") ?? "";
+    return value === "all-servers" ? "" : value;
+  });
   const [statusFilter, setStatusFilter] = useState(
     searchParams.get("status") ?? "exclude:archived",
   );
@@ -763,14 +783,22 @@ export function ProjectsPage() {
   // ── Selection State ──────────────────────────────────────────────────────
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
 
-  const { data, isLoading } = useQuery({
-    queryKey: ["projects", page, search, clientFilter, serverFilter, statusFilter],
+  const { data, isLoading, isError, refetch } = useQuery({
+    queryKey: [
+      "projects",
+      page,
+      search,
+      clientFilter,
+      serverFilter,
+      statusFilter,
+    ],
     queryFn: () => {
       const qs = new URLSearchParams({ page: String(page), limit: "10" });
       if (search) qs.set("search", search);
       if (clientFilter) qs.set("client_id", clientFilter);
       if (serverFilter) qs.set("server_id", serverFilter);
-      if (statusFilter && statusFilter !== "all") qs.set("status", statusFilter);
+      if (statusFilter && statusFilter !== "all")
+        qs.set("status", statusFilter);
       return api.get<{ items: Project[]; total: number }>(`/projects?${qs}`);
     },
   });
@@ -804,14 +832,16 @@ export function ProjectsPage() {
   });
 
   const archiveMutation = useMutation({
-    mutationFn: (options: { createBackup: boolean; deleteFromCyberpanel: boolean }) =>
-      api.post(`/projects/${archiveTarget?.id}/archive`, options),
+    mutationFn: (options: {
+      createBackup: boolean;
+      deleteFromCyberpanel: boolean;
+    }) => api.post(`/projects/${archiveTarget?.id}/archive`, options),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["projects"] });
       setArchiveTarget(null);
       toast({ title: "Project archival queued successfully" });
     },
-    onError: (err: any) =>
+    onError: (err) =>
       toast({
         title: "Archival failed",
         description: err.message || "An error occurred",
@@ -829,7 +859,7 @@ export function ProjectsPage() {
       setRestoreTarget(null);
       toast({ title: "Project restoration queued successfully" });
     },
-    onError: (err: any) =>
+    onError: (err) =>
       toast({
         title: "Restoration failed",
         description: err.message || "An error occurred",
@@ -892,6 +922,8 @@ export function ProjectsPage() {
       clearSelection();
       toast({ title: "Projects deleted" });
     },
+    onError: () =>
+      toast({ title: "Bulk delete failed", variant: "destructive" }),
   });
 
   return (
@@ -941,11 +973,12 @@ export function ProjectsPage() {
       >
         <div className="flex items-center gap-2">
           <Select
-            value={clientFilter}
+            value={clientFilter || "all-clients"}
             onValueChange={(v) => {
-              setClientFilter(v);
+              const nextFilter = v === "all-clients" ? "" : v;
+              setClientFilter(nextFilter);
               setSearchParams((prev) => {
-                if (v) prev.set("client_id", v);
+                if (nextFilter) prev.set("client_id", nextFilter);
                 else prev.delete("client_id");
                 return prev;
               });
@@ -966,11 +999,12 @@ export function ProjectsPage() {
           </Select>
 
           <Select
-            value={serverFilter}
+            value={serverFilter || "all-servers"}
             onValueChange={(v) => {
-              setServerFilter(v);
+              const nextFilter = v === "all-servers" ? "" : v;
+              setServerFilter(nextFilter);
               setSearchParams((prev) => {
-                if (v) prev.set("server_id", v);
+                if (nextFilter) prev.set("server_id", nextFilter);
                 else prev.delete("server_id");
                 return prev;
               });
@@ -1014,19 +1048,23 @@ export function ProjectsPage() {
       </SearchBar>
 
       <div className="flex items-center justify-between px-1">
-        <div className="flex items-center gap-2">
-          <Checkbox
-            id="select-all"
-            checked={isAllSelected}
-            onCheckedChange={toggleAll}
-          />
-          <Label
-            htmlFor="select-all"
-            className="text-sm font-normal cursor-pointer"
-          >
-            Select all on this page
-          </Label>
-        </div>
+        {isAdmin ? (
+          <div className="flex items-center gap-2">
+            <Checkbox
+              id="select-all"
+              checked={isAllSelected}
+              onCheckedChange={toggleAll}
+            />
+            <Label
+              htmlFor="select-all"
+              className="text-sm font-normal cursor-pointer"
+            >
+              Select all on this page
+            </Label>
+          </div>
+        ) : (
+          <span />
+        )}
         <p className="text-xs text-muted-foreground">
           Showing {projects.length} of {data?.total ?? 0} projects
         </p>
@@ -1038,6 +1076,12 @@ export function ProjectsPage() {
             <ProjectCardSkeleton key={i} />
           ))}
         </div>
+      ) : isError ? (
+        <ErrorState
+          title="Could not load projects"
+          description="Your project list could not be retrieved. Try again."
+          onRetry={() => void refetch()}
+        />
       ) : projects.length === 0 ? (
         <EmptyState
           icon={FolderPlus}
@@ -1064,6 +1108,7 @@ export function ProjectsPage() {
               onRestore={() => setRestoreTarget(project)}
               onClick={() => navigate(`/projects/${project.id}`)}
               onBackupNow={(envId) => backupNowMutation.mutate(envId)}
+              isAdmin={isAdmin}
             />
           ))}
         </div>
@@ -1078,17 +1123,25 @@ export function ProjectsPage() {
       )}
 
       <ProjectFormDialog
-        open={createOpen || !!editTarget}
-        onOpenChange={(o) => {
-          setCreateOpen(o);
-          if (!o) setEditTarget(null);
-        }}
-        initial={editTarget ?? undefined}
+        open={createOpen}
+        onOpenChange={setCreateOpen}
         clients={clients}
         hostingPackages={hostingPkgs}
         supportPackages={supportPkgs}
         onSuccess={invalidate}
       />
+      {editTarget && (
+        <ProjectFormDialog
+          key={editTarget.id}
+          open
+          onOpenChange={(o) => !o && setEditTarget(null)}
+          initial={editTarget}
+          clients={clients}
+          hostingPackages={hostingPkgs}
+          supportPackages={supportPkgs}
+          onSuccess={invalidate}
+        />
+      )}
 
       <ImportFromServerDialog
         open={importOpen}
@@ -1117,26 +1170,28 @@ export function ProjectsPage() {
         requireTextConfirm={deleteTarget?.name}
       />
 
-      <BulkActionsBar
-        selectedCount={selectedIds.size}
-        onClear={clearSelection}
-        actions={[
-          {
-            label: "Delete",
-            icon: Trash2,
-            variant: "destructive",
-            onClick: () => {
-              if (
-                confirm(
-                  `Are you sure you want to delete ${selectedIds.size} projects?`,
-                )
-              ) {
-                bulkDeleteMutation.mutate(Array.from(selectedIds));
-              }
+      {isAdmin && (
+        <BulkActionsBar
+          selectedCount={selectedIds.size}
+          onClear={clearSelection}
+          actions={[
+            {
+              label: "Delete",
+              icon: Trash2,
+              variant: "destructive",
+              onClick: () => {
+                if (
+                  confirm(
+                    `Are you sure you want to delete ${selectedIds.size} projects?`,
+                  )
+                ) {
+                  bulkDeleteMutation.mutate(Array.from(selectedIds));
+                }
+              },
             },
-          },
-        ]}
-      />
+          ]}
+        />
+      )}
       <ArchiveDialog
         open={!!archiveTarget}
         onOpenChange={(open) => !open && setArchiveTarget(null)}

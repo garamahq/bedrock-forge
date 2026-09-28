@@ -55,10 +55,11 @@ export function CloudflareDns() {
     try {
       const result = await testCloudflare.mutateAsync();
       setCloudflareTestResult(result);
-    } catch (err: any) {
+    } catch (err) {
       setCloudflareTestResult({
         success: false,
-        message: err?.message ?? "Connection test failed.",
+        message:
+          err instanceof Error ? err.message : "Connection test failed.",
       });
     }
   }

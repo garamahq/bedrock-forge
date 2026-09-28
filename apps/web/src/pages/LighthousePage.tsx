@@ -21,7 +21,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { PageHeader, Pagination } from "@/components/crud";
+import { ErrorState, PageHeader, Pagination } from "@/components/crud";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -86,13 +86,21 @@ export function LighthousePage() {
   const [urlOverride, setUrlOverride] = useState("");
   const [page, setPage] = useState(1);
 
-  const { data: environments = [] } = useQuery<Environment[]>({
+  const {
+    data: environmentsData,
+    isError: environmentsError,
+    refetch: refetchEnvironments,
+  } = useQuery<Environment[]>({
     queryKey: ["environments"],
     queryFn: () => api.get("/environments"),
   });
+  const environments = environmentsData ?? [];
 
   const projects = useMemo(() => {
-    const map = new Map<number, { id: number; name: string; envCount: number }>();
+    const map = new Map<
+      number,
+      { id: number; name: string; envCount: number }
+    >();
     for (const env of environments) {
       if (env.project) {
         const existing = map.get(env.project.id);
@@ -122,16 +130,23 @@ export function LighthousePage() {
     [environmentId, environments],
   );
 
-  const { data: latest = [], isFetching } = useQuery<LighthouseAudit[]>({
+  const {
+    data: latestData,
+    isFetching,
+    isError: latestError,
+    refetch: refetchLatest,
+  } = useQuery<LighthouseAudit[]>({
     queryKey: ["lighthouse", "latest"],
     queryFn: () => api.get("/lighthouse"),
     refetchInterval: 30_000,
   });
 
-  const { data: historyData } = useQuery<{
-    items: LighthouseAudit[];
-    total: number;
-  }>({
+  const {
+    data: historyData,
+    isLoading: historyLoading,
+    isError: historyError,
+    refetch: refetchHistory,
+  } = useQuery<{ items: LighthouseAudit[]; total: number }>({
     queryKey: ["lighthouse", "history", environmentId, page],
     queryFn: () =>
       api.get(
@@ -140,6 +155,7 @@ export function LighthousePage() {
     refetchInterval: 30_000,
   });
 
+  const latest = latestData ?? [];
   const history = historyData?.items ?? [];
   const totalPages = historyData ? Math.ceil(historyData.total / 10) : 1;
 
@@ -197,6 +213,14 @@ export function LighthousePage() {
           Refresh
         </Button>
       </PageHeader>
+
+      {environmentsError && (
+        <ErrorState
+          title="Environments could not be loaded"
+          description="Choose an environment after the environment list is available."
+          onRetry={() => void refetchEnvironments()}
+        />
+      )}
 
       <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-[200px_220px_160px_1fr_auto] items-end border rounded-lg p-4 bg-card shadow-sm">
         <div className="space-y-1.5">
@@ -318,53 +342,68 @@ export function LighthousePage() {
       </section>
 
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        {topAudits.map((audit) => (
-          <div
-            key={`${audit.environment_id}-${audit.strategy}`}
-            className="border rounded-lg p-4"
-          >
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <p className="text-sm font-medium truncate">
-                  {audit.environment?.project?.name ?? audit.url}
-                </p>
-                <p className="text-xs text-muted-foreground truncate">
-                  {audit.strategy} · {audit.environment?.type ?? audit.url}
-                </p>
-              </div>
-              <Badge
-                variant={
-                  audit.status === "failed" ? "destructive" : "secondary"
-                }
-              >
-                {audit.status}
-              </Badge>
-            </div>
-            <div className="mt-5 flex items-end gap-3">
-              <p
-                className={`text-4xl font-semibold ${scoreTone(audit.performance_score)}`}
-              >
-                {audit.performance_score ?? "--"}
-              </p>
-              <p className="pb-1 text-xs text-muted-foreground">performance</p>
-            </div>
-            <div className="mt-4 grid grid-cols-3 gap-2 text-xs">
-              <div>
-                <p className="text-muted-foreground">LCP</p>
-                <p className="font-medium">{metric(audit.lcp_ms, "ms")}</p>
-              </div>
-              <div>
-                <p className="text-muted-foreground">CLS</p>
-                <p className="font-medium">{audit.cls ?? "n/a"}</p>
-              </div>
-              <div>
-                <p className="text-muted-foreground">TBT</p>
-                <p className="font-medium">{metric(audit.tbt_ms, "ms")}</p>
-              </div>
-            </div>
+        {latestError ? (
+          <div className="md:col-span-2 xl:col-span-4">
+            <ErrorState
+              title="Recent audits could not be loaded"
+              onRetry={() => void refetchLatest()}
+            />
           </div>
-        ))}
-        {topAudits.length === 0 && (
+        ) : latestData === undefined ? (
+          <div className="md:col-span-2 xl:col-span-4 border rounded-lg p-8 text-center text-muted-foreground">
+            Loading recent audits…
+          </div>
+        ) : (
+          topAudits.map((audit) => (
+            <div
+              key={`${audit.environment_id}-${audit.strategy}`}
+              className="border rounded-lg p-4"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium truncate">
+                    {audit.environment?.project?.name ?? audit.url}
+                  </p>
+                  <p className="text-xs text-muted-foreground truncate">
+                    {audit.strategy} · {audit.environment?.type ?? audit.url}
+                  </p>
+                </div>
+                <Badge
+                  variant={
+                    audit.status === "failed" ? "destructive" : "secondary"
+                  }
+                >
+                  {audit.status}
+                </Badge>
+              </div>
+              <div className="mt-5 flex items-end gap-3">
+                <p
+                  className={`text-4xl font-semibold ${scoreTone(audit.performance_score)}`}
+                >
+                  {audit.performance_score ?? "--"}
+                </p>
+                <p className="pb-1 text-xs text-muted-foreground">
+                  performance
+                </p>
+              </div>
+              <div className="mt-4 grid grid-cols-3 gap-2 text-xs">
+                <div>
+                  <p className="text-muted-foreground">LCP</p>
+                  <p className="font-medium">{metric(audit.lcp_ms, "ms")}</p>
+                </div>
+                <div>
+                  <p className="text-muted-foreground">CLS</p>
+                  <p className="font-medium">{audit.cls ?? "n/a"}</p>
+                </div>
+                <div>
+                  <p className="text-muted-foreground">TBT</p>
+                  <p className="font-medium">{metric(audit.tbt_ms, "ms")}</p>
+                </div>
+              </div>
+            </div>
+          ))
+        )}
+        {latestData && topAudits.length === 0 && (
           <div className="md:col-span-2 xl:col-span-4 border rounded-lg p-8 text-center text-muted-foreground">
             <MonitorSmartphone className="h-10 w-10 mx-auto mb-3 opacity-50" />
             No Lighthouse audits yet.
@@ -485,57 +524,71 @@ export function LighthousePage() {
           <h2 className="text-sm font-semibold">Audit history</h2>
         </div>
         <div className="divide-y">
-          {history.map((audit) => (
-            <div
-              key={audit.id}
-              className="p-4 grid gap-3 lg:grid-cols-[1fr_360px]"
-            >
-              <div className="min-w-0">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <p className="font-medium truncate">{audit.url}</p>
-                  <Badge variant="outline">{audit.strategy}</Badge>
-                  <Badge
-                    variant={
-                      audit.status === "failed" ? "destructive" : "secondary"
-                    }
-                  >
-                    {audit.status}
-                  </Badge>
-                  <a
-                    href={audit.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-muted-foreground hover:text-foreground"
-                  >
-                    <ExternalLink className="h-3.5 w-3.5" />
-                  </a>
-                </div>
-                <p className="text-xs text-muted-foreground mt-1">
-                  {new Date(audit.created_at).toLocaleString()}
-                  {audit.error_message ? ` · ${audit.error_message}` : ""}
-                </p>
-                {audit.opportunities && audit.opportunities.length > 0 && (
-                  <p className="text-xs text-muted-foreground mt-2 truncate">
-                    Top opportunity: {audit.opportunities[0].title}
-                    {audit.opportunities[0].displayValue
-                      ? ` · ${audit.opportunities[0].displayValue}`
-                      : ""}
-                  </p>
-                )}
-              </div>
-              <div className="grid grid-cols-4 gap-2 text-center">
-                <Score label="Perf" value={audit.performance_score} />
-                <Score label="A11y" value={audit.accessibility_score} />
-                <Score label="Best" value={audit.best_practices_score} />
-                <Score label="SEO" value={audit.seo_score} />
-              </div>
-            </div>
-          ))}
-          {history.length === 0 && (
+          {historyError ? (
+            <ErrorState
+              title="Audit history could not be loaded"
+              onRetry={() => void refetchHistory()}
+            />
+          ) : historyLoading ? (
             <div className="p-8 text-center text-sm text-muted-foreground">
-              No matching audit history.
+              Loading audit history…
             </div>
+          ) : (
+            history.map((audit) => (
+              <div
+                key={audit.id}
+                className="p-4 grid gap-3 lg:grid-cols-[1fr_360px]"
+              >
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <p className="font-medium truncate">{audit.url}</p>
+                    <Badge variant="outline">{audit.strategy}</Badge>
+                    <Badge
+                      variant={
+                        audit.status === "failed" ? "destructive" : "secondary"
+                      }
+                    >
+                      {audit.status}
+                    </Badge>
+                    <a
+                      href={audit.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-muted-foreground hover:text-foreground"
+                    >
+                      <ExternalLink className="h-3.5 w-3.5" />
+                    </a>
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {new Date(audit.created_at).toLocaleString()}
+                    {audit.error_message ? ` · ${audit.error_message}` : ""}
+                  </p>
+                  {audit.opportunities && audit.opportunities.length > 0 && (
+                    <p className="text-xs text-muted-foreground mt-2 truncate">
+                      Top opportunity: {audit.opportunities[0].title}
+                      {audit.opportunities[0].displayValue
+                        ? ` · ${audit.opportunities[0].displayValue}`
+                        : ""}
+                    </p>
+                  )}
+                </div>
+                <div className="grid grid-cols-4 gap-2 text-center">
+                  <Score label="Perf" value={audit.performance_score} />
+                  <Score label="A11y" value={audit.accessibility_score} />
+                  <Score label="Best" value={audit.best_practices_score} />
+                  <Score label="SEO" value={audit.seo_score} />
+                </div>
+              </div>
+            ))
           )}
+          {!historyError &&
+            !historyLoading &&
+            historyData &&
+            history.length === 0 && (
+              <div className="p-8 text-center text-sm text-muted-foreground">
+                No matching audit history.
+              </div>
+            )}
         </div>
         {totalPages > 1 && (
           <div className="border-t p-4">

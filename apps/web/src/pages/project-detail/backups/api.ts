@@ -43,9 +43,9 @@ export const backupsApi = {
   },
 
   getBackupSchedule: async (envId: number): Promise<BackupSchedule | null> => {
-    return api
-      .get<BackupSchedule | null>(`/environments/${envId}/backup-schedule`)
-      .catch(() => null);
+    return api.get<BackupSchedule | null>(
+      `/environments/${envId}/backup-schedule`,
+    );
   },
 
   upsertBackupSchedule: async (

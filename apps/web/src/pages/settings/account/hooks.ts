@@ -45,7 +45,7 @@ export function useChangePasswordMutation(onSuccessCallback?: () => void) {
       if (onSuccessCallback) onSuccessCallback();
       toast({ title: "Password changed successfully" });
     },
-    onError: (e: any) =>
+    onError: (e) =>
       toast({
         title: "Failed to change password",
         description: e?.message,
@@ -91,10 +91,10 @@ export function useRevokeAllSessionsMutation() {
 export function useSetupMfaMutation() {
   return useMutation({
     mutationFn: accountApi.setupMfa,
-    onError: (e: any) =>
+    onError: (e) =>
       toast({
         title: "Failed to generate MFA setup",
-        description: e?.message || e,
+        description: e.message,
         variant: "destructive",
       }),
   });
@@ -112,7 +112,7 @@ export function useEnableMfaMutation(onSuccessCallback?: () => void) {
       if (onSuccessCallback) onSuccessCallback();
       toast({ title: "Two-factor authentication enabled" });
     },
-    onError: (e: any) =>
+    onError: (e) =>
       toast({
         title: "Failed to enable 2FA",
         description: e?.message || "Invalid verification code",
@@ -125,17 +125,17 @@ export function useDisableMfaMutation() {
   const setUser = useAuthStore((s) => s.setUser);
   const user = useAuthStore((s) => s.user);
   return useMutation({
-    mutationFn: accountApi.disableMfa,
+    mutationFn: (code: string) => accountApi.disableMfa(code),
     onSuccess: () => {
       if (user) {
         setUser({ ...user, mfa_enabled: false });
       }
       toast({ title: "Two-factor authentication disabled" });
     },
-    onError: (e: any) =>
+    onError: (e) =>
       toast({
         title: "Failed to disable 2FA",
-        description: e?.message || e,
+        description: e.message,
         variant: "destructive",
       }),
   });

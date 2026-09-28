@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Github, Plus, RefreshCw, Loader2, Package } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AlertDialog } from "@/components/ui/alert-dialog";
-import { EmptyState } from "@/components/crud/StateViews";
+import { EmptyState, ErrorState } from "@/components/crud/StateViews";
 import {
   useCustomPlugins,
   useScanAllPlugins,
@@ -23,7 +23,12 @@ export function CustomPluginsSettings() {
     null,
   );
 
-  const { data: plugins = [], isLoading } = useCustomPlugins();
+  const {
+    data: plugins = [],
+    isLoading,
+    isError,
+    refetch,
+  } = useCustomPlugins();
   const scanAllMutation = useScanAllPlugins();
   const createMutation = useCreatePlugin();
   const updateMutation = useUpdatePlugin();
@@ -67,7 +72,12 @@ export function CustomPluginsSettings() {
         </div>
       </div>
 
-      {isLoading ? (
+      {isError ? (
+        <ErrorState
+          title="Could not load the custom plugin catalog"
+          onRetry={() => void refetch()}
+        />
+      ) : isLoading ? (
         <div className="space-y-3">
           {[1, 2, 3].map((i) => (
             <div

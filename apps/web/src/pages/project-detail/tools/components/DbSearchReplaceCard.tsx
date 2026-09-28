@@ -78,7 +78,7 @@ export function DbSearchReplaceCard({
         });
       }
     },
-    onError: (err: any) => {
+    onError: (err) => {
       toast({
         title: "Execution Error",
         description: err?.message || "Failed to run search & replace",

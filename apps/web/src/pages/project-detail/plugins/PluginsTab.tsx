@@ -30,6 +30,7 @@ import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { BulkActionsBar } from "@/components/ui/bulk-actions-bar";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ErrorState } from "@/components/crud";
 import { useWebSocketEvent, useSubscribeEnvironment } from "@/lib/websocket";
 import { ExecutionLogPanel } from "@/components/ui/execution-log-panel";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -440,8 +441,16 @@ export function PluginsTab({
     composerReadLoading,
   ]);
 
-  const { data: customCatalog = [] } = useCustomCatalog();
-  const { data: envCustomPlugins = [] } = useEnvCustomPlugins(selectedEnvId);
+  const {
+    data: customCatalog = [],
+    isError: customCatalogError,
+    refetch: refetchCustomCatalog,
+  } = useCustomCatalog();
+  const {
+    data: envCustomPlugins = [],
+    isError: envCustomPluginsError,
+    refetch: refetchEnvCustomPlugins,
+  } = useEnvCustomPlugins(selectedEnvId);
 
   const customCatalogBySlug = new Map(customCatalog.map((p) => [p.slug, p]));
   const envCustomBySlug = new Map(
@@ -1676,225 +1685,250 @@ export function PluginsTab({
       )}
 
       {/* GitHub catalog management */}
-      {isBedrock && customCatalogRows.length > 0 && (
-        <div className="border rounded-lg overflow-hidden">
-          <div className="flex flex-wrap items-center gap-2 px-4 py-2.5 border-b bg-muted/20">
-            <div className="flex items-center gap-2">
-              <GitBranch className="h-4 w-4 text-muted-foreground" />
-              <span className="text-sm font-medium">GitHub Catalog</span>
-              <Badge variant="secondary" className="text-xs">
-                {customCatalogRows.length}
-              </Badge>
+      {isBedrock && customCatalogError && (
+        <ErrorState
+          title="Could not load the custom plugin catalog"
+          onRetry={() => void refetchCustomCatalog()}
+          className="py-8"
+        />
+      )}
+      {isBedrock && envCustomPluginsError && (
+        <ErrorState
+          title="Could not load custom plugin status for this environment"
+          onRetry={() => void refetchEnvCustomPlugins()}
+          className="py-8"
+        />
+      )}
+      {isBedrock &&
+        !customCatalogError &&
+        !envCustomPluginsError &&
+        customCatalogRows.length > 0 && (
+          <div className="border rounded-lg overflow-hidden">
+            <div className="flex flex-wrap items-center gap-2 px-4 py-2.5 border-b bg-muted/20">
+              <div className="flex items-center gap-2">
+                <GitBranch className="h-4 w-4 text-muted-foreground" />
+                <span className="text-sm font-medium">GitHub Catalog</span>
+                <Badge variant="secondary" className="text-xs">
+                  {customCatalogRows.length}
+                </Badge>
+              </div>
+              <span className="text-xs text-muted-foreground">
+                registered custom plugins for this environment
+              </span>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 px-2 text-xs gap-1.5 ml-auto"
+                onClick={() => checkVersionsMutation.mutate()}
+                disabled={
+                  !selectedEnvId ||
+                  isManaging ||
+                  checkVersionsMutation.isPending
+                }
+              >
+                {checkVersionsMutation.isPending ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-3 w-3" />
+                )}
+                Check versions
+              </Button>
             </div>
-            <span className="text-xs text-muted-foreground">
-              registered custom plugins for this environment
-            </span>
-            <Button
-              size="sm"
-              variant="ghost"
-              className="h-7 px-2 text-xs gap-1.5 ml-auto"
-              onClick={() => checkVersionsMutation.mutate()}
-              disabled={
-                !selectedEnvId || isManaging || checkVersionsMutation.isPending
-              }
-            >
-              {checkVersionsMutation.isPending ? (
-                <Loader2 className="h-3 w-3 animate-spin" />
-              ) : (
-                <RefreshCw className="h-3 w-3" />
-              )}
-              Check versions
-            </Button>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="border-b bg-muted/30">
-                <tr>
-                  <th className="text-left px-4 py-2.5 font-medium text-xs">
-                    Plugin
-                  </th>
-                  <th className="text-left px-4 py-2.5 font-medium text-xs">
-                    Repository
-                  </th>
-                  <th className="text-left px-4 py-2.5 font-medium text-xs">
-                    Status
-                  </th>
-                  <th className="text-left px-4 py-2.5 font-medium text-xs">
-                    Version
-                  </th>
-                  <th className="text-left px-4 py-2.5 font-medium text-xs">
-                    Update
-                  </th>
-                  <th className="w-64 px-4 py-2.5 font-medium text-xs text-right">
-                    Actions
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y">
-                {customCatalogRows.map((row) => (
-                  <tr key={row.catalog.id} className="hover:bg-muted/10">
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium">{row.catalog.name}</span>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="border-b bg-muted/30">
+                  <tr>
+                    <th className="text-left px-4 py-2.5 font-medium text-xs">
+                      Plugin
+                    </th>
+                    <th className="text-left px-4 py-2.5 font-medium text-xs">
+                      Repository
+                    </th>
+                    <th className="text-left px-4 py-2.5 font-medium text-xs">
+                      Status
+                    </th>
+                    <th className="text-left px-4 py-2.5 font-medium text-xs">
+                      Version
+                    </th>
+                    <th className="text-left px-4 py-2.5 font-medium text-xs">
+                      Update
+                    </th>
+                    <th className="w-64 px-4 py-2.5 font-medium text-xs text-right">
+                      Actions
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y">
+                  {customCatalogRows.map((row) => (
+                    <tr key={row.catalog.id} className="hover:bg-muted/10">
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium">
+                            {row.catalog.name}
+                          </span>
+                          <Badge
+                            variant="outline"
+                            className="text-[10px] capitalize"
+                          >
+                            {row.catalog.type}
+                          </Badge>
+                        </div>
+                        <p className="text-xs text-muted-foreground font-mono">
+                          {row.catalog.slug}
+                        </p>
+                      </td>
+                      <td className="px-4 py-3 text-xs text-muted-foreground">
+                        <a
+                          href={customPluginRepoHref(row.catalog.repo_url)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 max-w-72 truncate hover:text-foreground"
+                          title={row.catalog.repo_url}
+                        >
+                          <span className="truncate">
+                            {row.catalog.repo_url}
+                          </span>
+                          <ExternalLink className="h-3 w-3 shrink-0" />
+                        </a>
+                        <p className="font-mono text-[11px] text-muted-foreground/80">
+                          path: {row.catalog.repo_path || "."}
+                        </p>
+                      </td>
+                      <td className="px-4 py-3">
                         <Badge
                           variant="outline"
-                          className="text-[10px] capitalize"
+                          className={
+                            row.statusTone === "success"
+                              ? "text-xs bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-400 dark:border-green-800"
+                              : row.statusTone === "warning"
+                                ? "text-xs bg-yellow-50 text-yellow-700 border-yellow-200 dark:bg-yellow-950/30 dark:text-yellow-400 dark:border-yellow-800"
+                                : row.statusTone === "muted"
+                                  ? "text-xs bg-gray-50 text-gray-500 border-gray-200 dark:bg-gray-950/30 dark:text-gray-400 dark:border-gray-800"
+                                  : "text-xs"
+                          }
                         >
-                          {row.catalog.type}
+                          {row.statusLabel}
                         </Badge>
-                      </div>
-                      <p className="text-xs text-muted-foreground font-mono">
-                        {row.catalog.slug}
-                      </p>
-                    </td>
-                    <td className="px-4 py-3 text-xs text-muted-foreground">
-                      <a
-                        href={customPluginRepoHref(row.catalog.repo_url)}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1 max-w-72 truncate hover:text-foreground"
-                        title={row.catalog.repo_url}
-                      >
-                        <span className="truncate">{row.catalog.repo_url}</span>
-                        <ExternalLink className="h-3 w-3 shrink-0" />
-                      </a>
-                      <p className="font-mono text-[11px] text-muted-foreground/80">
-                        path: {row.catalog.repo_path || "."}
-                      </p>
-                    </td>
-                    <td className="px-4 py-3">
-                      <Badge
-                        variant="outline"
-                        className={
-                          row.statusTone === "success"
-                            ? "text-xs bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-400 dark:border-green-800"
-                            : row.statusTone === "warning"
-                              ? "text-xs bg-yellow-50 text-yellow-700 border-yellow-200 dark:bg-yellow-950/30 dark:text-yellow-400 dark:border-yellow-800"
-                              : row.statusTone === "muted"
-                                ? "text-xs bg-gray-50 text-gray-500 border-gray-200 dark:bg-gray-950/30 dark:text-gray-400 dark:border-gray-800"
-                                : "text-xs"
-                        }
-                      >
-                        {row.statusLabel}
-                      </Badge>
-                    </td>
-                    <td className="px-4 py-3 text-xs font-mono text-muted-foreground">
-                      {row.installedVersion ?? "—"}
-                    </td>
-                    <td className="px-4 py-3">
-                      {row.updateAvailable ? (
-                        <span className="flex items-center gap-1 text-yellow-600 dark:text-yellow-400 text-xs font-medium">
-                          <ArrowUpCircle className="h-3.5 w-3.5 shrink-0" />
-                          {row.latestVersion}
-                        </span>
-                      ) : row.installedVersion ? (
-                        <span className="flex items-center gap-1 text-green-600 dark:text-green-400 text-xs">
-                          <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-                          Up to date
-                        </span>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">—</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      <div className="flex flex-wrap items-center justify-end gap-1.5">
-                        {row.scanned &&
-                          row.catalog.type === "plugin" &&
-                          (row.scanned.status === "active" ? (
+                      </td>
+                      <td className="px-4 py-3 text-xs font-mono text-muted-foreground">
+                        {row.installedVersion ?? "—"}
+                      </td>
+                      <td className="px-4 py-3">
+                        {row.updateAvailable ? (
+                          <span className="flex items-center gap-1 text-yellow-600 dark:text-yellow-400 text-xs font-medium">
+                            <ArrowUpCircle className="h-3.5 w-3.5 shrink-0" />
+                            {row.latestVersion}
+                          </span>
+                        ) : row.installedVersion ? (
+                          <span className="flex items-center gap-1 text-green-600 dark:text-green-400 text-xs">
+                            <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                            Up to date
+                          </span>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">
+                            —
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <div className="flex flex-wrap items-center justify-end gap-1.5">
+                          {row.scanned &&
+                            row.catalog.type === "plugin" &&
+                            (row.scanned.status === "active" ? (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className="h-7 px-2 text-xs text-muted-foreground hover:bg-muted"
+                                disabled={isManaging}
+                                onClick={() =>
+                                  setActionDialogState({
+                                    open: true,
+                                    action: "deactivate",
+                                    slug: row.catalog.slug,
+                                  })
+                                }
+                              >
+                                Deactivate
+                              </Button>
+                            ) : (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className="h-7 px-2 text-xs text-primary font-medium hover:bg-primary/5"
+                                disabled={isManaging}
+                                onClick={() =>
+                                  setActionDialogState({
+                                    open: true,
+                                    action: "activate",
+                                    slug: row.catalog.slug,
+                                  })
+                                }
+                              >
+                                Activate
+                              </Button>
+                            ))}
+                          {!row.entry && !row.scanned ? (
                             <Button
                               size="sm"
                               variant="ghost"
-                              className="h-7 px-2 text-xs text-muted-foreground hover:bg-muted"
-                              disabled={isManaging}
+                              className="h-7 px-2 text-xs text-primary font-medium hover:bg-primary/5"
+                              disabled={
+                                isManaging || installCustomMutation.isPending
+                              }
                               onClick={() =>
-                                setActionDialogState({
-                                  open: true,
-                                  action: "deactivate",
-                                  slug: row.catalog.slug,
-                                })
+                                installCustomMutation.mutate(row.catalog.id)
                               }
                             >
-                              Deactivate
+                              <Plus className="h-3 w-3 mr-1" />
+                              Install
                             </Button>
                           ) : (
                             <Button
                               size="sm"
                               variant="ghost"
-                              className="h-7 px-2 text-xs text-primary font-medium hover:bg-primary/5"
-                              disabled={isManaging}
+                              className="h-7 px-2 text-xs hover:bg-muted"
+                              disabled={
+                                isManaging || updateCustomMutation.isPending
+                              }
                               onClick={() =>
-                                setActionDialogState({
-                                  open: true,
-                                  action: "activate",
-                                  slug: row.catalog.slug,
-                                })
+                                updateCustomMutation.mutate(row.catalog.id)
+                              }
+                              title={
+                                row.scanned
+                                  ? "Refresh from GitHub source"
+                                  : "Install or refresh from GitHub source"
                               }
                             >
-                              Activate
+                              <RotateCcw className="h-3 w-3 mr-1" />
+                              {row.updateAvailable ? "Update" : "Refresh"}
                             </Button>
-                          ))}
-                        {!row.entry && !row.scanned ? (
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className="h-7 px-2 text-xs text-primary font-medium hover:bg-primary/5"
-                            disabled={
-                              isManaging || installCustomMutation.isPending
-                            }
-                            onClick={() =>
-                              installCustomMutation.mutate(row.catalog.id)
-                            }
-                          >
-                            <Plus className="h-3 w-3 mr-1" />
-                            Install
-                          </Button>
-                        ) : (
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className="h-7 px-2 text-xs hover:bg-muted"
-                            disabled={
-                              isManaging || updateCustomMutation.isPending
-                            }
-                            onClick={() =>
-                              updateCustomMutation.mutate(row.catalog.id)
-                            }
-                            title={
-                              row.scanned
-                                ? "Refresh from GitHub source"
-                                : "Install or refresh from GitHub source"
-                            }
-                          >
-                            <RotateCcw className="h-3 w-3 mr-1" />
-                            {row.updateAvailable ? "Update" : "Refresh"}
-                          </Button>
-                        )}
-                        {(row.entry || row.scanned) && (
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className="h-7 px-2 text-xs text-destructive hover:text-destructive hover:bg-destructive/5"
-                            disabled={
-                              isManaging || uninstallCustomMutation.isPending
-                            }
-                            onClick={() =>
-                              uninstallCustomMutation.mutate(row.catalog.id)
-                            }
-                            title="Remove custom plugin from this environment"
-                          >
-                            <Trash2 className="h-3 w-3 mr-1" />
-                            Remove
-                          </Button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                          )}
+                          {(row.entry || row.scanned) && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-7 px-2 text-xs text-destructive hover:text-destructive hover:bg-destructive/5"
+                              disabled={
+                                isManaging || uninstallCustomMutation.isPending
+                              }
+                              onClick={() =>
+                                uninstallCustomMutation.mutate(row.catalog.id)
+                              }
+                              title="Remove custom plugin from this environment"
+                            >
+                              <Trash2 className="h-3 w-3 mr-1" />
+                              Remove
+                            </Button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
       {/* Must-Use Plugins section */}
       {muPlugins.length > 0 && (

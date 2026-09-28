@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { AlertDialog } from "@/components/ui/alert-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ErrorState } from "@/components/crud";
 import {
   Select,
   SelectContent,
@@ -225,7 +226,12 @@ export function RestoreTab({
   const restoreJobIdRef = useRef<string | null>(null);
   const restoreEnvIdRef = useRef<number | null>(null);
 
-  const { data: restoreHistory } = useQuery({
+  const {
+    data: restoreHistory,
+    isLoading: restoreHistoryLoading,
+    isError: restoreHistoryError,
+    refetch: refetchRestoreHistory,
+  } = useQuery({
     queryKey: ["restore-history", selectedEnvId],
     queryFn: () =>
       api.get<RestoreHistoryPage>(
@@ -238,7 +244,12 @@ export function RestoreTab({
 
   useSubscribeEnvironment(selectedEnvId);
 
-  const { data, isLoading } = useQuery({
+  const {
+    data,
+    isLoading,
+    isError: backupsError,
+    refetch: refetchBackups,
+  } = useQuery({
     queryKey: ["backups", selectedEnvId],
     enabled: !!selectedEnvId,
     queryFn: () =>
@@ -446,80 +457,95 @@ export function RestoreTab({
         </div>
       )}
 
-      {selectedEnvId && !isLoading && completedBackups.length === 0 && (
-        <div className="text-center py-16 border rounded-xl text-muted-foreground">
-          <CheckCircle2 className="h-10 w-10 mx-auto mb-3 opacity-40" />
-          <p className="font-medium">No completed backups</p>
-          <p className="text-sm mt-1">
-            Create a backup first from the{" "}
-            <span className="font-medium">Backups</span> tab
-          </p>
-        </div>
+      {selectedEnvId && backupsError && (
+        <ErrorState
+          title="Could not load restorable backups"
+          onRetry={() => void refetchBackups()}
+        />
       )}
 
-      {selectedEnvId && !isLoading && completedBackups.length > 0 && (
-        <>
-          <p className="text-sm text-muted-foreground">
-            {completedBackups.length} restorable backup
-            {completedBackups.length !== 1 ? "s" : ""} for{" "}
-            <span className="font-medium capitalize">
-              {selectedEnv?.type ?? `env #${selectedEnvId}`}
-            </span>{" "}
-            — restoring will overwrite the current site
-          </p>
-
-          <div className="border rounded-lg overflow-hidden">
-            <table className="w-full text-sm">
-              <thead className="border-b bg-muted/40">
-                <tr>
-                  <th className="text-left px-4 py-3 font-medium">Type</th>
-                  <th className="text-left px-4 py-3 font-medium">Size</th>
-                  <th className="text-left px-4 py-3 font-medium">Created</th>
-                  <th className="text-left px-4 py-3 font-medium">Completed</th>
-                  <th className="w-24" />
-                </tr>
-              </thead>
-              <tbody className="divide-y">
-                {completedBackups.map((b) => (
-                  <tr
-                    key={b.id}
-                    className="hover:bg-muted/20 transition-colors"
-                  >
-                    <td className="px-4 py-3">
-                      <Badge variant="outline" className="text-xs">
-                        {BACKUP_TYPE_LABELS[b.type]}
-                      </Badge>
-                    </td>
-                    <td className="px-4 py-3 text-muted-foreground font-mono text-xs">
-                      {b.size_bytes ? formatBytes(b.size_bytes) : "—"}
-                    </td>
-                    <td className="px-4 py-3 text-muted-foreground text-xs">
-                      {new Date(b.created_at).toLocaleString()}
-                    </td>
-                    <td className="px-4 py-3 text-muted-foreground text-xs">
-                      {b.completed_at
-                        ? new Date(b.completed_at).toLocaleString()
-                        : "—"}
-                    </td>
-                    <td className="px-3 py-3">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="h-7 text-xs gap-1.5"
-                        disabled={isRestoring || restoreMutation.isPending}
-                        onClick={() => setRestoreTarget(b)}
-                      >
-                        <RotateCcw className="h-3 w-3" />
-                        Restore
-                      </Button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+      {selectedEnvId &&
+        !isLoading &&
+        !backupsError &&
+        completedBackups.length === 0 && (
+          <div className="text-center py-16 border rounded-xl text-muted-foreground">
+            <CheckCircle2 className="h-10 w-10 mx-auto mb-3 opacity-40" />
+            <p className="font-medium">No completed backups</p>
+            <p className="text-sm mt-1">
+              Create a backup first from the{" "}
+              <span className="font-medium">Backups</span> tab
+            </p>
           </div>
-        </>
-      )}
+        )}
+
+      {selectedEnvId &&
+        !isLoading &&
+        !backupsError &&
+        completedBackups.length > 0 && (
+          <>
+            <p className="text-sm text-muted-foreground">
+              {completedBackups.length} restorable backup
+              {completedBackups.length !== 1 ? "s" : ""} for{" "}
+              <span className="font-medium capitalize">
+                {selectedEnv?.type ?? `env #${selectedEnvId}`}
+              </span>{" "}
+              — restoring will overwrite the current site
+            </p>
+
+            <div className="border rounded-lg overflow-hidden">
+              <table className="w-full text-sm">
+                <thead className="border-b bg-muted/40">
+                  <tr>
+                    <th className="text-left px-4 py-3 font-medium">Type</th>
+                    <th className="text-left px-4 py-3 font-medium">Size</th>
+                    <th className="text-left px-4 py-3 font-medium">Created</th>
+                    <th className="text-left px-4 py-3 font-medium">
+                      Completed
+                    </th>
+                    <th className="w-24" />
+                  </tr>
+                </thead>
+                <tbody className="divide-y">
+                  {completedBackups.map((b) => (
+                    <tr
+                      key={b.id}
+                      className="hover:bg-muted/20 transition-colors"
+                    >
+                      <td className="px-4 py-3">
+                        <Badge variant="outline" className="text-xs">
+                          {BACKUP_TYPE_LABELS[b.type]}
+                        </Badge>
+                      </td>
+                      <td className="px-4 py-3 text-muted-foreground font-mono text-xs">
+                        {b.size_bytes ? formatBytes(b.size_bytes) : "—"}
+                      </td>
+                      <td className="px-4 py-3 text-muted-foreground text-xs">
+                        {new Date(b.created_at).toLocaleString()}
+                      </td>
+                      <td className="px-4 py-3 text-muted-foreground text-xs">
+                        {b.completed_at
+                          ? new Date(b.completed_at).toLocaleString()
+                          : "—"}
+                      </td>
+                      <td className="px-3 py-3">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 text-xs gap-1.5"
+                          disabled={isRestoring || restoreMutation.isPending}
+                          onClick={() => setRestoreTarget(b)}
+                        >
+                          <RotateCcw className="h-3 w-3" />
+                          Restore
+                        </Button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
 
       <AlertDialog
         open={!!restoreTarget}
@@ -539,7 +565,17 @@ export function RestoreTab({
         <div className="space-y-3 pt-2">
           <h4 className="text-sm font-semibold">Restore History</h4>
 
-          {!restoreHistory || restoreHistory.data.length === 0 ? (
+          {restoreHistoryError ? (
+            <ErrorState
+              title="Could not load restore history"
+              onRetry={() => void refetchRestoreHistory()}
+              className="py-8"
+            />
+          ) : restoreHistoryLoading ? (
+            <div className="border rounded-lg text-center py-8 text-muted-foreground text-sm">
+              Loading restore history…
+            </div>
+          ) : !restoreHistory || restoreHistory.data.length === 0 ? (
             <div className="border rounded-lg text-center py-8 text-muted-foreground text-sm">
               No restore jobs yet for this environment.
             </div>

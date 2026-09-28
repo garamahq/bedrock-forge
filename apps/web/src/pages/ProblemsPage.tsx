@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Pagination } from "@/components/crud";
+import { ErrorState } from "@/components/crud";
 
 interface AttentionItem {
   id: string;
@@ -51,7 +52,12 @@ export function ProblemsPage() {
   const [page, setPage] = useState(1);
   const [severityFilter, setSeverityFilter] = useState<string | null>(null);
   const PAGE_SIZE = 20;
-  const { data: items = [], isLoading } = useQuery<AttentionItem[]>({
+  const {
+    data: items = [],
+    isLoading,
+    isError,
+    refetch,
+  } = useQuery<AttentionItem[]>({
     queryKey: ["attention"],
     queryFn: () => api.get("/dashboard/attention"),
     staleTime: 30_000,
@@ -84,7 +90,7 @@ export function ProblemsPage() {
       </div>
 
       {/* Summary badges and filters */}
-      {!isLoading && items.length > 0 && (
+      {!isLoading && !isError && items.length > 0 && (
         <div className="flex items-center gap-4 flex-wrap">
           <div className="flex gap-1 bg-muted p-1 rounded-md">
             <Button
@@ -155,12 +161,18 @@ export function ProblemsPage() {
             <Skeleton key={i} className="h-16 rounded-lg" />
           ))}
         </div>
+      ) : isError ? (
+        <ErrorState
+          title="Problems could not be loaded"
+          description="The attention feed is unavailable. Retry to check current status."
+          onRetry={() => void refetch()}
+        />
       ) : sorted.length === 0 ? (
         <div className="border rounded-lg p-8 text-center">
           <AlertTriangle className="h-8 w-8 text-muted-foreground mx-auto mb-3" />
           <p className="font-medium">No problems found</p>
           <p className="text-sm text-muted-foreground mt-1">
-            All systems are running normally.
+            No attention items are currently reported.
           </p>
         </div>
       ) : (

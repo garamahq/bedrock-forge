@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ErrorState } from "@/components/crud";
 import { toast } from "@/hooks/use-toast";
 import { useDbCredentialsQuery, useSaveDbCredentialsMutation } from "../hooks";
 import { dbCredsSchema, DbCredsForm } from "../utils";
@@ -28,11 +29,12 @@ export function DbCredentialsSection({
   const [editing, setEditing] = useState(false);
   const [showPass, setShowPass] = useState(false);
 
-  const { data: creds, isLoading } = useDbCredentialsQuery(
-    projectId,
-    envId,
-    open,
-  );
+  const {
+    data: creds,
+    isLoading,
+    isError,
+    refetch,
+  } = useDbCredentialsQuery(projectId, envId, open);
   const saveMutation = useSaveDbCredentialsMutation(projectId, envId);
 
   const {
@@ -102,6 +104,12 @@ export function DbCredentialsSection({
               <Skeleton className="h-4 w-full" />
               <Skeleton className="h-4 w-3/4" />
             </div>
+          ) : isError ? (
+            <ErrorState
+              title="Could not load database credentials"
+              onRetry={() => void refetch()}
+              className="py-8"
+            />
           ) : !creds && !editing ? (
             <div className="text-center py-1 space-y-2">
               <p className="text-muted-foreground">No credentials stored</p>

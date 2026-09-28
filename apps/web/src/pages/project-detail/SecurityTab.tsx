@@ -142,6 +142,7 @@ export function SecurityTab({
   const {
     data: securityOverview,
     isLoading: isOverviewLoading,
+    isError: isOverviewError,
     refetch: refetchOverview,
   } = useQuery<{
     environments: EnvironmentSummary[];
@@ -335,15 +336,15 @@ export function SecurityTab({
     "beginner" | "balanced" | "maximum" | "custom"
   >("balanced");
 
-  const installSecureGuardMutation = useMutation({
+  const installSecureGuardMutation = useMutation<{ jobId: string }, Error>({
     mutationFn: async () => {
       if (!selectedEnvId) throw new Error("No environment selected");
-      return api.post(
+      return api.post<{ jobId: string }>(
         `/projects/${projectId}/environments/${selectedEnvId}/secure-guard/install`,
         { preset: secureGuardPreset, deployWatchdog: true },
       );
     },
-    onSuccess: (data: any) => {
+    onSuccess: (data) => {
       toast({
         title: "Secure Guard Installation Queued",
         description: `Installation job #${data.jobId} is in progress.`,
@@ -353,24 +354,24 @@ export function SecurityTab({
       });
       qc.invalidateQueries({ queryKey: ["security-scans"] });
     },
-    onError: (err: any) => {
+    onError: (err) => {
       toast({
         title: "Installation Failed",
-        description: err.response?.data?.message || err.message,
+        description: err.message,
         variant: "destructive",
       });
     },
   });
 
-  const deployWatchdogMutation = useMutation({
+  const deployWatchdogMutation = useMutation<{ jobId: string }, Error>({
     mutationFn: async () => {
       if (!selectedEnvId) throw new Error("No environment selected");
-      return api.post(
+      return api.post<{ jobId: string }>(
         `/projects/${projectId}/environments/${selectedEnvId}/secure-guard/watchdog`,
         {},
       );
     },
-    onSuccess: (data: any) => {
+    onSuccess: (data) => {
       toast({
         title: "Watchdog MU-Plugin Queued",
         description: `Deployment job #${data.jobId} is in progress.`,
@@ -379,10 +380,10 @@ export function SecurityTab({
         queryKey: ["environment-findings", selectedEnvId],
       });
     },
-    onError: (err: any) => {
+    onError: (err) => {
       toast({
         title: "Watchdog Deployment Failed",
-        description: err.response?.data?.message || err.message,
+        description: err.message,
         variant: "destructive",
       });
     },
@@ -464,6 +465,10 @@ export function SecurityTab({
   }
 
   const score = envSummary?.score ?? null;
+  const isSecurityScanStale =
+    !!envSummary?.last_scanned_at &&
+    Date.now() - new Date(envSummary.last_scanned_at).getTime() >
+      30 * 24 * 60 * 60 * 1000;
   const scoreColor =
     score === null
       ? "text-muted-foreground border-muted-foreground/30"
@@ -641,7 +646,9 @@ export function SecurityTab({
                             {envSummary.findings_summary.low} Low
                           </Badge>
                         )}
-                        {envSummary.findings_summary.critical === 0 &&
+                        {envSummary.last_scanned_at &&
+                          !isSecurityScanStale &&
+                          envSummary.findings_summary.critical === 0 &&
                           envSummary.findings_summary.high === 0 &&
                           envSummary.findings_summary.medium === 0 &&
                           envSummary.findings_summary.low === 0 && (
@@ -650,6 +657,27 @@ export function SecurityTab({
                             </Badge>
                           )}
                       </>
+                    )}
+                    {!isOverviewLoading &&
+                      !isOverviewError &&
+                      envSummary &&
+                      !envSummary.last_scanned_at && (
+                        <Badge
+                          variant="outline"
+                          className="font-medium text-xs"
+                        >
+                          Not scanned yet
+                        </Badge>
+                      )}
+                    {isSecurityScanStale && (
+                      <Badge className="bg-warning text-warning-foreground font-medium text-xs">
+                        Scan is stale
+                      </Badge>
+                    )}
+                    {isOverviewError && (
+                      <Badge variant="outline" className="font-medium text-xs">
+                        Security status unavailable
+                      </Badge>
                     )}
                   </div>
 
@@ -731,7 +759,11 @@ export function SecurityTab({
                   </Label>
                   <Select
                     value={secureGuardPreset}
-                    onValueChange={(val: any) => setSecureGuardPreset(val)}
+                    onValueChange={(value) => {
+                      if (["beginner", "balanced", "maximum", "custom"].includes(value)) {
+                        setSecureGuardPreset(value as typeof secureGuardPreset);
+                      }
+                    }}
                   >
                     <SelectTrigger className="h-8 text-xs">
                       <SelectValue />

@@ -14,6 +14,7 @@ import {
   RotateCw,
 } from "lucide-react";
 import { api } from "@/lib/api-client";
+import { toast } from "@/hooks/use-toast";
 import {
   Select,
   SelectContent,
@@ -28,6 +29,7 @@ import {
   ExpandLogButton,
 } from "@/components/ui/execution-log-panel";
 import { useWebSocketEvent } from "@/lib/websocket";
+import { ErrorState } from "@/components/crud";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -64,7 +66,13 @@ const QUEUE_LABELS: Record<string, string> = {
   projects: "Projects",
 };
 
-const STATUS_ORDER = ["active", "pending", "completed", "failed", "dead_letter"];
+const STATUS_ORDER = [
+  "active",
+  "pending",
+  "completed",
+  "failed",
+  "dead_letter",
+];
 
 const STATUS_LABELS: Record<string, string> = {
   active: "Running",
@@ -93,7 +101,10 @@ function StatusBadge({ status }: { status: string }) {
     );
   if (status === "dead_letter")
     return (
-      <Badge variant="destructive" className="gap-1 bg-red-950/70 text-red-300 border-red-800 hover:bg-red-950/70">
+      <Badge
+        variant="destructive"
+        className="gap-1 bg-red-950/70 text-red-300 border-red-800 hover:bg-red-950/70"
+      >
         <AlertTriangle className="h-3 w-3" />
         Dead Letter
       </Badge>
@@ -250,10 +261,11 @@ export function ActivityPage() {
   async function handleRecoverQueues() {
     setIsRecovering(true);
     try {
-      const res = await api.post<{ success: boolean; message: string; dbCleaned: number }>(
-        "/job-executions/recover-stalled",
-        {},
-      );
+      const res = await api.post<{
+        success: boolean;
+        message: string;
+        dbCleaned: number;
+      }>("/job-executions/recover-stalled", {});
       setRecoveryMessage(
         res.dbCleaned > 0
           ? `Recovered ${res.dbCleaned} stalled jobs`
@@ -262,7 +274,11 @@ export function ActivityPage() {
       setTimeout(() => setRecoveryMessage(null), 4000);
       queryClient.invalidateQueries({ queryKey: ["job-executions"] });
     } catch (err) {
-      console.error("Failed to recover queues:", err);
+      toast({
+        title: "Failed to recover queues",
+        description: err instanceof Error ? err.message : "Please try again.",
+        variant: "destructive",
+      });
     } finally {
       setIsRecovering(false);
     }
@@ -270,7 +286,7 @@ export function ActivityPage() {
 
   const queryKey = ["job-executions", page, queueFilter, statusFilter];
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey,
     queryFn: () => {
       const params = new URLSearchParams({
@@ -323,7 +339,9 @@ export function ActivityPage() {
             disabled={isRecovering}
             title="Unstick and recover all queues and stalled jobs"
           >
-            <Wrench className={`h-3.5 w-3.5 ${isRecovering ? "animate-spin" : ""}`} />
+            <Wrench
+              className={`h-3.5 w-3.5 ${isRecovering ? "animate-spin" : ""}`}
+            />
             <span>Recover Queues</span>
           </Button>
 
@@ -407,7 +425,17 @@ export function ActivityPage() {
           </thead>
 
           <tbody>
-            {isLoading ? (
+            {isError ? (
+              <tr>
+                <td colSpan={8} className="px-4 py-2">
+                  <ErrorState
+                    title="Could not load activity"
+                    onRetry={() => void refetch()}
+                    className="py-8"
+                  />
+                </td>
+              </tr>
+            ) : isLoading ? (
               <tr>
                 <td colSpan={8} className="py-12 text-center">
                   <Loader2 className="h-6 w-6 animate-spin mx-auto text-muted-foreground" />

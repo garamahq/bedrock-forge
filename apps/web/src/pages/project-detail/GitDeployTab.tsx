@@ -66,7 +66,7 @@ interface Environment {
   git_branch?: string | null;
   git_current_commit?: string | null;
   git_last_deployed_at?: string | null;
-  deploy_webhook_token?: string | null;
+  has_deploy_webhook_token?: boolean;
   server: Server;
 }
 
@@ -82,14 +82,16 @@ export function GitDeployTab({
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const envParam = searchParams.get("env");
-  const initialEnvId = envParam ? Number(envParam) : (environments[0]?.id || 0);
+  const initialEnvId = envParam ? Number(envParam) : environments[0]?.id || 0;
 
   const [selectedEnvId, setSelectedEnvId] = useState<number>(initialEnvId);
-  const [activeJobExecutionId, setActiveJobExecutionId] = useState<number | null>(
-    null,
-  );
+  const [activeJobExecutionId, setActiveJobExecutionId] = useState<
+    number | null
+  >(null);
   const [isDeploying, setIsDeploying] = useState(false);
   const [copiedWebhook, setCopiedWebhook] = useState(false);
+  const [webhookToken, setWebhookToken] = useState<string | null>(null);
+  const [copiedWebhookToken, setCopiedWebhookToken] = useState(false);
   const [copiedDeployKey, setCopiedDeployKey] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -100,6 +102,11 @@ export function GitDeployTab({
       setSelectedEnvId(envId);
     }
   }, [searchParams, environments]);
+
+  React.useEffect(() => {
+    setWebhookToken(null);
+    setCopiedWebhookToken(false);
+  }, [selectedEnvId]);
 
   // Form states for manual deploy
   const [deployBranch, setDeployBranch] = useState("");
@@ -166,7 +173,12 @@ export function GitDeployTab({
       );
       setEditBranch(selectedEnv.git_branch || "main");
     }
-  }, [selectedEnv?.id, selectedEnv?.git_branch, selectedEnv?.git_remote_url, defaultRepo]);
+  }, [
+    selectedEnv?.id,
+    selectedEnv?.git_branch,
+    selectedEnv?.git_remote_url,
+    defaultRepo,
+  ]);
 
   // Mutation: Trigger Deployment
   const deployMutation = useMutation({
@@ -194,10 +206,10 @@ export function GitDeployTab({
       });
       queryClient.invalidateQueries({ queryKey: ["projects", projectId] });
     },
-    onError: (err: any) => {
+    onError: (err) => {
       toast({
         title: "Deployment Failed to Queue",
-        description: err.response?.data?.message || err.message,
+        description: err.message,
         variant: "destructive",
       });
     },
@@ -223,10 +235,10 @@ export function GitDeployTab({
       setSettingsOpen(false);
       queryClient.invalidateQueries({ queryKey: ["projects", projectId] });
     },
-    onError: (err: any) => {
+    onError: (err) => {
       toast({
         title: "Failed to Update Settings",
-        description: err.response?.data?.message || err.message,
+        description: err.message,
         variant: "destructive",
       });
     },
@@ -241,17 +253,19 @@ export function GitDeployTab({
         {},
       );
     },
-    onSuccess: () => {
+    onSuccess: ({ token }) => {
+      setWebhookToken(token);
       toast({
         title: "Webhook Token Generated",
-        description: "A new deploy webhook token has been generated.",
+        description:
+          "Copy the token now and add it as your GitHub webhook secret.",
       });
       queryClient.invalidateQueries({ queryKey: ["projects", projectId] });
     },
-    onError: (err: any) => {
+    onError: (err) => {
       toast({
         title: "Failed to Generate Token",
-        description: err.response?.data?.message || err.message,
+        description: err.message,
         variant: "destructive",
       });
     },
@@ -267,16 +281,30 @@ export function GitDeployTab({
     );
   }
 
-  const webhookUrl = selectedEnv.deploy_webhook_token
-    ? `${window.location.origin}/api/webhooks/deploy/${selectedEnv.id}?token=${selectedEnv.deploy_webhook_token}`
+  const webhookUrl = selectedEnv.has_deploy_webhook_token
+    ? `${window.location.origin}/api/webhooks/deploy/${selectedEnv.id}`
     : null;
 
   const copyWebhook = () => {
     if (!webhookUrl) return;
     navigator.clipboard.writeText(webhookUrl);
     setCopiedWebhook(true);
-    toast({ title: "Copied!", description: "Webhook URL copied to clipboard." });
+    toast({
+      title: "Copied!",
+      description: "Webhook URL copied to clipboard.",
+    });
     setTimeout(() => setCopiedWebhook(false), 2000);
+  };
+
+  const copyWebhookToken = () => {
+    if (!webhookToken) return;
+    navigator.clipboard.writeText(webhookToken);
+    setCopiedWebhookToken(true);
+    toast({
+      title: "Copied",
+      description: "Webhook secret copied to clipboard.",
+    });
+    setTimeout(() => setCopiedWebhookToken(false), 2000);
   };
 
   const effectiveRepo =
@@ -395,7 +423,9 @@ export function GitDeployTab({
                 </span>
                 <span className="font-medium text-foreground">
                   {selectedEnv.git_last_deployed_at
-                    ? new Date(selectedEnv.git_last_deployed_at).toLocaleString()
+                    ? new Date(
+                        selectedEnv.git_last_deployed_at,
+                      ).toLocaleString()
                     : "No record"}
                 </span>
               </div>
@@ -500,7 +530,10 @@ export function GitDeployTab({
                 Deployment Execution #{activeJobExecutionId}
               </span>
               {isDeploying && (
-                <Badge variant="secondary" className="gap-1 animate-pulse text-xs">
+                <Badge
+                  variant="secondary"
+                  className="gap-1 animate-pulse text-xs"
+                >
                   <Loader2 className="h-3 w-3 animate-spin" />
                   In Progress
                 </Badge>
@@ -537,7 +570,7 @@ export function GitDeployTab({
                     generateTokenMutation.isPending ? "animate-spin" : ""
                   }`}
                 />
-                {selectedEnv.deploy_webhook_token
+                {selectedEnv.has_deploy_webhook_token
                   ? "Regenerate Token"
                   : "Generate Token"}
               </Button>
@@ -579,6 +612,39 @@ export function GitDeployTab({
                   </Button>
                 </div>
 
+                {webhookToken && (
+                  <div className="space-y-1.5">
+                    <Label htmlFor="deploy-webhook-secret">
+                      GitHub webhook secret (shown once)
+                    </Label>
+                    <div className="flex gap-2">
+                      <Input
+                        id="deploy-webhook-secret"
+                        readOnly
+                        type="password"
+                        value={webhookToken}
+                        className="font-mono text-xs h-9"
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-9 shrink-0"
+                        onClick={copyWebhookToken}
+                      >
+                        {copiedWebhookToken ? (
+                          <Check className="h-3.5 w-3.5" />
+                        ) : (
+                          <Copy className="h-3.5 w-3.5" />
+                        )}
+                        <span className="ml-1">
+                          {copiedWebhookToken ? "Copied" : "Copy secret"}
+                        </span>
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
                 <div className="p-3 bg-muted/30 rounded-lg border border-border/30 space-y-1.5 text-muted-foreground text-[11px] leading-relaxed">
                   <p className="font-semibold text-foreground">
                     Quick GitHub Setup:
@@ -592,6 +658,10 @@ export function GitDeployTab({
                     <li>
                       Paste Payload URL, set Content type to{" "}
                       <code>application/json</code>.
+                    </li>
+                    <li>
+                      Paste the shown token into GitHub&apos;s{" "}
+                      <strong>Secret</strong> field.
                     </li>
                     <li>
                       Select <strong>Just the push event</strong> and save.
@@ -641,7 +711,8 @@ export function GitDeployTab({
               </Button>
             </div>
             <CardDescription className="text-xs">
-              Add this public SSH key to your GitHub repository for private repo access.
+              Add this public SSH key to your GitHub repository for private repo
+              access.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3 pt-1 text-xs">
@@ -684,7 +755,8 @@ export function GitDeployTab({
                       <strong>Add deploy key</strong>.
                     </li>
                     <li>
-                      Title: <code>Bedrock Forge ({selectedEnv.server.name})</code>
+                      Title:{" "}
+                      <code>Bedrock Forge ({selectedEnv.server.name})</code>
                     </li>
                     <li>
                       Paste the key above and click <strong>Add key</strong>.

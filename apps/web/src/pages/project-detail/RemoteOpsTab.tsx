@@ -362,7 +362,7 @@ export function RemoteOpsTab({
       setTouchName("");
       void filesQuery.refetch();
     },
-    onError: (err: any) => {
+    onError: (err) => {
       toast({
         title: "Creation Failed",
         description: err?.message || "Failed to create remote path",

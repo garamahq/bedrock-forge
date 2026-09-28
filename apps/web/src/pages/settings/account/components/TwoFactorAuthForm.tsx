@@ -25,6 +25,7 @@ export function TwoFactorAuthForm() {
     qrCodeDataUrl: string;
   } | null>(null);
   const [verificationCode, setVerificationCode] = useState("");
+  const [disableCode, setDisableCode] = useState("");
   const [copied, setCopied] = useState(false);
 
   const setupMutation = useSetupMfaMutation();
@@ -70,7 +71,9 @@ export function TwoFactorAuthForm() {
       <CardHeader className="bg-muted/40 pb-4">
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <div className={`p-2 rounded-lg ${isEnabled ? "bg-emerald-500/10 text-emerald-500" : "bg-primary/10 text-primary"}`}>
+            <div
+              className={`p-2 rounded-lg ${isEnabled ? "bg-emerald-500/10 text-emerald-500" : "bg-primary/10 text-primary"}`}
+            >
               {isEnabled ? (
                 <ShieldCheck className="h-5 w-5" />
               ) : (
@@ -79,7 +82,9 @@ export function TwoFactorAuthForm() {
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <CardTitle className="text-lg">Two-Factor Authentication (2FA)</CardTitle>
+                <CardTitle className="text-lg">
+                  Two-Factor Authentication (2FA)
+                </CardTitle>
                 <Badge variant={isEnabled ? "success" : "secondary"}>
                   {isEnabled ? "Enabled" : "Disabled"}
                 </Badge>
@@ -97,25 +102,54 @@ export function TwoFactorAuthForm() {
           <div className="space-y-4">
             <div className="p-4 bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-900/40 rounded-xl">
               <p className="text-sm text-emerald-800 dark:text-emerald-300">
-                Your account is currently protected by two-factor authentication.
-                You will be prompted for a verification code from your authenticator app
-                every time you sign in.
+                Your account is currently protected by two-factor
+                authentication. You will be prompted for a verification code
+                from your authenticator app every time you sign in.
               </p>
             </div>
-            <Button
-              variant="destructive"
-              onClick={() => disableMutation.mutate()}
-              disabled={disableMutation.isPending}
+            <form
+              className="space-y-3 max-w-sm"
+              onSubmit={(event) => {
+                event.preventDefault();
+                disableMutation.mutate(disableCode, {
+                  onSuccess: () => setDisableCode(""),
+                });
+              }}
             >
-              {disableMutation.isPending ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Disabling…
-                </>
-              ) : (
-                "Disable 2FA"
-              )}
-            </Button>
+              <div className="space-y-1.5">
+                <Label htmlFor="mfa-disable-code">
+                  Enter your current authenticator code to disable 2FA
+                </Label>
+                <Input
+                  id="mfa-disable-code"
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  pattern="[0-9]*"
+                  maxLength={6}
+                  placeholder="000000"
+                  value={disableCode}
+                  onChange={(event) =>
+                    setDisableCode(event.target.value.replace(/\D/g, ""))
+                  }
+                  className="bg-muted/20 text-center text-lg tracking-widest font-mono"
+                />
+              </div>
+              <Button
+                type="submit"
+                variant="destructive"
+                disabled={disableCode.length !== 6 || disableMutation.isPending}
+              >
+                {disableMutation.isPending ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Disabling…
+                  </>
+                ) : (
+                  "Disable 2FA"
+                )}
+              </Button>
+            </form>
           </div>
         ) : setupData ? (
           <div className="space-y-6">
@@ -131,12 +165,15 @@ export function TwoFactorAuthForm() {
                 <div className="space-y-1">
                   <h3 className="text-sm font-semibold">1. Scan the QR Code</h3>
                   <p className="text-xs text-muted-foreground">
-                    Scan the QR code using Google Authenticator, Authy, or another TOTP application.
+                    Scan the QR code using Google Authenticator, Authy, or
+                    another TOTP application.
                   </p>
                 </div>
 
                 <div className="space-y-1">
-                  <h3 className="text-sm font-semibold">2. Or enter the secret manually</h3>
+                  <h3 className="text-sm font-semibold">
+                    2. Or enter the secret manually
+                  </h3>
                   <div className="flex items-center gap-2 max-w-sm mt-1.5">
                     <code className="flex-1 bg-muted px-3 py-1.5 rounded-lg text-xs font-mono select-all truncate border">
                       {setupData.secret}
@@ -161,7 +198,10 @@ export function TwoFactorAuthForm() {
 
             <hr className="border-muted" />
 
-            <form onSubmit={handleVerifyAndEnable} className="space-y-4 max-w-sm">
+            <form
+              onSubmit={handleVerifyAndEnable}
+              className="space-y-4 max-w-sm"
+            >
               <div className="space-y-1.5">
                 <Label htmlFor="mfa-verify">3. Enter verification code</Label>
                 <div className="flex gap-2">
@@ -212,9 +252,10 @@ export function TwoFactorAuthForm() {
         ) : (
           <div className="space-y-4">
             <p className="text-sm text-muted-foreground">
-              Add an additional layer of security to your operator account by enabling
-              two-factor authentication. Once enabled, you will need to enter a 6-digit TOTP
-              code in addition to your username and password when logging in.
+              Add an additional layer of security to your operator account by
+              enabling two-factor authentication. Once enabled, you will need to
+              enter a 6-digit TOTP code in addition to your username and
+              password when logging in.
             </p>
             <Button
               onClick={handleStartSetup}

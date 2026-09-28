@@ -58,6 +58,11 @@ const STATUS_CLASSES: Record<FindingStatus, string> = {
   false_positive: "bg-purple-500/10 text-purple-400 border-purple-500/30",
 };
 
+type FindingListItem = SecurityFindingItem & {
+  server_name?: string | null;
+  project_name?: string | null;
+};
+
 export function FindingsTab({
   servers,
   environments,
@@ -90,7 +95,7 @@ export function FindingsTab({
     params.set("environment_id", sourceFilter.slice(12));
 
   const { data, isFetching } = useQuery<{
-    data: any[];
+    data: FindingListItem[];
     total: number;
     page: number;
     limit: number;
@@ -105,7 +110,7 @@ export function FindingsTab({
       searchQuery,
       page,
     ],
-    queryFn: () => api.get(`/security/findings?${params}`),
+    queryFn: () => api.get<{ data: FindingListItem[]; total: number; page: number; limit: number; totalPages: number }>(`/security/findings?${params}`),
   });
 
   const toggleSev = (s: Severity) => {
@@ -115,15 +120,15 @@ export function FindingsTab({
     setPage(1);
   };
 
-  const quickStatusMutation = useMutation({
+  const quickStatusMutation = useMutation<{ status?: FindingStatus }, Error, { id: number; status: FindingStatus }>({
     mutationFn: ({ id, status }: { id: number; status: FindingStatus }) =>
       api.post(`/security/findings/${id}/transition`, { status }),
-    onSuccess: (res: any) => {
+    onSuccess: (res) => {
       toast({ title: `Finding marked as ${res?.status || "updated"}` });
       void queryClient.invalidateQueries({ queryKey: ["security", "findings"] });
       void queryClient.invalidateQueries({ queryKey: ["security", "overview"] });
     },
-    onError: (err: any) =>
+    onError: (err) =>
       toast({
         title: "Failed to update finding",
         description: err.message,
@@ -278,7 +283,7 @@ export function FindingsTab({
 
       {/* Findings List */}
       <div className="space-y-2.5">
-        {data?.data.map((item: any) => {
+        {data?.data.map((item) => {
           const findingId = item.id;
           const severity = (item.severity || "info") as Severity;
           const status = (item.status || "new") as FindingStatus;
@@ -424,7 +429,7 @@ export function FindingsTab({
         findingId={selectedFindingId}
         onClose={() => setSelectedFindingId(null)}
         onRemediateClick={(f) => {
-          setRemediatingFinding(f as any);
+          setRemediatingFinding(f);
         }}
       />
 

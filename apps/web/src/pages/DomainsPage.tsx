@@ -161,8 +161,9 @@ function SslBadge({ sslExpiresAt }: { sslExpiresAt: string | null }) {
 
 export function DomainsPage() {
   const qc = useQueryClient();
-  const role = useAuthStore((s) => s.user?.roles?.[0]);
-  const isAdmin = role === "admin";
+  const isAdmin = useAuthStore(
+    (s) => s.user?.roles?.includes("admin") ?? false,
+  );
 
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
@@ -271,7 +272,10 @@ export function DomainsPage() {
       const failed = results.filter((r) => !r.success).length;
       toast({
         title: `WHOIS Refresh queued for ${results.length} domains`,
-        description: failed > 0 ? `Failed for ${failed} domains.` : "All successfully queued.",
+        description:
+          failed > 0
+            ? `Failed for ${failed} domains.`
+            : "All successfully queued.",
         variant: failed === results.length ? "destructive" : "default",
       });
     },
@@ -296,7 +300,10 @@ export function DomainsPage() {
       const failed = results.filter((r) => !r.success).length;
       toast({
         title: `SSL Refresh queued for ${results.length} domains`,
-        description: failed > 0 ? `Failed for ${failed} domains.` : "All successfully queued.",
+        description:
+          failed > 0
+            ? `Failed for ${failed} domains.`
+            : "All successfully queued.",
         variant: failed === results.length ? "destructive" : "default",
       });
     },

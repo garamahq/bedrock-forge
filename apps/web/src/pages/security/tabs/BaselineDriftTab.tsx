@@ -49,7 +49,7 @@ export interface BaselineData {
     id: number;
     category: string;
     key: string;
-    value: any;
+    value: unknown;
     created_at: string;
   }[];
 }
@@ -59,8 +59,8 @@ export interface DriftEventItem {
   category: string;
   key: string;
   change_type: "added" | "removed" | "modified" | string;
-  old_value?: any;
-  new_value?: any;
+  old_value?: unknown;
+  new_value?: unknown;
   detected_at: string;
   finding_id?: number | null;
   server?: { id: number; name: string };
@@ -72,6 +72,13 @@ const CHANGE_TYPE_STYLES: Record<string, string> = {
   removed: "bg-red-500/10 text-red-400 border-red-500/30",
   modified: "bg-amber-500/10 text-amber-400 border-amber-500/30",
 };
+
+function formatDriftValue(value: unknown): string {
+  if (typeof value === "object" && value !== null) {
+    return JSON.stringify(value, null, 2) ?? String(value);
+  }
+  return String(value);
+}
 
 export function BaselineDriftTab({
   servers,
@@ -146,7 +153,7 @@ export function BaselineDriftTab({
         });
       }, 3000);
     },
-    onError: (err: any) => {
+    onError: (err) => {
       toast({
         title: "Failed to capture baseline",
         description: err.message,
@@ -176,7 +183,7 @@ export function BaselineDriftTab({
         void queryClient.invalidateQueries({ queryKey: ["security", "findings"] });
       }, 3000);
     },
-    onError: (err: any) => {
+    onError: (err) => {
       toast({
         title: "Failed to run comparison",
         description: err.message,
@@ -395,7 +402,7 @@ export function BaselineDriftTab({
                 </div>
 
                 {/* Value Details Toggle */}
-                {(event.old_value || event.new_value) && (
+                {(event.old_value !== undefined || event.new_value !== undefined) && (
                   <div>
                     <button
                       type="button"
@@ -415,27 +422,23 @@ export function BaselineDriftTab({
 
                     {isExpanded && (
                       <div className="mt-2.5 grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
-                        {event.old_value && (
+                        {event.old_value !== undefined && (
                           <div className="space-y-1">
                             <span className="text-[11px] font-semibold text-muted-foreground">
                               Baseline Value:
                             </span>
                             <pre className="bg-muted/60 p-2 rounded text-[11px] font-mono overflow-x-auto border border-border/50 text-foreground">
-                              {typeof event.old_value === "object"
-                                ? JSON.stringify(event.old_value, null, 2)
-                                : String(event.old_value)}
+                              {formatDriftValue(event.old_value)}
                             </pre>
                           </div>
                         )}
-                        {event.new_value && (
+                        {event.new_value !== undefined && (
                           <div className="space-y-1">
                             <span className="text-[11px] font-semibold text-muted-foreground">
                               Live Detected Value:
                             </span>
                             <pre className="bg-muted/60 p-2 rounded text-[11px] font-mono overflow-x-auto border border-border/50 text-foreground">
-                              {typeof event.new_value === "object"
-                                ? JSON.stringify(event.new_value, null, 2)
-                                : String(event.new_value)}
+                              {formatDriftValue(event.new_value)}
                             </pre>
                           </div>
                         )}

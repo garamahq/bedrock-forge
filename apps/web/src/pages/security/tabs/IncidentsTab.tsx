@@ -96,7 +96,7 @@ export function IncidentsTab({ servers }: { servers: ServerSummary[] }) {
       void queryClient.invalidateQueries({ queryKey: ["security", "incidents"] });
       void queryClient.invalidateQueries({ queryKey: ["security", "findings"] });
     },
-    onError: (err: any) => {
+    onError: (err) => {
       toast({
         title: "Failed to update status",
         description: err.message,

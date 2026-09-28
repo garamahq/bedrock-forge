@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { Eye, EyeOff, Loader2, Zap } from "lucide-react";
+import { Eye, EyeOff, Loader2 } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { useAuthStore } from "@/store/auth.store";
 import { Button } from "@/components/ui/button";
@@ -35,17 +35,9 @@ export function LoginPage() {
   const {
     register,
     handleSubmit,
-    setValue,
     getValues,
     formState: { errors, isSubmitting },
   } = useForm<FormData>({ resolver: zodResolver(schema) });
-
-  // Fill seed credentials in dev mode only. Values are hardcoded strings — never read
-  // from env vars — so they cannot leak into production bundles via VITE_* inlining.
-  const fillDevCredentials = () => {
-    setValue("email", "admin@example.com");
-    setValue("password", "password");
-  };
 
   const onSubmit = async (data: FormData) => {
     setError("");
@@ -132,7 +124,9 @@ export function LoginPage() {
                     maxLength={6}
                     placeholder="000000"
                     value={mfaCode}
-                    onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, ""))}
+                    onChange={(e) =>
+                      setMfaCode(e.target.value.replace(/\D/g, ""))
+                    }
                     autoFocus
                   />
                 </div>
@@ -143,7 +137,11 @@ export function LoginPage() {
                   </div>
                 )}
 
-                <Button type="submit" className="w-full" disabled={verifyingMfa}>
+                <Button
+                  type="submit"
+                  className="w-full"
+                  disabled={verifyingMfa}
+                >
                   {verifyingMfa ? (
                     <>
                       <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -170,16 +168,6 @@ export function LoginPage() {
               </form>
             ) : (
               <>
-                {import.meta.env.DEV && (
-                  <button
-                    type="button"
-                    onClick={fillDevCredentials}
-                    className="mb-4 w-full flex items-center justify-center gap-2 rounded-md border border-dashed border-amber-400 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700 hover:bg-amber-100 transition-colors dark:border-amber-500 dark:bg-amber-950/30 dark:text-amber-400 dark:hover:bg-amber-950/50"
-                  >
-                    <Zap className="h-3.5 w-3.5" />
-                    Fill seed credentials
-                  </button>
-                )}
                 <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
                   <div className="space-y-1.5">
                     <Label htmlFor="email">Email</Label>
@@ -187,7 +175,7 @@ export function LoginPage() {
                       id="email"
                       {...register("email")}
                       type="email"
-                      placeholder="admin@example.com"
+                      placeholder="admin@bedrockforge.local"
                       autoComplete="email"
                       autoFocus
                     />
@@ -213,7 +201,6 @@ export function LoginPage() {
                         type="button"
                         onClick={() => setShowPassword((v) => !v)}
                         className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
-                        tabIndex={-1}
                       >
                         {showPassword ? (
                           <EyeOff className="h-4 w-4" />
@@ -238,7 +225,11 @@ export function LoginPage() {
                     </div>
                   )}
 
-                  <Button type="submit" className="w-full" disabled={isSubmitting}>
+                  <Button
+                    type="submit"
+                    className="w-full"
+                    disabled={isSubmitting}
+                  >
                     {isSubmitting ? (
                       <>
                         <Loader2 className="mr-2 h-4 w-4 animate-spin" />
