@@ -7,7 +7,7 @@ on:
     branches: [main, develop]
 
 env:
-  NODE_VERSION: '22'
+  NODE_VERSION: "22"
 
 jobs:
   build-and-test:
@@ -58,24 +58,28 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Audit dependencies
+        run: pnpm audit --audit-level=high
+
       - name: Generate Prisma client
         run: pnpm db:generate
 
       - name: Build packages
-        run:
-          pnpm turbo build --filter=@bedrock-forge/shared
+        run: pnpm turbo build --filter=@bedrock-forge/shared
           --filter=@bedrock-forge/remote-executor
 
       - name: Run Prisma migrations
         run: pnpm db:deploy
 
       - name: Build apps
-        run:
-          pnpm turbo build --filter=@bedrock-forge/api
+        run: pnpm turbo build --filter=@bedrock-forge/api
           --filter=@bedrock-forge/worker
 
       - name: Run tests
         run: pnpm turbo test
+
+      - name: Collect web coverage
+        run: pnpm --filter @bedrock-forge/web test:coverage
 
       - name: Upload coverage
         uses: actions/upload-artifact@v4
@@ -84,6 +88,7 @@ jobs:
           name: coverage-reports
           path: |
             apps/api/coverage/
+            apps/web/coverage/
             apps/worker/coverage/
             packages/remote-executor/coverage/
           if-no-files-found: ignore
@@ -112,8 +117,7 @@ jobs:
         run: pnpm db:generate
 
       - name: Build shared packages
-        run:
-          pnpm turbo build --filter=@bedrock-forge/shared
+        run: pnpm turbo build --filter=@bedrock-forge/shared
           --filter=@bedrock-forge/remote-executor
 
       - name: Lint all packages
@@ -145,8 +149,7 @@ jobs:
         run: pnpm db:generate
 
       - name: Build shared packages
-        run:
-          pnpm turbo build --filter=@bedrock-forge/shared
+        run: pnpm turbo build --filter=@bedrock-forge/shared
           --filter=@bedrock-forge/remote-executor
 
       - name: Typecheck frontend
