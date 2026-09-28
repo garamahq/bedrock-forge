@@ -1,4 +1,8 @@
 import { Injectable } from "@nestjs/common";
+import {
+  PluginInfoSchema,
+  PluginScanOutputSchema,
+} from "@bedrock-forge/shared";
 import { SearchRepository } from "./search.repository";
 
 export type SearchResultType =
@@ -11,7 +15,9 @@ export type SearchResultType =
   | "domain"
   | "monitor"
   | "job"
-  | "finding";
+  | "finding"
+  | "plugin"
+  | "theme";
 
 export interface SearchResult {
   type: SearchResultType;
@@ -56,7 +62,7 @@ const STATIC_PAGES: Array<{
   { label: "Lighthouse", path: "/lighthouse", icon: "Gauge" },
   { label: "Activity", path: "/activity", icon: "ClipboardList" },
   {
-    label: "Problems",
+    label: "Work Queue",
     path: "/problems",
     icon: "AlertTriangle",
     minRole: "maintainer",
@@ -115,16 +121,12 @@ const PROJECT_TABS = [
   { value: "files-config", label: "Files & Config", terms: ["files", "env"] },
   { value: "wp-core", label: "WP Core", terms: ["wordpress core", "core"] },
   { value: "security", label: "Security", terms: ["scan", "hardening"] },
-  { value: "activity", label: "Activity", terms: ["jobs", "log"] },
+  {
+    value: "activity",
+    label: "History & Recovery",
+    terms: ["activity", "jobs", "log", "deploy", "version", "changes"],
+  },
 ];
-
-const SEVERITY_WEIGHT: Record<string, number> = {
-  critical: 0,
-  high: 1,
-  medium: 2,
-  low: 3,
-  info: 4,
-};
 
 function normalize(s: string) {
   return s.trim().toLowerCase();
@@ -137,6 +139,48 @@ function roleWeight(roles: string[]) {
 function canSee(roles: string[], minRole?: string) {
   if (!minRole) return true;
   return roleWeight(roles) >= (ROLE_WEIGHT[minRole] ?? Number.MAX_SAFE_INTEGER);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parsePlugins(
+  value: unknown,
+): Array<{ slug: string; name: string; version: string }> {
+  const output = PluginScanOutputSchema.safeParse(value);
+  if (output.success) return output.data.plugins;
+  const legacy = PluginInfoSchema.array().safeParse(value);
+  return legacy.success ? legacy.data : [];
+}
+
+function parseThemes(
+  value: unknown,
+): Array<{ slug: string; name: string; version: string }> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!isRecord(entry)) return [];
+    const slug =
+      typeof entry.slug === "string"
+        ? entry.slug
+        : typeof entry.name === "string"
+          ? entry.name
+          : null;
+    const name =
+      typeof entry.title === "string"
+        ? entry.title
+        : typeof entry.name === "string"
+          ? entry.name
+          : slug;
+    if (!slug || !name) return [];
+    return [
+      {
+        slug,
+        name,
+        version: typeof entry.version === "string" ? entry.version : "",
+      },
+    ];
+  });
 }
 
 @Injectable()
@@ -167,6 +211,7 @@ export class SearchService {
         monitors,
         jobs,
         clients,
+        inventoryScans,
       ] = await Promise.all([
         this.searchProjects(q, take),
         this.searchEnvironments(q, take),
@@ -175,6 +220,7 @@ export class SearchService {
         this.searchMonitors(q, take),
         this.searchJobs(q, take),
         this.searchClients(q, take),
+        q ? this.repo.findLatestInventoryScans() : Promise.resolve([]),
       ]);
       const findings = await this.searchFindings(q, take);
 
@@ -187,6 +233,7 @@ export class SearchService {
       results.push(...jobs);
       results.push(...findings);
       results.push(...clients);
+      results.push(...this.searchInventory(q, inventoryScans, take));
     }
 
     return {
@@ -219,7 +266,10 @@ export class SearchService {
       type: "client",
       id: String(client.id),
       label: client.name,
-      subtitle: client.email ?? "Client",
+      subtitle:
+        [client.email, ...client.client_tags.map(({ tag }) => tag.name)]
+          .filter(Boolean)
+          .join(" · ") || "Client",
       path: `/clients/${client.id}`,
       icon: "Users",
     }));
@@ -254,7 +304,11 @@ export class SearchService {
       type: "environment",
       id: String(environment.id),
       label: `${environment.project.name} · ${environment.type}`,
-      subtitle: [environment.url, environment.server.name]
+      subtitle: [
+        environment.url,
+        environment.server.name,
+        ...environment.environment_tags.map(({ tag }) => tag.name),
+      ]
         .filter(Boolean)
         .join(" · "),
       path: `/projects/${environment.project.id}?tab=environments&env=${environment.id}`,
@@ -365,70 +419,37 @@ export class SearchService {
     take: number,
   ): Promise<SearchResult[]> {
     if (!q) return [];
-    const scans = await this.repo.findLatestSecurityScansWithFindings(take * 4);
-    const findings = scans.flatMap((scan) => {
-      const raw = Array.isArray(scan.findings) ? scan.findings : [];
-      return raw.map((finding) => ({
-        scan,
-        finding: finding as {
-          id?: string;
-          severity?: string;
-          category?: string;
-          title?: string;
-          description?: string;
-          resource?: string;
-        },
-      }));
-    });
-
-    return findings
-      .filter(({ finding }) => {
-        const haystack = [
-          finding.title,
-          finding.category,
-          finding.description,
-          finding.resource,
+    const findings = await this.repo.findSecurityFindings(q, take);
+    return findings.map((finding) => {
+      const environment = finding.environment;
+      const target = environment
+        ? `${environment.project.name} / ${environment.type}`
+        : finding.server?.name;
+      const environmentId = environment ? Number(environment.id) : null;
+      return {
+        type: "finding" as const,
+        id: String(finding.id),
+        label: finding.title,
+        subtitle: [
+          finding.severity.toUpperCase(),
+          finding.category.replace(/_/g, " "),
+          finding.status.replace(/_/g, " "),
+          target,
         ]
           .filter(Boolean)
-          .join(" ")
-          .toLowerCase();
-        return haystack.includes(q);
-      })
-      .sort(
-        (a, b) =>
-          (SEVERITY_WEIGHT[a.finding.severity ?? "info"] ?? 99) -
-          (SEVERITY_WEIGHT[b.finding.severity ?? "info"] ?? 99),
-      )
-      .slice(0, take)
-      .map(({ scan, finding }) => {
-        const target = scan.environment
-          ? `${scan.environment.project.name} / ${scan.environment.type}`
-          : scan.server?.name;
-        const environmentId = scan.environment
-          ? Number(scan.environment.id)
-          : null;
-        return {
-          type: "finding" as const,
-          id: `${scan.id}:${finding.id ?? finding.title}`,
-          label: finding.title ?? "Security finding",
-          subtitle: [
-            finding.severity?.toUpperCase(),
-            finding.category?.replace(/_/g, " "),
-            target,
-          ]
-            .filter(Boolean)
-            .join(" · "),
-          path: environmentId
-            ? `/projects/${scan.environment!.project.id}?tab=security&env=${environmentId}`
-            : "/security?tab=findings",
-          icon: "ShieldAlert",
-          meta: {
-            severity: finding.severity ?? null,
-            scanType: scan.scan_type,
-            environmentId,
-          },
-        };
-      });
+          .join(" · "),
+        path: environment
+          ? `/projects/${environment.project.id}?tab=security&env=${environment.id}`
+          : "/security?tab=findings",
+        icon: "ShieldAlert",
+        meta: {
+          severity: finding.severity,
+          status: finding.status,
+          environmentId,
+          resource: finding.resource,
+        },
+      };
+    });
   }
 
   private searchProjectTabs(
@@ -459,5 +480,54 @@ export class SearchService {
         meta: { projectId, tab: tab.value },
       }));
     });
+  }
+
+  private searchInventory(
+    q: string,
+    scans: Awaited<ReturnType<SearchRepository["findLatestInventoryScans"]>>,
+    take: number,
+  ): SearchResult[] {
+    const needle = q.toLowerCase();
+    const plugins: SearchResult[] = [];
+    const themes: SearchResult[] = [];
+
+    for (const scan of scans) {
+      const environmentId = Number(scan.id);
+      const projectId = Number(scan.project.id);
+      const pluginScanDate = scan.plugin_scans[0]?.scanned_at
+        .toISOString()
+        .slice(0, 10);
+      const themeScanDate = scan.theme_scans[0]?.scanned_at
+        .toISOString()
+        .slice(0, 10);
+      for (const plugin of parsePlugins(scan.plugin_scans[0]?.plugins)) {
+        if (!`${plugin.name} ${plugin.slug}`.toLowerCase().includes(needle))
+          continue;
+        plugins.push({
+          type: "plugin",
+          id: `${environmentId}:${plugin.slug}`,
+          label: plugin.name,
+          subtitle: `${scan.project.name} · ${scan.type} · ${scan.url}${plugin.version ? ` · v${plugin.version}` : ""}${pluginScanDate ? ` · scanned ${pluginScanDate}` : ""}`,
+          path: `/projects/${projectId}?tab=plugins&env=${environmentId}`,
+          icon: "Puzzle",
+          meta: { projectId, environmentId, slug: plugin.slug },
+        });
+      }
+      for (const theme of parseThemes(scan.theme_scans[0]?.themes)) {
+        if (!`${theme.name} ${theme.slug}`.toLowerCase().includes(needle))
+          continue;
+        themes.push({
+          type: "theme",
+          id: `${environmentId}:${theme.slug}`,
+          label: theme.name,
+          subtitle: `${scan.project.name} · ${scan.type} · ${scan.url}${theme.version ? ` · v${theme.version}` : ""}${themeScanDate ? ` · scanned ${themeScanDate}` : ""}`,
+          path: `/projects/${projectId}?tab=themes&env=${environmentId}`,
+          icon: "Palette",
+          meta: { projectId, environmentId, slug: theme.slug },
+        });
+      }
+    }
+
+    return [...plugins.slice(0, take), ...themes.slice(0, take)];
   }
 }

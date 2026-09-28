@@ -14,7 +14,8 @@ describe("SearchService", () => {
       findDomains: jest.fn(),
       findMonitors: jest.fn(),
       findJobs: jest.fn(),
-      findLatestSecurityScansWithFindings: jest.fn(),
+      findSecurityFindings: jest.fn(),
+      findLatestInventoryScans: jest.fn(),
     } as unknown as jest.Mocked<SearchRepository>;
     repo.findClients.mockResolvedValue([]);
     repo.findProjects.mockResolvedValue([]);
@@ -23,7 +24,8 @@ describe("SearchService", () => {
     repo.findDomains.mockResolvedValue([]);
     repo.findMonitors.mockResolvedValue([]);
     repo.findJobs.mockResolvedValue([]);
-    repo.findLatestSecurityScansWithFindings.mockResolvedValue([]);
+    repo.findSecurityFindings.mockResolvedValue([]);
+    repo.findLatestInventoryScans.mockResolvedValue([]);
     service = new SearchService(repo);
   });
 
@@ -55,6 +57,7 @@ describe("SearchService", () => {
         url: "https://acme.test",
         project: { id: BigInt(7), name: "Acme Site" },
         server: { name: "prod-1" },
+        environment_tags: [],
       },
     ]);
     repo.findServers.mockResolvedValue([
@@ -101,7 +104,12 @@ describe("SearchService", () => {
       },
     ]);
     repo.findClients.mockResolvedValue([
-      { id: BigInt(5), name: "Acme", email: "ops@example.com" },
+      {
+        id: BigInt(5),
+        name: "Acme",
+        email: "ops@example.com",
+        client_tags: [],
+      },
     ]);
 
     const result = await service.search({
@@ -174,27 +182,25 @@ describe("SearchService", () => {
   });
 
   it("returns matching security findings", async () => {
-    repo.findLatestSecurityScansWithFindings.mockResolvedValue([
+    repo.findSecurityFindings.mockResolvedValue([
       {
         id: BigInt(22),
-        scan_type: "WP_AUDIT",
-        findings: [
-          {
-            id: "composer",
-            severity: "critical",
-            category: "VERSION_DISCLOSURE",
-            title: "composer.json is publicly accessible",
-            description: "Package metadata is exposed.",
-            resource: "/app/composer.json",
-          },
-        ],
+        severity: "critical",
+        status: "new",
+        category: "VERSION_DISCLOSURE",
+        title: "composer.json is publicly accessible",
+        description: "Package metadata is exposed.",
+        resource: "/app/composer.json",
         server: null,
         environment: {
           id: BigInt(11),
           type: "staging",
+          url: "https://acme.test",
           project: { id: BigInt(7), name: "Acme Site" },
         },
-      },
+      } as Awaited<
+        ReturnType<SearchRepository["findSecurityFindings"]>
+      >[number],
     ]);
 
     const result = await service.search({
@@ -208,6 +214,90 @@ describe("SearchService", () => {
         expect.objectContaining({
           type: "finding",
           path: "/projects/7?tab=security&env=11",
+        }),
+      ]),
+    );
+  });
+
+  it("searches installed plugin and theme inventories", async () => {
+    repo.findLatestInventoryScans.mockResolvedValue([
+      {
+        id: BigInt(11),
+        type: "production",
+        url: "https://acme.test",
+        project: { id: BigInt(7), name: "Acme Site" },
+        plugin_scans: [
+          {
+            plugins: {
+              is_bedrock: true,
+              plugins: [
+                {
+                  slug: "elementor",
+                  name: "Elementor",
+                  version: "3.25.0",
+                  latest_version: "3.25.1",
+                  update_available: true,
+                  author: "Elementor",
+                  plugin_uri: null,
+                  description: null,
+                  managed_by_composer: false,
+                  composer_constraint: null,
+                  status: "active",
+                },
+              ],
+            },
+            scanned_at: new Date("2026-09-01T00:00:00.000Z"),
+          },
+        ],
+        theme_scans: [
+          {
+            themes: [
+              {
+                name: "generatepress",
+                slug: "generatepress",
+                title: "GeneratePress",
+                status: "active",
+                version: "3.5.1",
+                update_version: null,
+                update: "none",
+                description: null,
+                author: "Tom",
+              },
+            ],
+            scanned_at: new Date("2026-09-01T00:00:00.000Z"),
+          },
+        ],
+      },
+    ] as unknown as Awaited<
+      ReturnType<SearchRepository["findLatestInventoryScans"]>
+    >);
+
+    const pluginResults = await service.search({
+      query: "Elementor",
+      roles: ["manager"],
+      limit: 8,
+    });
+    const themeResults = await service.search({
+      query: "GeneratePress",
+      roles: ["manager"],
+      limit: 8,
+    });
+
+    expect(pluginResults.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "plugin",
+          label: "Elementor",
+          path: "/projects/7?tab=plugins&env=11",
+        }),
+      ]),
+    );
+    expect(themeResults.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "theme",
+          label: "GeneratePress",
+          path: "/projects/7?tab=themes&env=11",
         }),
       ]),
     );

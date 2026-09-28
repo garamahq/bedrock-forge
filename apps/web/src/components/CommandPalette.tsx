@@ -17,6 +17,8 @@ import {
   LayoutDashboard,
   Loader2,
   Package,
+  Palette,
+  Puzzle,
   Search,
   Server,
   Settings,
@@ -45,7 +47,9 @@ type SearchResultType =
   | "domain"
   | "monitor"
   | "job"
-  | "finding";
+  | "finding"
+  | "plugin"
+  | "theme";
 
 interface SearchResult {
   type: SearchResultType;
@@ -71,6 +75,8 @@ const ICONS: Record<string, LucideIcon> = {
   HardDrive,
   LayoutDashboard,
   Package,
+  Palette,
+  Puzzle,
   Search,
   Server,
   Settings,
@@ -91,6 +97,8 @@ const TYPE_LABELS: Record<SearchResultType, string> = {
   monitor: "Monitors",
   job: "Jobs",
   finding: "Findings",
+  plugin: "Installed Plugins",
+  theme: "Installed Themes",
 };
 
 const TYPE_TONES: Record<SearchResultType, string> = {
@@ -104,6 +112,8 @@ const TYPE_TONES: Record<SearchResultType, string> = {
   monitor: "text-success",
   job: "text-primary",
   finding: "text-destructive",
+  plugin: "text-primary",
+  theme: "text-info",
 };
 
 const RECENTS_KEY = "bf-command-palette-recents";
@@ -193,7 +203,7 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Search pages, projects, environments, tabs…"
+            placeholder="Search sites, plugins, themes, findings, jobs…"
             className="flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
           />
           {isFetching && (

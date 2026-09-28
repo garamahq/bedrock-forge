@@ -2,6 +2,29 @@ import { Injectable } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 
+const SECURITY_FINDING_SEARCH_SELECT = {
+  id: true,
+  severity: true,
+  status: true,
+  category: true,
+  title: true,
+  description: true,
+  resource: true,
+  server: { select: { name: true } },
+  environment: {
+    select: {
+      id: true,
+      type: true,
+      url: true,
+      project: { select: { id: true, name: true } },
+    },
+  },
+} satisfies Prisma.SecurityFindingSelect;
+
+type SecurityFindingSearchResult = Prisma.SecurityFindingGetPayload<{
+  select: typeof SECURITY_FINDING_SEARCH_SELECT;
+}>;
+
 @Injectable()
 export class SearchRepository {
   constructor(private readonly prisma: PrismaService) {}
@@ -12,11 +35,21 @@ export class SearchRepository {
         OR: [
           { name: { contains: q, mode: "insensitive" } },
           { email: { contains: q, mode: "insensitive" } },
+          {
+            client_tags: {
+              some: { tag: { name: { contains: q, mode: "insensitive" } } },
+            },
+          },
         ],
       },
       orderBy: { name: "asc" },
       take,
-      select: { id: true, name: true, email: true },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        client_tags: { select: { tag: { select: { name: true } } } },
+      },
     });
   }
 
@@ -26,7 +59,20 @@ export class SearchRepository {
         { name: { contains: q, mode: "insensitive" } },
         { client: { name: { contains: q, mode: "insensitive" } } },
         {
-          environments: { some: { url: { contains: q, mode: "insensitive" } } },
+          environments: {
+            some: {
+              OR: [
+                { url: { contains: q, mode: "insensitive" } },
+                {
+                  environment_tags: {
+                    some: {
+                      tag: { name: { contains: q, mode: "insensitive" } },
+                    },
+                  },
+                },
+              ],
+            },
+          },
         },
       ],
     };
@@ -53,6 +99,11 @@ export class SearchRepository {
           { root_path: { contains: q, mode: "insensitive" } },
           { project: { name: { contains: q, mode: "insensitive" } } },
           { server: { name: { contains: q, mode: "insensitive" } } },
+          {
+            environment_tags: {
+              some: { tag: { name: { contains: q, mode: "insensitive" } } },
+            },
+          },
         ],
       },
       orderBy: [{ project: { name: "asc" } }, { type: "asc" }],
@@ -63,6 +114,7 @@ export class SearchRepository {
         url: true,
         project: { select: { id: true, name: true } },
         server: { select: { name: true } },
+        environment_tags: { select: { tag: { select: { name: true } } } },
       },
     });
   }
@@ -162,25 +214,59 @@ export class SearchRepository {
     });
   }
 
-  findLatestSecurityScansWithFindings(take: number) {
-    return this.prisma.securityScan.findMany({
+  findSecurityFindings(
+    q: string,
+    take: number,
+  ): Prisma.PrismaPromise<SecurityFindingSearchResult[]> {
+    const numericId = /^\d+$/.test(q) ? BigInt(q) : undefined;
+
+    return this.prisma.securityFinding.findMany({
       where: {
-        status: "completed",
-        findings: { not: Prisma.JsonNull },
+        OR: [
+          ...(numericId ? [{ id: numericId }] : []),
+          { title: { contains: q, mode: "insensitive" } },
+          { description: { contains: q, mode: "insensitive" } },
+          { category: { contains: q, mode: "insensitive" } },
+          { resource: { contains: q, mode: "insensitive" } },
+          { server: { name: { contains: q, mode: "insensitive" } } },
+          {
+            environment: {
+              OR: [
+                { url: { contains: q, mode: "insensitive" } },
+                { type: { contains: q, mode: "insensitive" } },
+                {
+                  project: {
+                    name: { contains: q, mode: "insensitive" },
+                  },
+                },
+              ],
+            },
+          },
+        ],
       },
-      orderBy: { completed_at: "desc" },
+      orderBy: { last_seen_at: "desc" },
       take,
+      select: SECURITY_FINDING_SEARCH_SELECT,
+    });
+  }
+
+  findLatestInventoryScans() {
+    return this.prisma.environment.findMany({
+      orderBy: { created_at: "desc" },
       select: {
         id: true,
-        scan_type: true,
-        findings: true,
-        server: { select: { id: true, name: true } },
-        environment: {
-          select: {
-            id: true,
-            type: true,
-            project: { select: { id: true, name: true } },
-          },
+        type: true,
+        url: true,
+        project: { select: { id: true, name: true } },
+        plugin_scans: {
+          orderBy: { scanned_at: "desc" },
+          take: 1,
+          select: { plugins: true, scanned_at: true },
+        },
+        theme_scans: {
+          orderBy: { scanned_at: "desc" },
+          take: 1,
+          select: { themes: true, scanned_at: true },
         },
       },
     });
