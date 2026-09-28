@@ -1,4 +1,6 @@
 #!/bin/bash
+set -Eeuo pipefail
+
 # deploy.sh — Build locally, ship images to server, deploy Bedrock Forge.
 #
 # Usage:
@@ -89,7 +91,7 @@ done
 
 echo ""
 echo "╔════════════════════════════════════════════╗"
-echo "║    Bedrock Forge — Production Deploy        ║"
+echo "║    Bedrock Forge — Deployment               ║"
 echo "╚════════════════════════════════════════════╝"
 echo ""
 info "Target    : ${SERVER_USER}@${SERVER_HOST}:${SERVER_PATH}"
@@ -480,6 +482,6 @@ run_remote_cleanup
 
 ok "Deployment finished"
 echo ""
-echo "   Production URL → ${DOMAIN}"
+echo "   Deployment URL → ${DOMAIN}"
 echo "   Image tag      → ${IMAGE_TAG}"
 echo ""

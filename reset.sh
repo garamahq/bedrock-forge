@@ -34,6 +34,7 @@ if [ -f .env ]; then
   rm -f .env
 fi
 generate_env_file
+"$SCRIPT_DIR/doctor.sh"
 
 # ── Build & start ─────────────────────────────────────────────────────────────
 echo "Building image…"
@@ -47,12 +48,15 @@ wait_for_api_healthy 3001 40
 
 # ── Seed ──────────────────────────────────────────────────────────────────────
 echo "Seeding database…"
-docker compose exec forge node prisma/seed.js
+bootstrap_admin_password="$(openssl rand -hex 24)"
+docker compose exec -T forge sh -c 'IFS= read -r ADMIN_BOOTSTRAP_PASSWORD; export ADMIN_BOOTSTRAP_PASSWORD; exec node prisma/seed.js' <<< "$bootstrap_admin_password"
 
 echo ""
 echo "Reset complete. Fresh installation ready."
 echo "   → http://localhost:3001"
-echo "   Admin: admin@bedrockforge.local / admin123"
+echo "   Admin: admin@bedrockforge.local"
+echo "   Initial password (shown once): $bootstrap_admin_password"
+echo "   Change this password after your first login."
 echo ""
 echo "   NOTE: All previous data, sessions, and SSH keys have been wiped."
 echo "         Encryption key has been rotated — re-enter any stored credentials."

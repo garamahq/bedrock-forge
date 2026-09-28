@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/tools/setup-helpers.sh"
 
 # Run Setup Doctor to validate environment prerequisites
-"$SCRIPT_DIR/doctor.sh"
+"$SCRIPT_DIR/doctor.sh" development
 
 echo "╔══════════════════════════════════════════╗"
 echo "║   Bedrock Forge — Local Dev Launcher     ║"

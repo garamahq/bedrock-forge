@@ -23,7 +23,7 @@ verify_prereq() {
   command -v "$cmd" >/dev/null 2>&1 || { echo "ERROR: $msg"; exit 1; }
 }
 
-# Generate .env with randomized secrets if it does not exist
+# Generate .env with randomized secrets, replacing template values as needed.
 generate_env_file() {
   if [ ! -f .env ]; then
     echo "Generating .env from .env.example…"
@@ -33,25 +33,33 @@ generate_env_file() {
     fi
     cp .env.example .env
 
-    # Generate cryptographically secure random strings
-    ENCRYPTION_KEY=$(openssl rand -hex 32)
-    JWT_SECRET=$(openssl rand -hex 32)
-    JWT_REFRESH_SECRET=$(openssl rand -hex 32)
-    POSTGRES_PASSWORD=$(openssl rand -hex 16)
-    REDIS_PASSWORD=$(openssl rand -hex 16)
+  else
+    echo ".env already exists — preserving configured values and replacing template secrets."
+  fi
 
-    set_env_value ENCRYPTION_KEY "$ENCRYPTION_KEY"
-    set_env_value JWT_SECRET "$JWT_SECRET"
-    set_env_value JWT_REFRESH_SECRET "$JWT_REFRESH_SECRET"
+  # Replace only known template values; preserve operator-provided credentials.
+  if grep -q '^ENCRYPTION_KEY=change_me' .env; then
+    set_env_value ENCRYPTION_KEY "$(openssl rand -hex 32)"
+  fi
+  if grep -q '^JWT_SECRET=change_me' .env; then
+    set_env_value JWT_SECRET "$(openssl rand -hex 32)"
+  fi
+  if grep -q '^JWT_REFRESH_SECRET=change_me' .env || grep -q '^JWT_REFRESH_SECRET=$' .env; then
+    set_env_value JWT_REFRESH_SECRET "$(openssl rand -hex 32)"
+  fi
+  if grep -q '^POSTGRES_PASSWORD=\(change_me\|forge_password\)' .env; then
+    POSTGRES_PASSWORD="$(openssl rand -hex 16)"
     set_env_value POSTGRES_PASSWORD "$POSTGRES_PASSWORD"
     set_env_value DATABASE_URL "postgresql://forge:${POSTGRES_PASSWORD}@postgres:5432/bedrock_forge"
+  fi
+  if grep -q '^REDIS_PASSWORD=\(change_me\|forge_password\)' .env; then
+    REDIS_PASSWORD="$(openssl rand -hex 16)"
     set_env_value REDIS_PASSWORD "$REDIS_PASSWORD"
     set_env_value REDIS_URL "redis://:${REDIS_PASSWORD}@redis:6379"
-
-    echo "Secrets written to .env"
-  else
-    echo ".env already exists — skipping generation."
   fi
+
+  chmod 600 .env
+  echo "Environment configuration is ready."
 }
 
 # Poll the API health endpoint until it responds with success
