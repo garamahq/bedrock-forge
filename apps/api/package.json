@@ -4,11 +4,11 @@
   "private": true,
   "scripts": {
     "build": "nest build",
-    "dev": "nest start --watch",
-    "start": "node dist/main.js",
+    "dev": "node ../../tools/with-msgpackr-native-disabled.cjs nest start --watch",
+    "start": "node ../../tools/with-msgpackr-native-disabled.cjs node dist/main.js",
     "lint": "tsc --noEmit",
-    "test": "jest --passWithNoTests",
-    "test:cov": "jest --coverage",
+    "test": "node ../../tools/with-msgpackr-native-disabled.cjs jest --passWithNoTests --maxWorkers=2",
+    "test:cov": "node ../../tools/with-msgpackr-native-disabled.cjs jest --coverage --maxWorkers=2",
     "clean": "rm -rf dist"
   },
   "dependencies": {
@@ -44,7 +44,7 @@
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
     "pg": "^8.13.0",
-    "puppeteer-core": "24.43.1",
+    "puppeteer-core": "^25.12.0",
     "qrcode": "^1.5.4",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",

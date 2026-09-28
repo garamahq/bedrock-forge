@@ -19,6 +19,7 @@
     "build": "turbo run build",
     "test": "turbo run test",
     "lint": "turbo run lint",
+    "verify": "turbo run lint && turbo run test --concurrency=2",
     "format": "prettier --write \"**/*.{ts,tsx,json,md}\"",
     "db:generate": "prisma generate --schema=prisma/schema.prisma",
     "db:migrate": "prisma migrate dev --schema=prisma/schema.prisma",
@@ -36,7 +37,7 @@
     "docker:logs": "docker compose logs -f forge",
     "docker:logs:all": "docker compose logs -f",
     "docker:shell": "docker compose exec forge sh",
-    "docker:seed": "docker compose exec forge node prisma/seed.js",
+    "docker:seed": "docker compose exec -e ADMIN_BOOTSTRAP_PASSWORD forge node prisma/seed.js",
     "docker:migrate": "docker compose exec forge npx prisma migrate deploy --schema=prisma/schema.prisma"
   },
   "prisma": {
@@ -53,7 +54,6 @@
     "@types/bcryptjs": "^2.4.6",
     "@types/node": "^22.10.7",
     "prettier": "^3.4.2",
-    "puppeteer": "^25.2.1",
     "ts-node": "^10.9.2",
     "turbo": "^2.3.3",
     "typescript": "^5.7.2"
@@ -62,5 +62,11 @@
     "node": ">=22.0.0",
     "pnpm": ">=9.0.0"
   },
-  "packageManager": "pnpm@9.15.4"
+  "packageManager": "pnpm@9.15.4",
+  "pnpm": {
+    "overrides": {
+      "deepmerge-ts": "^8.0.2",
+      "mysql2": "^3.24.4"
+    }
+  }
 }

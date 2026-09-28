@@ -5,9 +5,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "lint": "tsc --noEmit",
-    "start": "node dist/main.js",
-    "dev": "ts-node -r tsconfig-paths/register src/main.ts",
-    "test": "jest --passWithNoTests"
+    "start": "node ../../tools/with-msgpackr-native-disabled.cjs node dist/main.js",
+    "dev": "node ../../tools/with-msgpackr-native-disabled.cjs ts-node -r tsconfig-paths/register src/main.ts",
+    "test": "node ../../tools/with-msgpackr-native-disabled.cjs jest --passWithNoTests --maxWorkers=2"
   },
   "dependencies": {
     "@bedrock-forge/remote-executor": "workspace:*",
@@ -20,6 +20,7 @@
     "@prisma/client": "^7.5.0",
     "@slack/web-api": "^7.15.0",
     "bullmq": "^5.0.0",
+    "chrome-launcher": "^1.2.1",
     "lighthouse": "^13.3.0",
     "pdfmake": "^0.3.7",
     "pg": "^8.13.0",

@@ -15,7 +15,7 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "lint": "tsc --noEmit",
-    "test": "jest --passWithNoTests",
+    "test": "jest --passWithNoTests --maxWorkers=2",
     "clean": "rm -rf dist"
   },
   "dependencies": {

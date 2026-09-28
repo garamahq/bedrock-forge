@@ -66,6 +66,7 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
 FROM node:22-alpine AS runtime
 
 ARG INSTALL_CHROMIUM=true
+ENV MSGPACKR_NATIVE_ACCELERATION_DISABLED=true
 
 # rclone  — Google Drive backup uploads
 # whois   — domain WHOIS lookups
