@@ -47,6 +47,25 @@ describe("SettingsService", () => {
     });
   });
 
+  it("get does not expose the encrypted PageSpeed API key", async () => {
+    repo.findByKey.mockResolvedValue({
+      key: "pagespeed_api_key",
+      value: "encrypted-api-key",
+    });
+    expect(await service.get("pagespeed_api_key")).toEqual({
+      key: "pagespeed_api_key",
+      has_value: true,
+    });
+  });
+
+  it("getAllPublic excludes encrypted PageSpeed API key material", async () => {
+    repo.findAll.mockResolvedValue([
+      { key: "pagespeed_api_key", value: "encrypted-api-key" },
+      { key: "pagespeed_provider", value: "auto" },
+    ]);
+    expect(await service.getAllPublic()).toEqual({ pagespeed_provider: "auto" });
+  });
+
   it("set delegates to repo.upsert", async () => {
     repo.upsert.mockResolvedValue({ key: "k", value: "v" });
     await service.set("k", "v");

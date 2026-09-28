@@ -10,6 +10,7 @@ const SENSITIVE_KEYS = new Set([
   "rclone_gdrive_config",
   "GITHUB_API_TOKEN",
   "cloudflare_api_token",
+  "pagespeed_api_key",
 ]);
 
 @Injectable()
