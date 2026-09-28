@@ -312,6 +312,7 @@ export class DashboardRepository {
       envsStaleScan,
       envsNoSchedule,
       envsNoMonitor,
+      envsNoSecuritySchedule,
     ] = await Promise.all([
       this.prisma.jobExecution.findMany({
         where: {
@@ -373,21 +374,41 @@ export class DashboardRepository {
         where: {
           project: { status: { not: "archived" } },
           backups: {
-            none: { status: "completed", created_at: { gte: since48h } },
+            none: { status: "completed", completed_at: { gte: since48h } },
           },
         },
-        select: envSelect,
+        select: {
+          ...envSelect,
+          backups: {
+            where: { status: "completed" },
+            orderBy: { completed_at: "desc" },
+            take: 1,
+            select: { completed_at: true, created_at: true },
+          },
+        },
         take: 20,
       }),
       this.prisma.environment.findMany({
         where: {
           project: { status: { not: "archived" } },
+          OR: [
+            { plugin_scans: { none: {} } },
+            {
+              plugin_scans: {
+                some: { scanned_at: { lt: since30d } },
+                none: { scanned_at: { gte: since30d } },
+              },
+            },
+          ],
+        },
+        select: {
+          ...envSelect,
           plugin_scans: {
-            some: { scanned_at: { lt: since30d } },
-            none: { scanned_at: { gte: since30d } },
+            orderBy: { scanned_at: "desc" },
+            take: 1,
+            select: { scanned_at: true },
           },
         },
-        select: envSelect,
         take: 20,
       }),
       this.prisma.environment.findMany({
@@ -402,6 +423,14 @@ export class DashboardRepository {
         where: {
           project: { status: { not: "archived" } },
           monitors: { none: {} },
+        },
+        select: envSelect,
+        take: 20,
+      }),
+      this.prisma.environment.findMany({
+        where: {
+          project: { status: { not: "archived" } },
+          security_scan_schedules: null,
         },
         select: envSelect,
         take: 20,
@@ -475,12 +504,23 @@ export class DashboardRepository {
     }
 
     for (const env of envsStaleBackup.slice(0, 10)) {
+      const latestBackup = env.backups[0];
+      const lastBackup = latestBackup?.completed_at ?? latestBackup?.created_at;
+      const ageHours = lastBackup
+        ? Math.floor((now.getTime() - lastBackup.getTime()) / 3_600_000)
+        : null;
+      const freshness =
+        ageHours === null
+          ? "No successful backup has been recorded."
+          : ageHours < 48
+            ? `Last successful backup was ${ageHours} hour${ageHours === 1 ? "" : "s"} ago.`
+            : `Last successful backup was ${Math.floor(ageHours / 24)} days ago.`;
       items.push({
         id: `backup_overdue_${env.id}`,
         severity: "warning",
         type: "backup_overdue",
         title: "Backup overdue",
-        description: `${env.url} — no successful backup in the last 48 h`,
+        description: `${env.url} — ${freshness}`,
         environmentId: Number(env.id),
         projectId: Number(env.project.id),
         projectName: env.project.name,
@@ -505,12 +545,16 @@ export class DashboardRepository {
     }
 
     for (const env of envsStaleScan.slice(0, 10)) {
+      const lastScan = env.plugin_scans[0]?.scanned_at;
+      const freshness = lastScan
+        ? `Last plugin scan was ${Math.floor((now.getTime() - lastScan.getTime()) / 86_400_000)} days ago.`
+        : "No plugin scan has been recorded.";
       items.push({
         id: `plugin_scan_stale_${env.id}`,
         severity: "warning",
         type: "plugin_scan_stale",
         title: "Plugin scan stale",
-        description: `${env.url} — last scan over 30 days ago`,
+        description: `${env.url} — ${freshness}`,
         environmentId: Number(env.id),
         projectId: Number(env.project.id),
         projectName: env.project.name,
@@ -546,6 +590,21 @@ export class DashboardRepository {
         projectName: env.project.name,
         action: "open-monitors",
         actionPayload: { environmentId: Number(env.id) },
+      });
+    }
+
+    for (const env of envsNoSecuritySchedule.slice(0, 10)) {
+      items.push({
+        id: `no_security_schedule_${env.id}`,
+        severity: "info",
+        type: "no_security_schedule",
+        title: "No security scan schedule",
+        description: `${env.url} has no automated security scan schedule`,
+        environmentId: Number(env.id),
+        projectId: Number(env.project.id),
+        projectName: env.project.name,
+        action: "open-project-security",
+        actionPayload: { projectId: Number(env.project.id) },
       });
     }
 
