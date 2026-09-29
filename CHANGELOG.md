@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5](https://github.com/garamahq/bedrock-forge/compare/bedrock-forge-v0.1.4...bedrock-forge-v0.1.5) (2026-09-29)
+
+
+### Features
+
+* **jobs:** add safe queue recovery and discard lifecycle ([1a6fb7a](https://github.com/garamahq/bedrock-forge/commit/1a6fb7a563fe0df584b114cf730c4804c791dabb))
+* **search:** add role-aware navigation shortcuts and deep links ([2bf366c](https://github.com/garamahq/bedrock-forge/commit/2bf366cd91af2f97520709773a5d43403f582a41))
+* **workflows:** consolidate management and operations flows ([32bbc6e](https://github.com/garamahq/bedrock-forge/commit/32bbc6e416f51005c3f12300db172826059f896a))
+
 ## [0.1.4](https://github.com/garamahq/bedrock-forge/compare/bedrock-forge-v0.1.3...bedrock-forge-v0.1.4) (2026-09-28)
 
 
