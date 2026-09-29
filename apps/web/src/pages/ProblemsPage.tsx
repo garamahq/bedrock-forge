@@ -172,11 +172,13 @@ export function ProblemsPage() {
     staleTime: 30_000,
   });
 
-  const operations: WorkQueueItem[] = (attentionQuery.data ?? []).map((item) => ({
-    ...item,
-    source: "Operations",
-    href: attentionHref(item),
-  }));
+  const operations: WorkQueueItem[] = (attentionQuery.data ?? []).map(
+    (item) => ({
+      ...item,
+      source: "Operations",
+      href: attentionHref(item),
+    }),
+  );
   const findingItems: WorkQueueItem[] = (findingsQuery.data?.data ?? [])
     .filter(
       (finding) =>
@@ -189,7 +191,7 @@ export function ProblemsPage() {
       const environment = finding.environment;
       const target = project
         ? `${project.name} · ${environment?.type ?? "environment"}`
-        : finding.server?.name ?? "Security finding";
+        : (finding.server?.name ?? "Security finding");
       return {
         id: `security-finding-${finding.id}`,
         severity: queueSeverity(finding.severity),
@@ -206,12 +208,11 @@ export function ProblemsPage() {
         source: "Security findings",
         status: finding.status,
         targetName: project ? undefined : finding.server?.name,
-        href: project && environment
-          ? `/projects/${project.id}?tab=security&env=${environment.id}`
-          : "/security?tab=findings",
+        href: `/security?tab=findings&findingId=${finding.id}`,
       };
     });
-  const incidentItems: WorkQueueItem[] = (incidentsQuery.data?.items ?? []).map((incident) => ({
+  const incidentItems: WorkQueueItem[] = (incidentsQuery.data?.items ?? []).map(
+    (incident) => ({
       id: `security-incident-${incident.id}`,
       severity: queueSeverity(incident.severity),
       type: "security_incident",
@@ -223,8 +224,9 @@ export function ProblemsPage() {
       source: "Security incidents",
       status: incident.status,
       targetName: incident.server?.name,
-      href: "/security?tab=incidents",
-    }));
+      href: `/security?tab=incidents&incidentId=${incident.id}`,
+    }),
+  );
 
   const items = [...operations, ...findingItems, ...incidentItems];
   const isLoading =
@@ -274,7 +276,8 @@ export function ProblemsPage() {
       <div>
         <h1 className="text-2xl font-bold">Work Queue</h1>
         <p className="text-muted-foreground text-sm mt-1">
-          Open operational issues and security work, with links to their source records.
+          Open operational issues and security work, with links to their source
+          records.
         </p>
       </div>
 
@@ -306,8 +309,12 @@ export function ProblemsPage() {
             <SelectItem value="Operations">Operations</SelectItem>
             {canViewSecurity && (
               <>
-                <SelectItem value="Security findings">Security findings</SelectItem>
-                <SelectItem value="Security incidents">Security incidents</SelectItem>
+                <SelectItem value="Security findings">
+                  Security findings
+                </SelectItem>
+                <SelectItem value="Security incidents">
+                  Security incidents
+                </SelectItem>
               </>
             )}
           </SelectContent>
@@ -317,7 +324,8 @@ export function ProblemsPage() {
       {securityError && (
         <div className="flex items-center justify-between gap-3 rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-sm">
           <p className="text-muted-foreground">
-            Security findings or incidents could not be loaded. Operational issues are still available.
+            Security findings or incidents could not be loaded. Operational
+            issues are still available.
           </p>
           <Button
             variant="outline"
@@ -333,7 +341,8 @@ export function ProblemsPage() {
       )}
       {securityQueueTruncated && (
         <p className="text-xs text-muted-foreground">
-          The queue shows up to 100 findings and incidents per status. Open Security to review the full lists.
+          The queue shows up to 100 findings and incidents per status. Open
+          Security to review the full lists.
         </p>
       )}
 

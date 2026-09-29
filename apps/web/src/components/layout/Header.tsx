@@ -25,27 +25,11 @@ import {
 } from "@/components/ui/sheet";
 import { SidebarInner } from "./Sidebar";
 import { ActionCenter } from "@/components/ActionCenter";
+import { NAVIGATION_PAGES } from "@bedrock-forge/shared";
 
-const ROUTE_LABELS: Record<string, string> = {
-  dashboard: "Dashboard",
-  clients: "Clients",
-  servers: "Servers",
-  projects: "Projects",
-  backups: "Backups",
-  monitors: "Monitors",
-  lighthouse: "Lighthouse",
-  domains: "Domains",
-  settings: "Settings",
-  users: "Users & Roles",
-  "audit-logs": "Audit Logs",
-  packages: "Packages",
-  invoices: "Invoices",
-  activity: "Activity",
-  notifications: "Notifications",
-  problems: "Problems",
-  reports: "Reports",
-  security: "Security",
-};
+const ROUTE_LABELS = Object.fromEntries(
+  NAVIGATION_PAGES.map((page) => [page.path.slice(1), page.label]),
+);
 
 type WsStatus = "connected" | "reconnecting" | "disconnected";
 
@@ -97,29 +81,59 @@ function WsStatusDot() {
 function Breadcrumb() {
   const location = useLocation();
   const segments = location.pathname.split("/").filter(Boolean);
-  const crumbs = segments.map((s) => ROUTE_LABELS[s] ?? s);
+  const resourceType = ["projects", "clients", "servers"].includes(
+    segments[0] ?? "",
+  )
+    ? segments[0]
+    : null;
+  const resourceId =
+    segments[1] && /^\d+$/.test(segments[1]) ? segments[1] : null;
+  const { data: resource } = useQuery<{ name?: string }>({
+    queryKey: ["breadcrumb-resource", resourceType, resourceId],
+    queryFn: () => api.get(`/${resourceType}/${resourceId}`),
+    enabled: Boolean(resourceType && resourceId),
+    staleTime: 5 * 60_000,
+  });
+
   return (
     <nav aria-label="Breadcrumb" className="min-w-0">
       <ol className="flex items-center gap-1.5 text-sm list-none m-0 p-0 min-w-0">
-        {crumbs.map((crumb, i) => (
-          <li key={i} className="flex items-center gap-1.5 min-w-0">
-            {i > 0 && (
-              <span className="text-muted-foreground/60 shrink-0" aria-hidden="true">
-                /
-              </span>
-            )}
-            <span
-              aria-current={i === crumbs.length - 1 ? "page" : undefined}
-              className={`truncate max-w-[100px] sm:max-w-[180px] md:max-w-none ${
-                i === crumbs.length - 1
-                  ? "font-semibold text-foreground"
-                  : "text-muted-foreground"
-              }`}
-            >
-              {crumb}
-            </span>
-          </li>
-        ))}
+        {segments.map((segment, i) => {
+          const crumb =
+            i === 1 && resourceId === segment
+              ? (resource?.name ??
+                `${ROUTE_LABELS[segments[0]] ?? segments[0]} details`)
+              : (ROUTE_LABELS[segment] ?? segment);
+          const to = `/${segments.slice(0, i + 1).join("/")}`;
+          const isCurrent = i === segments.length - 1;
+          return (
+            <li key={i} className="flex items-center gap-1.5 min-w-0">
+              {i > 0 && (
+                <span
+                  className="text-muted-foreground/60 shrink-0"
+                  aria-hidden="true"
+                >
+                  /
+                </span>
+              )}
+              {isCurrent ? (
+                <span
+                  aria-current="page"
+                  className={`truncate max-w-[100px] sm:max-w-[180px] md:max-w-none font-semibold text-foreground`}
+                >
+                  {crumb}
+                </span>
+              ) : (
+                <Link
+                  to={to}
+                  className="truncate max-w-[100px] sm:max-w-[180px] md:max-w-none text-muted-foreground hover:text-foreground hover:underline"
+                >
+                  {crumb}
+                </Link>
+              )}
+            </li>
+          );
+        })}
       </ol>
     </nav>
   );
@@ -322,11 +336,15 @@ export function Header({ onOpenSearch }: { onOpenSearch?: () => void }) {
             variant="outline"
             size="sm"
             onClick={onOpenSearch}
-            className="hidden md:flex items-center gap-2 text-muted-foreground text-xs h-8 px-3 w-48 justify-start"
+            className="flex h-9 w-9 shrink-0 items-center justify-center px-0 text-muted-foreground md:h-8 md:w-48 md:justify-start md:gap-2 md:px-3 md:text-xs"
+            aria-label="Search pages, projects, and operations"
+            title="Search"
           >
             <Search className="h-3.5 w-3.5" />
-            <span>Search…</span>
-            <kbd className="ml-auto font-mono text-xs">⌘K</kbd>
+            <span className="sr-only md:not-sr-only">Search…</span>
+            <kbd className="ml-auto hidden font-mono text-xs md:inline-flex">
+              ⌘K
+            </kbd>
           </Button>
         )}
         <span className="text-sm text-muted-foreground hidden sm:block">

@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -165,9 +166,11 @@ export function DomainsPage() {
     (s) => s.user?.roles?.includes("admin") ?? false,
   );
 
+  const [searchParams, setSearchParams] = useSearchParams();
+  const searchParam = searchParams.get("search") ?? "";
   const [page, setPage] = useState(1);
-  const [search, setSearch] = useState("");
-  const [searchInput, setSearchInput] = useState("");
+  const [search, setSearch] = useState(searchParam);
+  const [searchInput, setSearchInput] = useState(searchParam);
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<Domain | null>(null);
@@ -179,6 +182,12 @@ export function DomainsPage() {
   const [isBulkDeleting, setIsBulkDeleting] = useState(false);
 
   const limit = 10;
+
+  useEffect(() => {
+    setSearch(searchParam);
+    setSearchInput(searchParam);
+    setPage(1);
+  }, [searchParam]);
 
   const { data, isLoading, isError, refetch } = useQuery<PaginatedDomains>({
     queryKey: ["domains", page, search],
@@ -419,15 +428,26 @@ export function DomainsPage() {
         value={searchInput}
         onChange={setSearchInput}
         onSearch={() => {
-          setSearch(searchInput);
+          setSearch(searchInput.trim());
           setPage(1);
           setSelectedIds([]);
+          setSearchParams((previous) => {
+            const next = new URLSearchParams(previous);
+            if (searchInput.trim()) next.set("search", searchInput.trim());
+            else next.delete("search");
+            return next;
+          });
         }}
         onClear={() => {
           setSearchInput("");
           setSearch("");
           setPage(1);
           setSelectedIds([]);
+          setSearchParams((previous) => {
+            const next = new URLSearchParams(previous);
+            next.delete("search");
+            return next;
+          });
         }}
         placeholder="Search domains…"
         totalCount={data?.total ?? 0}

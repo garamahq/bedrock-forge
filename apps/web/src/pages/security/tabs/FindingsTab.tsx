@@ -1,4 +1,5 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ShieldCheck,
@@ -39,6 +40,7 @@ import { SEVERITY_LEVELS, SCAN_TYPE_LABELS } from "../constants";
 import { FindingDetailDrawer } from "./FindingDetailDrawer";
 import { RemediationModal } from "./RemediationModal";
 import { HardenDialog } from "../dialogs";
+import { ErrorState } from "@/components/crud";
 
 const SEVERITY_CLASSES: Record<Severity, string> = {
   critical: "bg-red-500/15 text-red-400 border-red-500/30",
@@ -71,12 +73,17 @@ export function FindingsTab({
   environments: EnvironmentSummary[];
 }) {
   const queryClient = useQueryClient();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedFindingId = searchParams.get("findingId") ?? "";
   const [sevFilter, setSevFilter] = useState<Severity[]>([]);
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [sourceFilter, setSourceFilter] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
-  const [selectedFindingId, setSelectedFindingId] = useState<number | null>(null);
-  const [remediatingFinding, setRemediatingFinding] = useState<SecurityFindingItem | null>(null);
+  const [selectedFindingId, setSelectedFindingId] = useState<number | null>(
+    null,
+  );
+  const [remediatingFinding, setRemediatingFinding] =
+    useState<SecurityFindingItem | null>(null);
   const [page, setPage] = useState(1);
   const [fixDialog, setFixDialog] = useState<{
     targetType: "server" | "environment";
@@ -94,7 +101,7 @@ export function FindingsTab({
   if (sourceFilter.startsWith("environment:"))
     params.set("environment_id", sourceFilter.slice(12));
 
-  const { data, isFetching } = useQuery<{
+  const { data, isFetching, isError, refetch } = useQuery<{
     data: FindingListItem[];
     total: number;
     page: number;
@@ -110,8 +117,40 @@ export function FindingsTab({
       searchQuery,
       page,
     ],
-    queryFn: () => api.get<{ data: FindingListItem[]; total: number; page: number; limit: number; totalPages: number }>(`/security/findings?${params}`),
+    queryFn: () =>
+      api.get<{
+        data: FindingListItem[];
+        total: number;
+        page: number;
+        limit: number;
+        totalPages: number;
+      }>(`/security/findings?${params}`),
   });
+
+  useEffect(() => {
+    setSelectedFindingId(
+      /^[1-9]\d*$/.test(requestedFindingId) ? Number(requestedFindingId) : null,
+    );
+  }, [requestedFindingId]);
+
+  function openFinding(id: number) {
+    setSelectedFindingId(id);
+    setSearchParams((previous) => {
+      const next = new URLSearchParams(previous);
+      next.set("tab", "findings");
+      next.set("findingId", String(id));
+      return next;
+    });
+  }
+
+  function closeFinding() {
+    setSelectedFindingId(null);
+    setSearchParams((previous) => {
+      const next = new URLSearchParams(previous);
+      next.delete("findingId");
+      return next;
+    });
+  }
 
   const toggleSev = (s: Severity) => {
     setSevFilter((prev) =>
@@ -120,13 +159,21 @@ export function FindingsTab({
     setPage(1);
   };
 
-  const quickStatusMutation = useMutation<{ status?: FindingStatus }, Error, { id: number; status: FindingStatus }>({
+  const quickStatusMutation = useMutation<
+    { status?: FindingStatus },
+    Error,
+    { id: number; status: FindingStatus }
+  >({
     mutationFn: ({ id, status }: { id: number; status: FindingStatus }) =>
       api.post(`/security/findings/${id}/transition`, { status }),
     onSuccess: (res) => {
       toast({ title: `Finding marked as ${res?.status || "updated"}` });
-      void queryClient.invalidateQueries({ queryKey: ["security", "findings"] });
-      void queryClient.invalidateQueries({ queryKey: ["security", "overview"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["security", "findings"],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["security", "overview"],
+      });
     },
     onError: (err) =>
       toast({
@@ -206,7 +253,10 @@ export function FindingsTab({
                         Servers
                       </div>
                       {servers.map((s) => (
-                        <SelectItem key={`server:${s.id}`} value={`server:${s.id}`}>
+                        <SelectItem
+                          key={`server:${s.id}`}
+                          value={`server:${s.id}`}
+                        >
                           {s.name}
                         </SelectItem>
                       ))}
@@ -270,13 +320,24 @@ export function FindingsTab({
         </span>
       </div>
 
+      {isError && (
+        <ErrorState
+          title="Findings could not be loaded"
+          description="The request failed. The empty state below is not evidence that there are no findings."
+          onRetry={() => void refetch()}
+        />
+      )}
+
       {/* Empty State */}
-      {data?.data.length === 0 && !isFetching && (
+      {!isError && data?.data.length === 0 && !isFetching && (
         <div className="text-center py-16 text-muted-foreground bg-card rounded-lg border border-border">
           <ShieldCheck className="h-12 w-12 mx-auto mb-3 opacity-40 text-emerald-500" />
-          <p className="font-semibold text-base text-foreground">No open findings match criteria</p>
+          <p className="font-semibold text-base text-foreground">
+            No open findings match criteria
+          </p>
           <p className="text-sm mt-1">
-            All findings in this category are resolved or no matching scans were detected.
+            All findings in this category are resolved or no matching scans were
+            detected.
           </p>
         </div>
       )}
@@ -294,13 +355,16 @@ export function FindingsTab({
               ? `${item.environment.project?.name || "Project"} (${item.environment.type})`
               : item.server_name || item.project_name || "Unknown");
 
-          const targetType = item.server_id || item.server ? "server" : "environment";
+          const targetType =
+            item.server_id || item.server ? "server" : "environment";
 
           return (
             <div
               key={findingId || `${item.scan_id}-${item.title}`}
               className="bg-card p-4 rounded-lg border border-border hover:border-border/80 transition-all shadow-sm space-y-3 cursor-pointer group"
-              onClick={() => typeof findingId === "number" && setSelectedFindingId(findingId)}
+              onClick={() =>
+                typeof findingId === "number" && openFinding(findingId)
+              }
             >
               <div className="flex items-start justify-between gap-3">
                 <div className="space-y-1.5 min-w-0">
@@ -350,7 +414,12 @@ export function FindingsTab({
                       {item.resource}
                     </span>
                   ) : item.first_seen_at ? (
-                    <span>Seen: {new Date(item.last_seen_at || item.first_seen_at).toLocaleDateString()}</span>
+                    <span>
+                      Seen:{" "}
+                      {new Date(
+                        item.last_seen_at || item.first_seen_at,
+                      ).toLocaleDateString()}
+                    </span>
                   ) : null}
                 </div>
 
@@ -358,23 +427,34 @@ export function FindingsTab({
                   className="flex items-center gap-1.5"
                   onClick={(e) => e.stopPropagation()}
                 >
-                  {typeof findingId === "number" && status !== "investigating" && (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="h-7 text-xs px-2 text-muted-foreground hover:text-foreground"
-                      onClick={() => quickStatusMutation.mutate({ id: findingId, status: "investigating" })}
-                    >
-                      <Eye className="h-3 w-3 mr-1 text-blue-400" />
-                      Investigate
-                    </Button>
-                  )}
+                  {typeof findingId === "number" &&
+                    status !== "investigating" && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 text-xs px-2 text-muted-foreground hover:text-foreground"
+                        onClick={() =>
+                          quickStatusMutation.mutate({
+                            id: findingId,
+                            status: "investigating",
+                          })
+                        }
+                      >
+                        <Eye className="h-3 w-3 mr-1 text-blue-400" />
+                        Investigate
+                      </Button>
+                    )}
                   {typeof findingId === "number" && status !== "resolved" && (
                     <Button
                       size="sm"
                       variant="ghost"
                       className="h-7 text-xs px-2 text-muted-foreground hover:text-foreground"
-                      onClick={() => quickStatusMutation.mutate({ id: findingId, status: "resolved" })}
+                      onClick={() =>
+                        quickStatusMutation.mutate({
+                          id: findingId,
+                          status: "resolved",
+                        })
+                      }
                     >
                       <CheckCircle2 className="h-3 w-3 mr-1 text-emerald-400" />
                       Resolve
@@ -384,7 +464,9 @@ export function FindingsTab({
                     size="sm"
                     variant="outline"
                     className="h-7 text-xs px-2.5"
-                    onClick={() => typeof findingId === "number" && setSelectedFindingId(findingId)}
+                    onClick={() =>
+                      typeof findingId === "number" && openFinding(findingId)
+                    }
                   >
                     View Details
                   </Button>
@@ -427,7 +509,7 @@ export function FindingsTab({
       {/* Detail & Lifecycle Drawer */}
       <FindingDetailDrawer
         findingId={selectedFindingId}
-        onClose={() => setSelectedFindingId(null)}
+        onClose={closeFinding}
         onRemediateClick={(f) => {
           setRemediatingFinding(f);
         }}

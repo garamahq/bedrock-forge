@@ -90,6 +90,19 @@ export class SearchRepository {
     });
   }
 
+  findRecentProjects(take: number) {
+    return this.prisma.project.findMany({
+      orderBy: { updated_at: "desc" },
+      take,
+      select: {
+        id: true,
+        name: true,
+        client: { select: { name: true } },
+        _count: { select: { environments: true } },
+      },
+    });
+  }
+
   findEnvironments(q: string, take: number) {
     return this.prisma.environment.findMany({
       where: {

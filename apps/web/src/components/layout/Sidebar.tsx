@@ -2,7 +2,13 @@ import { NavLink, useLocation } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/store/auth.store";
 import { useUiStore } from "@/store/ui.store";
-import { ROLE_HIERARCHY, type Role } from "@bedrock-forge/shared";
+import {
+  NAVIGATION_PAGES,
+  NAVIGATION_SECTIONS,
+  ROLE_HIERARCHY,
+  type NavigationIcon,
+  type Role,
+} from "@bedrock-forge/shared";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -36,125 +42,40 @@ import {
   Calendar,
 } from "lucide-react";
 
-interface NavItemDef {
-  to: string;
-  label: string;
-  icon: React.ElementType;
-  minRole?: Role;
-}
+const NAV_ICONS: Record<NavigationIcon, React.ElementType> = {
+  LayoutDashboard,
+  Activity,
+  Gauge,
+  ClipboardList,
+  FolderKanban,
+  Users,
+  Server,
+  Globe,
+  HardDrive,
+  ShieldAlert,
+  Calendar,
+  AlertTriangle,
+  Package,
+  FileText,
+  Tag,
+  Settings,
+  Shield,
+  ClipboardCheck,
+  Bell,
+  FileBarChart,
+};
 
-interface NavGroup {
-  label: string | null;
-  items: NavItemDef[];
-}
-
-const NAV_GROUPS: NavGroup[] = [
-  {
-    label: "Overview",
-    items: [
-      {
-        to: "/dashboard",
-        label: "Dashboard",
-        icon: LayoutDashboard,
-        minRole: "maintainer",
-      },
-      {
-        to: "/monitors",
-        label: "Monitors",
-        icon: Activity,
-        minRole: "manager",
-      },
-      {
-        to: "/lighthouse",
-        label: "Lighthouse",
-        icon: Gauge,
-        minRole: "manager",
-      },
-      {
-        to: "/activity",
-        label: "Activity",
-        icon: ClipboardList,
-        minRole: "maintainer",
-      },
-    ],
-  },
-  {
-    label: "Management",
-    items: [
-      {
-        to: "/projects",
-        label: "Projects",
-        icon: FolderKanban,
-        minRole: "manager",
-      },
-      { to: "/clients", label: "Clients", icon: Users, minRole: "manager" },
-      { to: "/servers", label: "Servers", icon: Server, minRole: "manager" },
-      { to: "/domains", label: "Domains", icon: Globe, minRole: "manager" },
-    ],
-  },
-  {
-    label: "Operations",
-    items: [
-      { to: "/backups", label: "Backups", icon: HardDrive, minRole: "manager" },
-      {
-        to: "/security",
-        label: "Security",
-        icon: ShieldAlert,
-        minRole: "manager",
-      },
-      {
-        to: "/maintenance-windows",
-        label: "Maintenance",
-        icon: Calendar,
-        minRole: "manager",
-      },
-      {
-        to: "/problems",
-        label: "Work Queue",
-        icon: AlertTriangle,
-        minRole: "maintainer",
-      },
-    ],
-  },
-  {
-    label: "Billing & Admin",
-    items: [
-      { to: "/packages", label: "Packages", icon: Package, minRole: "manager" },
-      {
-        to: "/invoices",
-        label: "Invoices",
-        icon: FileText,
-        minRole: "manager",
-      },
-      { to: "/tags", label: "Tags", icon: Tag, minRole: "manager" },
-      { to: "/settings", label: "Settings", icon: Settings },
-    ],
-  },
-  {
-    label: "System Admin",
-    items: [
-      { to: "/users", label: "Users & Roles", icon: Shield, minRole: "admin" },
-      {
-        to: "/audit-logs",
-        label: "Audit Logs",
-        icon: ClipboardCheck,
-        minRole: "admin",
-      },
-      {
-        to: "/notifications",
-        label: "Notifications",
-        icon: Bell,
-        minRole: "admin",
-      },
-      {
-        to: "/reports",
-        label: "Reports",
-        icon: FileBarChart,
-        minRole: "admin",
-      },
-    ],
-  },
-];
+const NAV_GROUPS = NAVIGATION_SECTIONS.map((label) => ({
+  label,
+  items: NAVIGATION_PAGES.filter((page) => page.section === label).map(
+    (page) => ({
+      to: page.path,
+      label: page.label,
+      minRole: page.minRole,
+      icon: NAV_ICONS[page.icon],
+    }),
+  ),
+}));
 
 function NavItem({
   to,

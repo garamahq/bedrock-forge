@@ -1,4 +1,5 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Flame,
@@ -25,6 +26,7 @@ import {
 import { api } from "@/lib/api-client";
 import { toast } from "@/hooks/use-toast";
 import type { ServerSummary, Severity } from "../types";
+import { ErrorState, Pagination } from "@/components/crud";
 
 export interface CorrelatedIncident {
   id: number;
@@ -34,7 +36,8 @@ export interface CorrelatedIncident {
   summary: string;
   severity: Severity;
   confidence: "high" | "medium" | "low";
-  status: "open" | "investigating" | "contained" | "resolved" | "false_positive";
+  status:
+    "open" | "investigating" | "contained" | "resolved" | "false_positive";
   detected_at: string;
   resolved_at?: string | null;
   findings: {
@@ -65,25 +68,59 @@ const SEVERITY_STYLES: Record<Severity, string> = {
 
 export function IncidentsTab({ servers }: { servers: ServerSummary[] }) {
   const queryClient = useQueryClient();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedIncidentId = searchParams.get("incidentId") ?? "";
+  const incidentId = /^[1-9]\d*$/.test(requestedIncidentId)
+    ? Number(requestedIncidentId)
+    : null;
   const [selectedStatus, setSelectedStatus] = useState<string>("all");
   const [selectedServerId, setSelectedServerId] = useState<string>("all");
-  const [expandedIncidentId, setExpandedIncidentId] = useState<number | null>(null);
+  const [page, setPage] = useState(1);
+  const [expandedIncidentId, setExpandedIncidentId] = useState<number | null>(
+    null,
+  );
 
-  const { data, isFetching } = useQuery<{
+  const { data, isFetching, isError, refetch } = useQuery<{
     data: CorrelatedIncident[];
     total: number;
     page: number;
     totalPages: number;
   }>({
-    queryKey: ["security", "incidents", selectedStatus, selectedServerId],
+    queryKey: ["security", "incidents", selectedStatus, selectedServerId, page],
     queryFn: () => {
-      const params = new URLSearchParams();
+      const params = new URLSearchParams({ page: String(page), limit: "10" });
       if (selectedStatus !== "all") params.append("status", selectedStatus);
-      if (selectedServerId !== "all") params.append("serverId", selectedServerId);
+      if (selectedServerId !== "all")
+        params.append("serverId", selectedServerId);
       return api.get(`/security/incidents?${params.toString()}`);
     },
     refetchInterval: 15_000,
   });
+
+  const { data: linkedIncident } = useQuery<CorrelatedIncident>({
+    queryKey: ["security", "incident", incidentId],
+    queryFn: () => api.get(`/security/incidents/${incidentId}`),
+    enabled: incidentId !== null,
+  });
+
+  useEffect(() => {
+    setExpandedIncidentId(
+      /^[1-9]\d*$/.test(requestedIncidentId)
+        ? Number(requestedIncidentId)
+        : null,
+    );
+  }, [requestedIncidentId]);
+
+  function toggleIncident(id: number) {
+    const nextId = expandedIncidentId === id ? null : id;
+    setExpandedIncidentId(nextId);
+    setSearchParams((previous) => {
+      const next = new URLSearchParams(previous);
+      if (nextId) next.set("incidentId", String(nextId));
+      else next.delete("incidentId");
+      return next;
+    });
+  }
 
   const updateStatusMutation = useMutation({
     mutationFn: ({ id, status }: { id: number; status: string }) =>
@@ -93,8 +130,12 @@ export function IncidentsTab({ servers }: { servers: ServerSummary[] }) {
         title: "Incident status updated",
         description: `Incident marked as ${vars.status}.`,
       });
-      void queryClient.invalidateQueries({ queryKey: ["security", "incidents"] });
-      void queryClient.invalidateQueries({ queryKey: ["security", "findings"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["security", "incidents"],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["security", "findings"],
+      });
     },
     onError: (err) => {
       toast({
@@ -105,7 +146,12 @@ export function IncidentsTab({ servers }: { servers: ServerSummary[] }) {
     },
   });
 
-  const incidents = data?.data || [];
+  const listedIncidents = data?.data || [];
+  const incidents =
+    linkedIncident &&
+    !listedIncidents.some((incident) => incident.id === linkedIncident.id)
+      ? [linkedIncident, ...listedIncidents]
+      : listedIncidents;
 
   return (
     <div className="space-y-4">
@@ -117,7 +163,13 @@ export function IncidentsTab({ servers }: { servers: ServerSummary[] }) {
             <span>Filter By:</span>
           </div>
 
-          <Select value={selectedStatus} onValueChange={setSelectedStatus}>
+          <Select
+            value={selectedStatus}
+            onValueChange={(value) => {
+              setSelectedStatus(value);
+              setPage(1);
+            }}
+          >
             <SelectTrigger className="h-8 text-xs w-36">
               <SelectValue placeholder="All Statuses" />
             </SelectTrigger>
@@ -131,7 +183,13 @@ export function IncidentsTab({ servers }: { servers: ServerSummary[] }) {
             </SelectContent>
           </Select>
 
-          <Select value={selectedServerId} onValueChange={setSelectedServerId}>
+          <Select
+            value={selectedServerId}
+            onValueChange={(value) => {
+              setSelectedServerId(value);
+              setPage(1);
+            }}
+          >
             <SelectTrigger className="h-8 text-xs w-48">
               <SelectValue placeholder="All Servers" />
             </SelectTrigger>
@@ -147,17 +205,29 @@ export function IncidentsTab({ servers }: { servers: ServerSummary[] }) {
         </div>
 
         <div className="text-xs text-muted-foreground">
-          Showing {incidents.length} of {data?.total ?? 0} correlated incident(s)
+          Showing {incidents.length} of {data?.total ?? 0} correlated
+          incident(s)
         </div>
       </div>
 
       {/* Incidents Feed */}
-      {incidents.length === 0 && !isFetching && (
+      {isError && (
+        <ErrorState
+          title="Incidents could not be loaded"
+          description="The request failed. This does not mean there are no security incidents."
+          onRetry={() => void refetch()}
+        />
+      )}
+
+      {!isError && incidents.length === 0 && !isFetching && (
         <div className="text-center py-16 bg-card rounded-lg border border-border text-muted-foreground space-y-2">
           <CheckCircle2 className="h-10 w-10 mx-auto text-emerald-500 opacity-80" />
-          <p className="font-semibold text-sm text-foreground">No Security Incidents</p>
+          <p className="font-semibold text-sm text-foreground">
+            No Security Incidents
+          </p>
           <p className="text-xs">
-            No correlated multi-signal attack patterns or active compromises detected.
+            No correlated multi-signal attack patterns or active compromises
+            detected.
           </p>
         </div>
       )}
@@ -166,7 +236,8 @@ export function IncidentsTab({ servers }: { servers: ServerSummary[] }) {
         {incidents.map((incident) => {
           const isExpanded = expandedIncidentId === incident.id;
           const statusStyle =
-            INCIDENT_STATUS_STYLES[incident.status] || INCIDENT_STATUS_STYLES.open;
+            INCIDENT_STATUS_STYLES[incident.status] ||
+            INCIDENT_STATUS_STYLES.open;
 
           return (
             <div
@@ -176,13 +247,21 @@ export function IncidentsTab({ servers }: { servers: ServerSummary[] }) {
               <div className="flex items-start justify-between gap-4">
                 <div className="space-y-1.5">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <Badge className={`text-[10px] uppercase font-bold px-2 py-0.5 ${SEVERITY_STYLES[incident.severity]}`}>
+                    <Badge
+                      className={`text-[10px] uppercase font-bold px-2 py-0.5 ${SEVERITY_STYLES[incident.severity]}`}
+                    >
                       {incident.severity}
                     </Badge>
-                    <Badge variant="outline" className={`text-[10px] font-bold uppercase tracking-wide ${statusStyle}`}>
+                    <Badge
+                      variant="outline"
+                      className={`text-[10px] font-bold uppercase tracking-wide ${statusStyle}`}
+                    >
                       {incident.status}
                     </Badge>
-                    <Badge variant="outline" className="text-[10px] text-muted-foreground border-border">
+                    <Badge
+                      variant="outline"
+                      className="text-[10px] text-muted-foreground border-border"
+                    >
                       Confidence: {incident.confidence.toUpperCase()}
                     </Badge>
                   </div>
@@ -200,7 +279,9 @@ export function IncidentsTab({ servers }: { servers: ServerSummary[] }) {
                 <div className="text-right shrink-0 space-y-1">
                   <div className="text-xs text-muted-foreground flex items-center gap-1.5 justify-end">
                     <ServerIcon className="h-3.5 w-3.5" />
-                    <span className="font-medium text-foreground">{incident.server?.name || "Server"}</span>
+                    <span className="font-medium text-foreground">
+                      {incident.server?.name || "Server"}
+                    </span>
                   </div>
                   <div className="text-[11px] text-muted-foreground flex items-center gap-1 justify-end">
                     <Clock className="h-3 w-3" />
@@ -218,7 +299,10 @@ export function IncidentsTab({ servers }: { servers: ServerSummary[] }) {
                       variant="outline"
                       className="h-7 text-xs"
                       onClick={() =>
-                        updateStatusMutation.mutate({ id: incident.id, status: "investigating" })
+                        updateStatusMutation.mutate({
+                          id: incident.id,
+                          status: "investigating",
+                        })
                       }
                       disabled={updateStatusMutation.isPending}
                     >
@@ -227,13 +311,17 @@ export function IncidentsTab({ servers }: { servers: ServerSummary[] }) {
                     </Button>
                   )}
 
-                  {(incident.status === "open" || incident.status === "investigating") && (
+                  {(incident.status === "open" ||
+                    incident.status === "investigating") && (
                     <Button
                       size="sm"
                       variant="outline"
                       className="h-7 text-xs"
                       onClick={() =>
-                        updateStatusMutation.mutate({ id: incident.id, status: "contained" })
+                        updateStatusMutation.mutate({
+                          id: incident.id,
+                          status: "contained",
+                        })
                       }
                       disabled={updateStatusMutation.isPending}
                     >
@@ -248,7 +336,10 @@ export function IncidentsTab({ servers }: { servers: ServerSummary[] }) {
                       variant="outline"
                       className="h-7 text-xs"
                       onClick={() =>
-                        updateStatusMutation.mutate({ id: incident.id, status: "resolved" })
+                        updateStatusMutation.mutate({
+                          id: incident.id,
+                          status: "resolved",
+                        })
                       }
                       disabled={updateStatusMutation.isPending}
                     >
@@ -263,7 +354,10 @@ export function IncidentsTab({ servers }: { servers: ServerSummary[] }) {
                       variant="ghost"
                       className="h-7 text-xs text-muted-foreground"
                       onClick={() =>
-                        updateStatusMutation.mutate({ id: incident.id, status: "false_positive" })
+                        updateStatusMutation.mutate({
+                          id: incident.id,
+                          status: "false_positive",
+                        })
                       }
                       disabled={updateStatusMutation.isPending}
                     >
@@ -274,18 +368,20 @@ export function IncidentsTab({ servers }: { servers: ServerSummary[] }) {
 
                 <button
                   type="button"
-                  onClick={() => setExpandedIncidentId(isExpanded ? null : incident.id)}
+                  onClick={() => toggleIncident(incident.id)}
                   className="text-xs text-primary hover:underline flex items-center gap-1 font-medium ml-auto"
                 >
                   {isExpanded ? (
                     <>
                       <ChevronUp className="h-3.5 w-3.5" />
-                      Hide Correlated Findings ({incident.findings?.length || 0})
+                      Hide Correlated Findings ({incident.findings?.length || 0}
+                      )
                     </>
                   ) : (
                     <>
                       <ChevronDown className="h-3.5 w-3.5" />
-                      View Correlated Findings ({incident.findings?.length || 0})
+                      View Correlated Findings ({incident.findings?.length || 0}
+                      )
                     </>
                   )}
                 </button>
@@ -303,10 +399,15 @@ export function IncidentsTab({ servers }: { servers: ServerSummary[] }) {
                       className="bg-card p-2.5 rounded border border-border flex items-center justify-between gap-3 text-xs"
                     >
                       <div className="flex items-center gap-2">
-                        <Badge variant="outline" className="text-[10px] uppercase font-mono">
+                        <Badge
+                          variant="outline"
+                          className="text-[10px] uppercase font-mono"
+                        >
                           {finding.category}
                         </Badge>
-                        <span className="font-medium text-foreground">{finding.title}</span>
+                        <span className="font-medium text-foreground">
+                          {finding.title}
+                        </span>
                       </div>
                       {finding.resource && (
                         <code className="text-[11px] font-mono text-muted-foreground bg-muted px-1 py-0.5 rounded">
@@ -321,6 +422,13 @@ export function IncidentsTab({ servers }: { servers: ServerSummary[] }) {
           );
         })}
       </div>
+      {data && data.totalPages > 1 && (
+        <Pagination
+          page={page}
+          totalPages={data.totalPages}
+          onPageChange={setPage}
+        />
+      )}
     </div>
   );
 }

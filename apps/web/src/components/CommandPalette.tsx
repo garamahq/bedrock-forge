@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -129,6 +129,7 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
   const [activeIndex, setActiveIndex] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const listboxId = useId();
   const debouncedQuery = useDebounce(query, 180);
 
   const { data, isFetching } = useQuery({
@@ -178,7 +179,9 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setActiveIndex((i) => Math.min(i + 1, visibleItems.length - 1));
+      setActiveIndex((i) =>
+        Math.max(0, Math.min(i + 1, visibleItems.length - 1)),
+      );
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setActiveIndex((i) => Math.max(i - 1, 0));
@@ -200,6 +203,17 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
           <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
           <input
             ref={inputRef}
+            type="search"
+            role="combobox"
+            aria-label="Search pages, projects, and operations"
+            aria-autocomplete="list"
+            aria-expanded={visibleItems.length > 0}
+            aria-controls={listboxId}
+            aria-activedescendant={
+              visibleItems[activeIndex]
+                ? `${listboxId}-option-${activeIndex}`
+                : undefined
+            }
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -224,7 +238,23 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
           </kbd>
         </div>
 
-        <div ref={listRef} className="max-h-[28rem] overflow-y-auto py-2">
+        <div
+          ref={listRef}
+          id={listboxId}
+          role="listbox"
+          aria-label="Search results"
+          className="max-h-[28rem] overflow-y-auto py-2"
+        >
+          <div
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+            className="sr-only"
+          >
+            {isFetching
+              ? "Searching"
+              : `${visibleItems.length} search result${visibleItems.length === 1 ? "" : "s"}`}
+          </div>
           {isFetching && visibleItems.length === 0 ? (
             <div className="flex items-center justify-center gap-2 py-8 text-sm text-muted-foreground">
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -256,6 +286,9 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
                 )}
                 <button
                   type="button"
+                  role="option"
+                  id={`${listboxId}-option-${i}`}
+                  aria-selected={i === activeIndex}
                   data-index={i}
                   onClick={() => handleSelect(item)}
                   onMouseEnter={() => setActiveIndex(i)}

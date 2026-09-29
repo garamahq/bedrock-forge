@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useWebSocketEvent } from "@/lib/websocket";
 import { isHttpStatusWorking, WS_EVENTS } from "@bedrock-forge/shared";
@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { toast } from "@/hooks/use-toast";
+import { useAuthStore } from "@/store/auth.store";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -513,12 +514,23 @@ function EditMonitorDialog({
 export function MonitorsPage() {
   const qc = useQueryClient();
   const navigate = useNavigate();
+  const isAdmin = useAuthStore(
+    (state) => state.user?.roles?.includes("admin") ?? false,
+  );
+  const [searchParams, setSearchParams] = useSearchParams();
+  const searchParam = searchParams.get("search") ?? "";
   const [page, setPage] = useState(1);
-  const [search, setSearch] = useState("");
-  const [searchInput, setSearchInput] = useState("");
+  const [search, setSearch] = useState(searchParam);
+  const [searchInput, setSearchInput] = useState(searchParam);
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Monitor | null>(null);
   const [editTarget, setEditTarget] = useState<Monitor | null>(null);
+
+  useEffect(() => {
+    setSearch(searchParam);
+    setSearchInput(searchParam);
+    setPage(1);
+  }, [searchParam]);
 
   // ── Selection State ──────────────────────────────────────────────────────
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
@@ -578,14 +590,28 @@ export function MonitorsPage() {
 
   const bulkDeleteMutation = useMutation({
     mutationFn: async (ids: number[]) => {
-      for (const id of ids) {
-        await api.delete(`/monitors/${id}`);
-      }
+      const results = await Promise.allSettled(
+        ids.map((id) => api.delete(`/monitors/${id}`)),
+      );
+      return {
+        succeeded:
+          results.length -
+          results.filter((result) => result.status === "rejected").length,
+        failedIds: ids.filter(
+          (_, index) => results[index]?.status === "rejected",
+        ),
+      };
     },
-    onSuccess: () => {
+    onSuccess: ({ succeeded, failedIds }) => {
       qc.invalidateQueries({ queryKey: ["monitors"] });
-      clearSelection();
-      toast({ title: "Monitors deleted" });
+      setSelectedIds(new Set(failedIds));
+      toast({
+        title: failedIds.length
+          ? "Some monitors could not be deleted"
+          : "Monitors deleted",
+        description: `${succeeded} deleted, ${failedIds.length} failed. Failed items remain selected for review.`,
+        variant: failedIds.length ? "destructive" : undefined,
+      });
     },
   });
 
@@ -600,7 +626,8 @@ export function MonitorsPage() {
       clearSelection();
       toast({ title: "Monitors activated" });
     },
-    onError: () => toast({ title: "Activation failed", variant: "destructive" }),
+    onError: () =>
+      toast({ title: "Activation failed", variant: "destructive" }),
   });
 
   const bulkDeactivateMutation = useMutation({
@@ -614,7 +641,8 @@ export function MonitorsPage() {
       clearSelection();
       toast({ title: "Monitors deactivated" });
     },
-    onError: () => toast({ title: "Deactivation failed", variant: "destructive" }),
+    onError: () =>
+      toast({ title: "Deactivation failed", variant: "destructive" }),
   });
 
   const editMutation = useMutation({
@@ -779,13 +807,24 @@ export function MonitorsPage() {
         value={searchInput}
         onChange={setSearchInput}
         onSearch={() => {
-          setSearch(searchInput);
+          setSearch(searchInput.trim());
           setPage(1);
+          setSearchParams((previous) => {
+            const next = new URLSearchParams(previous);
+            if (searchInput.trim()) next.set("search", searchInput.trim());
+            else next.delete("search");
+            return next;
+          });
         }}
         onClear={() => {
           setSearch("");
           setSearchInput("");
           setPage(1);
+          setSearchParams((previous) => {
+            const next = new URLSearchParams(previous);
+            next.delete("search");
+            return next;
+          });
         }}
         placeholder="Search by URL…"
         totalCount={data?.total ?? 0}
@@ -816,7 +855,8 @@ export function MonitorsPage() {
             <Checkbox checked={isAllSelected} onCheckedChange={toggleAll} />
           }
           renderActions={(m) => {
-            const isPending = triggerMutation.isPending && triggerMutation.variables === m.id;
+            const isPending =
+              triggerMutation.isPending && triggerMutation.variables === m.id;
             return (
               <div className="flex items-center gap-1">
                 <Button
@@ -827,7 +867,9 @@ export function MonitorsPage() {
                   disabled={triggerMutation.isPending}
                   title="Trigger check now"
                 >
-                  <RefreshCw className={`h-4 w-4 ${isPending ? "animate-spin" : ""}`} />
+                  <RefreshCw
+                    className={`h-4 w-4 ${isPending ? "animate-spin" : ""}`}
+                  />
                 </Button>
                 <Button
                   variant="ghost"
@@ -838,14 +880,18 @@ export function MonitorsPage() {
                 >
                   <Pencil className="h-4 w-4" />
                 </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-7 w-7 text-destructive hover:text-destructive"
-                  onClick={() => setDeleteTarget(m)}
-                >
-                  <Trash2 className="h-4 w-4" />
-                </Button>
+                {isAdmin && (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 text-destructive hover:text-destructive"
+                    onClick={() => setDeleteTarget(m)}
+                    title="Delete monitor"
+                    aria-label="Delete monitor"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                )}
               </div>
             );
           }}
@@ -901,20 +947,24 @@ export function MonitorsPage() {
               bulkDeactivateMutation.mutate(Array.from(selectedIds));
             },
           },
-          {
-            label: "Delete",
-            icon: Trash2,
-            variant: "destructive",
-            onClick: () => {
-              if (
-                confirm(
-                  `Are you sure you want to delete ${selectedIds.size} monitors?`,
-                )
-              ) {
-                bulkDeleteMutation.mutate(Array.from(selectedIds));
-              }
-            },
-          },
+          ...(isAdmin
+            ? [
+                {
+                  label: "Delete",
+                  icon: Trash2,
+                  variant: "destructive" as const,
+                  onClick: () => {
+                    if (
+                      confirm(
+                        `Are you sure you want to delete ${selectedIds.size} monitors?`,
+                      )
+                    ) {
+                      bulkDeleteMutation.mutate(Array.from(selectedIds));
+                    }
+                  },
+                },
+              ]
+            : []),
         ]}
       />
     </div>

@@ -9,6 +9,7 @@ describe("SearchService", () => {
     repo = {
       findClients: jest.fn(),
       findProjects: jest.fn(),
+      findRecentProjects: jest.fn(),
       findEnvironments: jest.fn(),
       findServers: jest.fn(),
       findDomains: jest.fn(),
@@ -19,6 +20,7 @@ describe("SearchService", () => {
     } as unknown as jest.Mocked<SearchRepository>;
     repo.findClients.mockResolvedValue([]);
     repo.findProjects.mockResolvedValue([]);
+    repo.findRecentProjects.mockResolvedValue([]);
     repo.findEnvironments.mockResolvedValue([]);
     repo.findServers.mockResolvedValue([]);
     repo.findDomains.mockResolvedValue([]);
@@ -213,7 +215,7 @@ describe("SearchService", () => {
       expect.arrayContaining([
         expect.objectContaining({
           type: "finding",
-          path: "/projects/7?tab=security&env=11",
+          path: "/security?tab=findings&findingId=22",
         }),
       ]),
     );

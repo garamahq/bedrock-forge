@@ -2,6 +2,7 @@ import { Injectable } from "@nestjs/common";
 import {
   PluginInfoSchema,
   PluginScanOutputSchema,
+  NAVIGATION_PAGES,
 } from "@bedrock-forge/shared";
 import { SearchRepository } from "./search.repository";
 
@@ -36,85 +37,15 @@ const ROLE_WEIGHT: Record<string, number> = {
   client: 1,
 };
 
-const STATIC_PAGES: Array<{
-  label: string;
-  path: string;
-  icon: string;
-  minRole?: string;
-}> = [
-  {
-    label: "Dashboard",
-    path: "/dashboard",
-    icon: "LayoutDashboard",
-    minRole: "maintainer",
-  },
-  { label: "Clients", path: "/clients", icon: "Users" },
-  { label: "Servers", path: "/servers", icon: "Server", minRole: "manager" },
-  {
-    label: "Projects",
-    path: "/projects",
-    icon: "FolderOpen",
-    minRole: "manager",
-  },
-  { label: "Backups", path: "/backups", icon: "HardDrive" },
-  { label: "Domains", path: "/domains", icon: "Globe" },
-  { label: "Monitors", path: "/monitors", icon: "Activity" },
-  { label: "Lighthouse", path: "/lighthouse", icon: "Gauge" },
-  { label: "Activity", path: "/activity", icon: "ClipboardList" },
-  {
-    label: "Work Queue",
-    path: "/problems",
-    icon: "AlertTriangle",
-    minRole: "maintainer",
-  },
-  {
-    label: "Security",
-    path: "/security",
-    icon: "ShieldAlert",
-    minRole: "manager",
-  },
-  {
-    label: "Maintenance",
-    path: "/maintenance-windows",
-    icon: "Calendar",
-    minRole: "manager",
-  },
-  { label: "Settings", path: "/settings", icon: "Settings" },
-  { label: "Packages", path: "/packages", icon: "Package", minRole: "manager" },
-  {
-    label: "Invoices",
-    path: "/invoices",
-    icon: "FileText",
-    minRole: "manager",
-  },
-  { label: "Tags", path: "/tags", icon: "Tag", minRole: "manager" },
-  { label: "Users & Roles", path: "/users", icon: "Shield", minRole: "admin" },
-  {
-    label: "Audit Logs",
-    path: "/audit-logs",
-    icon: "ClipboardCheck",
-    minRole: "admin",
-  },
-  {
-    label: "Notifications",
-    path: "/notifications",
-    icon: "Bell",
-    minRole: "admin",
-  },
-  {
-    label: "Reports",
-    path: "/reports",
-    icon: "FileBarChart",
-    minRole: "admin",
-  },
-];
-
 const PROJECT_TABS = [
   { value: "environments", label: "Environments", terms: ["env", "site"] },
-  { value: "backups", label: "Backups", terms: ["backup", "restore point"] },
+  {
+    value: "backups",
+    label: "Backups & Restore",
+    terms: ["backup", "restore", "restore point", "rollback"],
+  },
   { value: "plugins", label: "Plugins", terms: ["plugin", "composer"] },
   { value: "sync", label: "Sync", terms: ["clone", "push"] },
-  { value: "restore", label: "Restore", terms: ["rollback"] },
   { value: "tools", label: "Tools", terms: ["wp cli", "debug", "maintenance"] },
   { value: "drift", label: "Drift", terms: ["config"] },
   { value: "themes", label: "Themes", terms: ["theme"] },
@@ -127,6 +58,16 @@ const PROJECT_TABS = [
     terms: ["activity", "jobs", "log", "deploy", "version", "changes"],
   },
 ];
+
+function matchingProjectTabs(query: string) {
+  if (!query) return [];
+  return PROJECT_TABS.filter((tab) => {
+    const terms = [tab.label, tab.value, ...tab.terms].map((term) =>
+      term.toLowerCase(),
+    );
+    return terms.some((term) => term.includes(query) || query.includes(term));
+  });
+}
 
 function normalize(s: string) {
   return s.trim().toLowerCase();
@@ -212,6 +153,7 @@ export class SearchService {
         jobs,
         clients,
         inventoryScans,
+        recentProjects,
       ] = await Promise.all([
         this.searchProjects(q, take),
         this.searchEnvironments(q, take),
@@ -221,12 +163,23 @@ export class SearchService {
         this.searchJobs(q, take),
         this.searchClients(q, take),
         q ? this.repo.findLatestInventoryScans() : Promise.resolve([]),
+        matchingProjectTabs(q).length > 0
+          ? this.searchRecentProjects(5)
+          : Promise.resolve([]),
       ]);
       const findings = await this.searchFindings(q, take);
+      const tabProjects = [
+        ...new Map(
+          [...projects, ...recentProjects].map((project) => [
+            project.id,
+            project,
+          ]),
+        ).values(),
+      ];
 
       results.push(...projects);
       results.push(...environments);
-      results.push(...this.searchProjectTabs(q, projects));
+      results.push(...this.searchProjectTabs(q, tabProjects));
       results.push(...servers);
       results.push(...domains);
       results.push(...monitors);
@@ -242,7 +195,7 @@ export class SearchService {
   }
 
   private searchPages(q: string, roles: string[]): SearchResult[] {
-    return STATIC_PAGES.filter((page) => canSee(roles, page.minRole))
+    return NAVIGATION_PAGES.filter((page) => canSee(roles, page.minRole))
       .filter((page) => !q || page.label.toLowerCase().includes(q))
       .slice(0, q ? 8 : 12)
       .map((page) => ({
@@ -282,6 +235,19 @@ export class SearchService {
     if (!q) return [];
     const projects = await this.repo.findProjects(q, take);
 
+    return projects.map((project) => ({
+      type: "project",
+      id: String(project.id),
+      label: project.name,
+      subtitle: `${project.client.name} · ${project._count.environments} environment${project._count.environments === 1 ? "" : "s"}`,
+      path: `/projects/${project.id}`,
+      icon: "FolderOpen",
+      meta: { projectId: Number(project.id), projectName: project.name },
+    }));
+  }
+
+  private async searchRecentProjects(take: number): Promise<SearchResult[]> {
+    const projects = await this.repo.findRecentProjects(take);
     return projects.map((project) => ({
       type: "project",
       id: String(project.id),
@@ -439,8 +405,8 @@ export class SearchService {
           .filter(Boolean)
           .join(" · "),
         path: environment
-          ? `/projects/${environment.project.id}?tab=security&env=${environment.id}`
-          : "/security?tab=findings",
+          ? `/security?tab=findings&findingId=${finding.id}`
+          : `/security?tab=findings&findingId=${finding.id}`,
         icon: "ShieldAlert",
         meta: {
           severity: finding.severity,
@@ -458,12 +424,7 @@ export class SearchService {
   ): SearchResult[] {
     if (!q || projects.length === 0) return [];
 
-    const matchingTabs = PROJECT_TABS.filter((tab) => {
-      const terms = [tab.label, tab.value, ...tab.terms].map((term) =>
-        term.toLowerCase(),
-      );
-      return terms.some((term) => term.includes(q) || q.includes(term));
-    });
+    const matchingTabs = matchingProjectTabs(q);
 
     if (matchingTabs.length === 0) return [];
 
