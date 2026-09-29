@@ -98,6 +98,25 @@ describe("createRemoteMyCnf & cleanupRemoteMyCnf", () => {
     );
   });
 
+  it("can omit the default database when the command supplies it explicitly", async () => {
+    await createRemoteMyCnf(
+      mockExecutor,
+      {
+        dbUser: "user",
+        dbPassword: "password",
+        dbHost: "localhost",
+        dbName: "site_db",
+      },
+      124,
+      "test",
+      { includeDatabase: false },
+    );
+
+    const uploaded = mockExecutor.pushFile.mock.calls[0][0].content.toString();
+    expect(uploaded).not.toContain("database=site_db");
+    expect(uploaded).toContain("user=user");
+  });
+
   it("cleans up remote my.cnf file", async () => {
     await cleanupRemoteMyCnf(mockExecutor, "/tmp/stale.cnf");
     expect(mockExecutor.execute).toHaveBeenCalledWith(`rm -f '/tmp/stale.cnf'`);
@@ -303,4 +322,3 @@ describe("fixCyberPanelOwnership", () => {
     expect(executedCommands.some((c) => c.includes("chmod 750"))).toBe(true);
   });
 });
-

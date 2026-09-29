@@ -443,6 +443,7 @@ export async function createRemoteMyCnf(
   creds: { dbUser: string; dbPassword?: string; dbHost: string; dbName?: string },
   jobId: string | number,
   prefix = "forge",
+  options: { includeDatabase?: boolean } = {},
 ): Promise<string> {
   // Housekeeping: clean any orphaned cnf files older than 60 minutes
   await executor.execute(`find /tmp -name "${prefix}_mycnf_*.cnf" -mmin +60 -delete 2>/dev/null || true`).catch(() => {});
@@ -450,7 +451,7 @@ export async function createRemoteMyCnf(
   const rand = randomBytes(16).toString("hex");
   const remotePath = `/tmp/${prefix}_mycnf_${jobId}_${rand}.cnf`;
   let content = `[client]\nuser=${creds.dbUser}\npassword=${creds.dbPassword ?? ""}\nhost=${creds.dbHost}\n`;
-  if (creds.dbName) {
+  if (creds.dbName && options.includeDatabase !== false) {
     content += `database=${creds.dbName}\n`;
   }
   await executor.pushFile({

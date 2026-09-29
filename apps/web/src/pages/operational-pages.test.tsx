@@ -44,7 +44,9 @@ describe("operational pages", () => {
 
     expect(await screen.findByText("Could not load activity")).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: "Retry" }));
-    expect(await screen.findByText("No job executions found")).toBeVisible();
+    expect(
+      await screen.findByText("No jobs match these filters"),
+    ).toBeVisible();
   });
 
   it("does not report an empty report channel list after a failed request", async () => {

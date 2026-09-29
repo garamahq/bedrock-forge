@@ -221,6 +221,7 @@ export class CreateBedrockProcessor extends WorkerHost {
           srcCreds,
           job.id ?? "default",
           "cb_src",
+          { includeDatabase: false },
         );
         try {
           const dumpResult = await srcExecutor.execute(
@@ -1380,4 +1381,3 @@ export class CreateBedrockProcessor extends WorkerHost {
     }
   }
 }
-

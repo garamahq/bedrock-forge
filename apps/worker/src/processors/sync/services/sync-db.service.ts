@@ -421,6 +421,7 @@ export class SyncDbService {
       targetCreds,
       job.id!,
       "forge_sync_sb",
+      { includeDatabase: false },
     );
     const maskedDump = `mysqldump --defaults-extra-file=*** --single-transaction --quick ${targetCreds.dbName}`;
 
@@ -1411,4 +1412,3 @@ export class SyncDbService {
     }
   }
 }
-

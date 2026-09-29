@@ -3,7 +3,6 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ChevronDown,
   ChevronUp,
-  Terminal,
   Clock,
   CheckCircle2,
   XCircle,
@@ -96,10 +95,12 @@ function EntryRow({
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
+    timeZoneName: "short",
   });
+  const hasOutput = Boolean(entry.command || entry.stdout || entry.stderr);
 
   return (
-    <div className="flex gap-3">
+    <li className="flex gap-3">
       {/* timeline spine */}
       <div className="flex flex-col items-center">
         <LevelIcon level={entry.level} />
@@ -149,31 +150,52 @@ function EntryRow({
           </p>
         )}
 
-        {entry.command && (
-          <div className="mt-1 flex items-start gap-1.5">
-            <Terminal className="h-3 w-3 text-muted-foreground flex-shrink-0 mt-0.5" />
-            <code className="text-xs font-mono bg-muted rounded px-1.5 py-0.5 break-all">
-              {entry.command}
-            </code>
-          </div>
-        )}
-
-        {(entry.stdout || entry.stderr) && (
-          <div className="mt-1.5 space-y-1">
-            {entry.stdout && (
-              <pre className="text-xs bg-muted rounded p-2 overflow-x-auto whitespace-pre-wrap break-all max-h-24 overflow-y-auto">
-                {entry.stdout}
-              </pre>
-            )}
-            {entry.stderr && (
-              <pre className="text-xs bg-destructive/10 text-destructive rounded p-2 overflow-x-auto whitespace-pre-wrap break-all max-h-24 overflow-y-auto">
-                {entry.stderr}
-              </pre>
-            )}
-          </div>
+        {hasOutput && (
+          <details className="mt-1.5 rounded-md border border-border/60 bg-muted/20 px-2 py-1.5">
+            <summary className="cursor-pointer text-xs text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+              Show command output
+            </summary>
+            <div className="mt-2 space-y-2">
+              {entry.command && (
+                <div>
+                  <p className="mb-1 text-[11px] font-medium text-muted-foreground">
+                    Command
+                  </p>
+                  <code className="block rounded bg-muted p-2 text-xs font-mono whitespace-pre-wrap break-all">
+                    {entry.command}
+                  </code>
+                </div>
+              )}
+              {entry.stdout && (
+                <div>
+                  <p className="mb-1 text-[11px] font-medium text-muted-foreground">
+                    stdout
+                  </p>
+                  <pre className="max-h-40 overflow-auto rounded bg-muted p-2 text-xs whitespace-pre-wrap break-all">
+                    {entry.stdout}
+                  </pre>
+                </div>
+              )}
+              {entry.stderr && (
+                <div>
+                  <p
+                    className={`mb-1 text-[11px] font-medium ${entry.level === "error" ? "text-destructive" : "text-warning"}`}
+                  >
+                    stderr
+                    {entry.exitCode === 0 ? " · command succeeded" : ""}
+                  </p>
+                  <pre
+                    className={`max-h-40 overflow-auto rounded p-2 text-xs whitespace-pre-wrap break-all ${entry.level === "error" ? "bg-destructive/10 text-destructive" : "bg-warning/10 text-foreground"}`}
+                  >
+                    {entry.stderr}
+                  </pre>
+                </div>
+              )}
+            </div>
+          </details>
         )}
       </div>
-    </div>
+    </li>
   );
 }
 
@@ -187,9 +209,11 @@ function EntryRow({
 export function ExecutionLogPanel({
   jobExecutionId,
   isActive = false,
+  targetLabel,
 }: {
   jobExecutionId: number | null;
   isActive?: boolean;
+  targetLabel?: string;
 }) {
   const [copied, setCopied] = useState(false);
   const queryClient = useQueryClient();
@@ -242,7 +266,7 @@ export function ExecutionLogPanel({
     }
   }
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ["execution-log", jobExecutionId],
     queryFn: () =>
       api.get<JobExecutionLog>(`/job-executions/${jobExecutionId}/log`),
@@ -273,21 +297,66 @@ export function ExecutionLogPanel({
     );
   }
 
-  function formatAsText() {
-    return entries
-      .map((e) =>
-        [new Date(e.ts).toLocaleTimeString(), e.step, e.detail, e.command]
-          .filter(Boolean)
-          .join(" | "),
-      )
-      .join("\n");
+  if (isError && !data) {
+    return (
+      <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3">
+        <p role="alert" className="text-sm font-medium">
+          Could not load this execution log.
+        </p>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => void refetch()}
+          className="mt-2"
+        >
+          Try again
+        </Button>
+      </div>
+    );
   }
 
-  function handleCopy() {
-    navigator.clipboard.writeText(formatAsText()).then(() => {
+  function formatAsText(): string {
+    const lines = [
+      `Execution log #${jobExecutionId}`,
+      `Status: ${data?.status ?? "unknown"}`,
+      `Started: ${data?.started_at ?? data?.created_at ?? "unknown"}`,
+      `Completed: ${data?.completed_at ?? "in progress or unavailable"}`,
+      ...(targetLabel ? [`Target: ${targetLabel}`] : []),
+      "",
+    ];
+
+    for (const entry of entries) {
+      lines.push(`[${entry.ts}] [${entry.level.toUpperCase()}] ${entry.step}`);
+      if (entry.detail) lines.push(`  Detail: ${entry.detail}`);
+      if (entry.command) lines.push(`  Command: ${entry.command}`);
+      if (entry.exitCode !== undefined)
+        lines.push(`  Exit code: ${entry.exitCode}`);
+      if (entry.durationMs !== undefined)
+        lines.push(`  Duration: ${entry.durationMs}ms`);
+      if (entry.stdout) lines.push(`  stdout:\n${entry.stdout}`);
+      if (entry.stderr) lines.push(`  stderr:\n${entry.stderr}`);
+      lines.push("");
+    }
+    return lines.join("\n");
+  }
+
+  async function handleCopy() {
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("Clipboard access is unavailable in this browser.");
+      }
+      await navigator.clipboard.writeText(formatAsText());
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
+      window.setTimeout(() => setCopied(false), 2000);
+      toast({ title: "Execution log copied" });
+    } catch (err) {
+      toast({
+        title: "Could not copy execution log",
+        description: err instanceof Error ? err.message : "Please try again.",
+        variant: "destructive",
+      });
+    }
   }
 
   function handleDownload() {
@@ -296,13 +365,50 @@ export function ExecutionLogPanel({
     const a = document.createElement("a");
     a.href = url;
     a.download = `execution-log-${jobExecutionId}.txt`;
+    document.body.appendChild(a);
     a.click();
-    URL.revokeObjectURL(url);
+    a.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
+
+  const directionEntry = entries.find(
+    (entry) => entry.step === "Sync direction",
+  );
+  const legacyDirectionEntry = entries.find((entry) =>
+    /sync (?:push )?started/i.test(entry.step),
+  );
+  const direction =
+    directionEntry?.detail ??
+    legacyDirectionEntry?.detail?.replace(/,\s*scope=.*$/i, "");
+  const safetyEntries = entries.filter((entry) =>
+    entry.step.toLowerCase().includes("safety backup"),
+  );
+  const safetySkipped = safetyEntries.some((entry) =>
+    entry.step.toLowerCase().includes("skipped"),
+  );
+  const safetyFailed = safetyEntries.some(
+    (entry) =>
+      entry.level === "error" ||
+      (entry.exitCode != null && entry.exitCode !== 0),
+  );
+  const safetyComplete = safetyEntries.some((entry) =>
+    [
+      "safety backup recorded",
+      "safety backup uploaded to google drive",
+    ].includes(entry.step.toLowerCase()),
+  );
+  const safetyStatus = safetySkipped
+    ? "Skipped"
+    : safetyFailed
+      ? "Failed"
+      : safetyComplete
+        ? "Completed"
+        : "In progress";
+  const stderrCount = entries.filter((entry) => Boolean(entry.stderr)).length;
 
   const summary = (
     <div className="mb-3 rounded-md border bg-muted/30 p-3">
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2" aria-live="polite">
         <Badge
           variant={
             data?.status === "failed" || data?.status === "dead_letter"
@@ -331,6 +437,24 @@ export function ExecutionLogPanel({
             {data.progress}%
           </span>
         )}
+        {stderrCount > 0 && (
+          <Badge variant="warning">
+            {stderrCount} stderr {stderrCount === 1 ? "message" : "messages"}
+          </Badge>
+        )}
+        {safetyEntries.length > 0 && (
+          <Badge
+            variant={
+              safetySkipped || safetyFailed
+                ? "warning"
+                : safetyComplete
+                  ? "success"
+                  : "secondary"
+            }
+          >
+            Safety backup: {safetyStatus}
+          </Badge>
+        )}
       </div>
       {data?.progress != null && data.status !== "completed" && (
         <Progress value={data.progress} className="mt-2 h-1.5" />
@@ -338,6 +462,19 @@ export function ExecutionLogPanel({
       {latest && (
         <p className="mt-2 truncate text-xs text-muted-foreground">
           {latest.step}
+        </p>
+      )}
+      {direction && (
+        <div className="mt-2 border-t border-border/40 pt-2">
+          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            Source → target
+          </p>
+          <p className="mt-0.5 text-sm">{direction}</p>
+        </div>
+      )}
+      {targetLabel && (
+        <p className="mt-2 text-xs text-muted-foreground">
+          Target environment: {targetLabel}
         </p>
       )}
       {data?.last_error && (
@@ -401,8 +538,9 @@ export function ExecutionLogPanel({
       <div className="flex items-center justify-end gap-2 mb-2">
         <button
           type="button"
-          onClick={handleCopy}
-          className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+          onClick={() => void handleCopy()}
+          className="inline-flex min-h-8 items-center gap-1 rounded px-2 text-xs text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          aria-label="Copy complete execution log"
         >
           <Copy className="h-3.5 w-3.5" />
           {copied ? "Copied!" : "Copy"}
@@ -410,15 +548,22 @@ export function ExecutionLogPanel({
         <button
           type="button"
           onClick={handleDownload}
-          className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+          className="inline-flex min-h-8 items-center gap-1 rounded px-2 text-xs text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          aria-label="Download complete execution log"
         >
           <Download className="h-3.5 w-3.5" />
           Download
         </button>
       </div>
-      {entries.map((entry, i) => (
-        <EntryRow key={i} entry={entry} isLast={i === entries.length - 1} />
-      ))}
+      <ol aria-label="Execution steps" className="space-y-0">
+        {entries.map((entry, i) => (
+          <EntryRow
+            key={`${entry.ts}-${entry.step}-${i}`}
+            entry={entry}
+            isLast={i === entries.length - 1}
+          />
+        ))}
+      </ol>
     </div>
   );
 }
@@ -432,17 +577,30 @@ export function ExpandLogButton({
   expanded,
   onToggle,
   disabled,
+  id,
+  controlsId,
+  label,
 }: {
   expanded: boolean;
   onToggle: () => void;
   disabled?: boolean;
+  id?: string;
+  controlsId?: string;
+  label?: string;
 }) {
+  const accessibleLabel =
+    label ?? `${expanded ? "Hide" : "Show"} execution log`;
   return (
     <button
+      type="button"
+      id={id}
       onClick={onToggle}
       disabled={disabled}
-      className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors disabled:opacity-40 disabled:pointer-events-none"
-      title={expanded ? "Hide execution log" : "Show execution log"}
+      aria-label={accessibleLabel}
+      aria-expanded={expanded}
+      aria-controls={controlsId}
+      className="inline-flex min-h-8 items-center gap-1 rounded px-2 text-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40 disabled:pointer-events-none"
+      title={accessibleLabel}
     >
       {expanded ? (
         <ChevronUp className="h-3.5 w-3.5" />

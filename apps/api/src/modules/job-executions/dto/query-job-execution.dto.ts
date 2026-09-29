@@ -4,21 +4,15 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  MaxLength,
   Max,
   Min,
 } from "class-validator";
 import { Type } from "class-transformer";
+import { QUEUES } from "@bedrock-forge/shared";
+import { JobExecutionStatus } from "@prisma/client";
 
-const VALID_QUEUES = [
-  "backups",
-  "plugin-scans",
-  "sync",
-  "monitors",
-  "domains",
-  "projects",
-  "notifications",
-  "reports",
-];
+const VALID_QUEUES = Object.values(QUEUES);
 
 const VALID_STATUSES = [
   "queued",
@@ -51,6 +45,11 @@ export class QueryJobExecutionDto {
 
   @IsOptional()
   @IsString()
+  @MaxLength(100)
+  search?: string;
+
+  @IsOptional()
+  @IsString()
   @IsIn(VALID_QUEUES)
   queue_name?: string;
 
@@ -61,7 +60,7 @@ export class QueryJobExecutionDto {
   @IsOptional()
   @IsString()
   @IsIn(VALID_STATUSES)
-  status?: string;
+  status?: JobExecutionStatus;
 
   @IsOptional()
   @Type(() => Number)

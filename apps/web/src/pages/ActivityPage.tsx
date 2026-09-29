@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import {
@@ -7,11 +7,12 @@ import {
   Clock,
   Loader2,
   ClipboardList,
-  ChevronDown,
-  ChevronUp,
+  Search,
+  X,
   AlertTriangle,
   Trash2,
 } from "lucide-react";
+import { QUEUES } from "@bedrock-forge/shared";
 import { api } from "@/lib/api-client";
 import {
   Select,
@@ -22,6 +23,7 @@ import {
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   ExecutionLogPanel,
   ExpandLogButton,
@@ -34,6 +36,7 @@ import { ErrorState } from "@/components/crud";
 interface JobExecutionRow {
   id: number;
   queue_name: string;
+  job_type: string | null;
   status: string;
   progress: number | null;
   last_error: string | null;
@@ -55,14 +58,32 @@ interface PageResult {
   limit: number;
 }
 
-const QUEUE_LABELS: Record<string, string> = {
-  backups: "Backups",
-  "plugin-scans": "Plugin Scans",
-  sync: "Sync",
-  monitors: "Monitors",
-  domains: "Domains",
-  projects: "Projects",
+const QUEUE_LABEL_OVERRIDES: Record<string, string> = {
+  [QUEUES.BACKUPS]: "Backups",
+  [QUEUES.PLUGIN_SCANS]: "Plugin scans",
+  [QUEUES.PLUGIN_UPDATES]: "Plugin updates",
+  [QUEUES.CUSTOM_PLUGINS]: "Custom plugins",
+  [QUEUES.THEME_SCANS]: "Theme scans",
+  [QUEUES.SYNC]: "Sync",
+  [QUEUES.MONITORS]: "Monitors",
+  [QUEUES.DOMAINS]: "Domains",
+  [QUEUES.PROJECTS]: "Projects",
+  [QUEUES.NOTIFICATIONS]: "Notifications",
+  [QUEUES.REPORTS]: "Reports",
+  [QUEUES.WP_ACTIONS]: "WordPress actions",
+  [QUEUES.SYSTEM_BACKUPS]: "System backups",
+  [QUEUES.SECURITY]: "Security",
 };
+
+const QUEUE_OPTIONS = Object.values(QUEUES).map((queue) => ({
+  value: queue,
+  label:
+    QUEUE_LABEL_OVERRIDES[queue] ??
+    queue
+      .split("-")
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(" "),
+}));
 
 const STATUS_ORDER = [
   "active",
@@ -81,6 +102,36 @@ const STATUS_LABELS: Record<string, string> = {
   dead_letter: "Dead Letter",
   discarded: "Removed from queue",
 };
+
+function queueLabel(queue: string): string {
+  return (
+    QUEUE_OPTIONS.find((option) => option.value === queue)?.label ??
+    queue
+      .split("-")
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(" ")
+  );
+}
+
+function operationLabel(jobType: string | null): string {
+  if (!jobType) return "Job execution";
+  return jobType
+    .split(/[:._-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" · ");
+}
+
+function formatDateTime(value: string): string {
+  return new Intl.DateTimeFormat([], {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  }).format(new Date(value));
+}
 
 // ─── Sub-components ──────────────────────────────────────────────────────────
 
@@ -157,6 +208,8 @@ function durationLabel(
 function ExecutionRow({ row }: { row: JobExecutionRow }) {
   const [expanded, setExpanded] = useState(false);
   const isActive = row.status === "active" || row.status === "queued";
+  const logId = `execution-log-${row.id}`;
+  const logButtonId = `${logId}-toggle`;
 
   return (
     <>
@@ -169,7 +222,7 @@ function ExecutionRow({ row }: { row: JobExecutionRow }) {
         {/* Queue */}
         <td className="py-3 px-2 whitespace-nowrap">
           <Badge variant="outline" className="text-xs font-normal">
-            {QUEUE_LABELS[row.queue_name] ?? row.queue_name}
+            {queueLabel(row.queue_name)}
           </Badge>
         </td>
 
@@ -203,14 +256,8 @@ function ExecutionRow({ row }: { row: JobExecutionRow }) {
         {/* Started */}
         <td className="py-3 px-2 whitespace-nowrap text-xs text-muted-foreground">
           {row.started_at
-            ? new Date(row.started_at).toLocaleString([], {
-                dateStyle: "short",
-                timeStyle: "short",
-              })
-            : new Date(row.created_at).toLocaleString([], {
-                dateStyle: "short",
-                timeStyle: "short",
-              })}
+            ? formatDateTime(row.started_at)
+            : formatDateTime(row.created_at)}
         </td>
 
         {/* Duration */}
@@ -218,26 +265,36 @@ function ExecutionRow({ row }: { row: JobExecutionRow }) {
           {durationLabel(row.started_at, row.completed_at)}
         </td>
 
-        {/* Progress (only for active) */}
+        {/* Operation and useful active or failed details */}
         <td className="py-3 px-2 whitespace-nowrap text-xs">
-          {row.status === "active" && row.progress != null ? (
-            <div className="flex items-center gap-2">
-              <div className="w-16 bg-muted rounded-full h-1.5">
-                <div
-                  className="bg-primary h-1.5 rounded-full"
-                  style={{ width: `${row.progress}%` }}
-                />
+          <div className="space-y-1">
+            {row.job_type && (
+              <div className="space-y-0.5">
+                <p className="font-medium text-foreground">
+                  {operationLabel(row.job_type)}
+                </p>
+                <p className="text-muted-foreground">Job #{row.id}</p>
               </div>
-              <span className="text-muted-foreground">{row.progress}%</span>
-            </div>
-          ) : row.status === "failed" && row.last_error ? (
-            <span
-              className="text-destructive truncate max-w-[160px] block"
-              title={row.last_error}
-            >
-              {row.last_error}
-            </span>
-          ) : null}
+            )}
+            {row.status === "active" && row.progress != null ? (
+              <div className="flex items-center gap-2">
+                <div className="w-16 bg-muted rounded-full h-1.5">
+                  <div
+                    className="bg-primary h-1.5 rounded-full"
+                    style={{ width: `${row.progress}%` }}
+                  />
+                </div>
+                <span className="text-muted-foreground">{row.progress}%</span>
+              </div>
+            ) : row.status === "failed" && row.last_error ? (
+              <span
+                className="text-destructive truncate max-w-[160px] block"
+                title={row.last_error}
+              >
+                {row.last_error}
+              </span>
+            ) : null}
+          </div>
         </td>
 
         {/* Log toggle */}
@@ -245,18 +302,31 @@ function ExecutionRow({ row }: { row: JobExecutionRow }) {
           <ExpandLogButton
             expanded={expanded}
             onToggle={() => setExpanded((v) => !v)}
+            id={logButtonId}
+            controlsId={logId}
+            label={`${expanded ? "Hide" : "Show"} execution log for ${queueLabel(row.queue_name)} job ${row.id}`}
           />
         </td>
       </tr>
 
       {/* Expandable log row */}
-      {expanded && (
-        <tr className="bg-muted/20 border-b last:border-0">
-          <td colSpan={8} className="px-4 pb-4 pt-2">
-            <ExecutionLogPanel jobExecutionId={row.id} isActive={isActive} />
-          </td>
-        </tr>
-      )}
+      <tr hidden={!expanded} className="bg-muted/20 border-b last:border-0">
+        <td colSpan={8} className="px-4 pb-4 pt-2">
+          <div id={logId} role="region" aria-labelledby={logButtonId}>
+            {expanded && (
+              <ExecutionLogPanel
+                jobExecutionId={row.id}
+                isActive={isActive}
+                targetLabel={
+                  row.environment
+                    ? `${row.environment.project.name} · ${row.environment.type}`
+                    : undefined
+                }
+              />
+            )}
+          </div>
+        </td>
+      </tr>
     </>
   );
 }
@@ -266,20 +336,29 @@ function ExecutionRow({ row }: { row: JobExecutionRow }) {
 export function ActivityPage() {
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
-  const [page, setPage] = useState(1);
-  const [queueFilter, setQueueFilter] = useState("all");
-  const [statusFilter, setStatusFilter] = useState(() => {
-    const status = searchParams.get("status");
-    return status && STATUS_ORDER.includes(status) ? status : "all";
-  });
+  const searchFilter = searchParams.get("q")?.trim() ?? "";
+  const [searchDraft, setSearchDraft] = useState(searchFilter);
+  const requestedQueue = searchParams.get("queue") ?? "all";
+  const queueFilter = QUEUE_OPTIONS.some(
+    (option) => option.value === requestedQueue,
+  )
+    ? requestedQueue
+    : "all";
+  const requestedStatus = searchParams.get("status") ?? "all";
+  const statusFilter = STATUS_ORDER.includes(requestedStatus)
+    ? requestedStatus
+    : "all";
+  const requestedPage = Number(searchParams.get("page") ?? "1");
+  const page =
+    Number.isSafeInteger(requestedPage) && requestedPage > 0
+      ? requestedPage
+      : 1;
   const jobIdFilter = searchParams.get("job") ?? "";
-  const LIMIT = 10;
+  const LIMIT = 20;
 
   useEffect(() => {
-    const status = searchParams.get("status");
-    setStatusFilter(status && STATUS_ORDER.includes(status) ? status : "all");
-    setPage(1);
-  }, [searchParams]);
+    setSearchDraft(searchFilter);
+  }, [searchFilter]);
 
   const queryKey = [
     "job-executions",
@@ -287,6 +366,7 @@ export function ActivityPage() {
     queueFilter,
     statusFilter,
     jobIdFilter,
+    searchFilter,
   ];
 
   const { data, isLoading, isError, refetch } = useQuery({
@@ -299,6 +379,7 @@ export function ActivityPage() {
       if (queueFilter !== "all") params.set("queue_name", queueFilter);
       if (statusFilter !== "all") params.set("status", statusFilter);
       if (/^\d+$/.test(jobIdFilter)) params.set("job_id", jobIdFilter);
+      if (searchFilter) params.set("search", searchFilter);
       return api.get<PageResult>(`/job-executions?${params.toString()}`);
     },
     staleTime: 10_000,
@@ -313,88 +394,192 @@ export function ActivityPage() {
     queryClient.invalidateQueries({ queryKey: ["job-executions"] });
   });
 
-  const totalPages = data ? Math.ceil(data.total / LIMIT) : 1;
+  const totalPages = data ? Math.max(1, Math.ceil(data.total / LIMIT)) : 1;
 
-  function resetPage() {
-    setPage(1);
+  useEffect(() => {
+    if (!data || page <= totalPages) return;
+    setSearchParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        if (totalPages <= 1) next.delete("page");
+        else next.set("page", String(totalPages));
+        return next;
+      },
+      { replace: true },
+    );
+  }, [data, page, setSearchParams, totalPages]);
+
+  function updateFilter(key: "queue" | "status", value: string) {
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      if (value === "all") next.delete(key);
+      else next.set(key, value);
+      next.delete("page");
+      return next;
+    });
+  }
+
+  function submitSearch(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const next = new URLSearchParams(searchParams);
+    const value = searchDraft.trim();
+    if (value) next.set("q", value);
+    else next.delete("q");
+    next.delete("job");
+    next.delete("page");
+    setSearchParams(next);
+  }
+
+  function clearFilters() {
+    setSearchDraft("");
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      ["q", "job", "queue", "status", "page"].forEach((key) =>
+        next.delete(key),
+      );
+      return next;
+    });
+  }
+
+  function goToPage(nextPage: number) {
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      if (nextPage <= 1) next.delete("page");
+      else next.set("page", String(nextPage));
+      return next;
+    });
   }
 
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div className="flex items-center gap-2">
+      <div className="flex flex-col gap-4">
+        <div className="flex flex-wrap items-center gap-2">
           <ClipboardList className="h-5 w-5 text-muted-foreground" />
           <h1 className="text-xl font-semibold">Activity Log</h1>
           {data && (
-            <Badge variant="secondary" className="text-xs">
-              {data.total} total
-            </Badge>
+            <span className="text-sm text-muted-foreground" aria-live="polite">
+              {data.total} {data.total === 1 ? "job" : "jobs"}
+              {searchFilter ||
+              jobIdFilter ||
+              queueFilter !== "all" ||
+              statusFilter !== "all"
+                ? " match"
+                : " total"}
+            </span>
           )}
         </div>
 
         {/* Filters */}
-        <div className="flex items-center gap-2">
-          <Select
-            value={queueFilter}
-            onValueChange={(v) => {
-              setQueueFilter(v);
-              resetPage();
-            }}
+        <div className="flex flex-col gap-2 md:flex-row md:items-center">
+          <form
+            onSubmit={submitSearch}
+            role="search"
+            aria-label="Search activity"
+            className="flex w-full gap-2 md:max-w-xl"
           >
-            <SelectTrigger className="h-8 text-xs w-36">
-              <SelectValue placeholder="All queues" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All queues</SelectItem>
-              {Object.entries(QUEUE_LABELS).map(([k, label]) => (
-                <SelectItem key={k} value={k}>
-                  {label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+            <div className="relative min-w-0 flex-1">
+              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                type="search"
+                value={searchDraft}
+                onChange={(event) => setSearchDraft(event.target.value)}
+                maxLength={100}
+                placeholder="Search jobs, projects, clients, queues, errors…"
+                aria-label="Search jobs by ID, project, client, queue, or error"
+                className="h-9 pl-9"
+              />
+            </div>
+            <Button type="submit" variant="outline" size="sm" className="h-9">
+              Search
+            </Button>
+          </form>
 
-          <Select
-            value={statusFilter}
-            onValueChange={(v) => {
-              setStatusFilter(v);
-              const next = new URLSearchParams(searchParams);
-              if (v === "all") next.delete("status");
-              else next.set("status", v);
-              setSearchParams(next);
-              resetPage();
-            }}
-          >
-            <SelectTrigger className="h-8 text-xs w-32">
-              <SelectValue placeholder="All statuses" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All statuses</SelectItem>
-              {STATUS_ORDER.map((s) => (
-                <SelectItem key={s} value={s}>
-                  {STATUS_LABELS[s] ?? s}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <Select
+              value={queueFilter}
+              onValueChange={(value) => updateFilter("queue", value)}
+            >
+              <SelectTrigger className="h-9 w-full text-xs sm:w-40">
+                <SelectValue placeholder="All queues" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All queues</SelectItem>
+                {QUEUE_OPTIONS.map(({ value, label }) => (
+                  <SelectItem key={value} value={value}>
+                    {label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+
+            <Select
+              value={statusFilter}
+              onValueChange={(value) => updateFilter("status", value)}
+            >
+              <SelectTrigger className="h-9 w-full text-xs sm:w-40">
+                <SelectValue placeholder="All statuses" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All statuses</SelectItem>
+                {STATUS_ORDER.map((status) => (
+                  <SelectItem key={status} value={status}>
+                    {STATUS_LABELS[status] ?? status}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
         </div>
       </div>
 
-      {jobIdFilter && /^\d+$/.test(jobIdFilter) && (
-        <div className="flex items-center justify-between gap-3 rounded-md border bg-muted/20 px-3 py-2">
-          <span className="text-sm">Showing operation #{jobIdFilter}</span>
+      {(searchFilter ||
+        jobIdFilter ||
+        queueFilter !== "all" ||
+        statusFilter !== "all") && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/20 px-3 py-2">
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <span className="font-medium">Filtered activity</span>
+            {searchFilter && (
+              <Badge variant="secondary">Search: {searchFilter}</Badge>
+            )}
+            {jobIdFilter && /^\d+$/.test(jobIdFilter) && (
+              <Badge variant="secondary">Job #{jobIdFilter}</Badge>
+            )}
+            {queueFilter !== "all" && (
+              <Badge variant="secondary">{queueLabel(queueFilter)}</Badge>
+            )}
+            {statusFilter !== "all" && (
+              <Badge variant="secondary">{STATUS_LABELS[statusFilter]}</Badge>
+            )}
+          </div>
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => {
-              const next = new URLSearchParams(searchParams);
-              next.delete("job");
-              setSearchParams(next);
-              setPage(1);
-            }}
+            onClick={clearFilters}
+            className="gap-1"
           >
-            Clear filter
+            <X className="h-3.5 w-3.5" />
+            Clear filters
+          </Button>
+        </div>
+      )}
+
+      {isError && data && (
+        <div
+          role="status"
+          className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-sm"
+        >
+          <span>
+            Could not refresh activity. Showing the last loaded results.
+          </span>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => void refetch()}
+          >
+            Retry
           </Button>
         </div>
       )}
@@ -430,7 +615,7 @@ export function ActivityPage() {
           </thead>
 
           <tbody>
-            {isError ? (
+            {isError && !data ? (
               <tr>
                 <td colSpan={8} className="px-4 py-2">
                   <ErrorState
@@ -453,7 +638,7 @@ export function ActivityPage() {
                   className="py-12 text-center text-muted-foreground text-sm"
                 >
                   <ClipboardList className="h-8 w-8 mx-auto mb-2 opacity-40" />
-                  No job executions found
+                  No jobs match these filters
                 </td>
               </tr>
             ) : (
@@ -465,17 +650,20 @@ export function ActivityPage() {
 
       {/* Pagination */}
       {data && data.total > LIMIT && (
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-xs text-muted-foreground">
             Showing {(page - 1) * LIMIT + 1}–
             {Math.min(page * LIMIT, data.total)} of {data.total}
           </p>
-          <div className="flex items-center gap-2">
+          <nav
+            className="flex items-center gap-2"
+            aria-label="Activity pagination"
+          >
             <Button
               variant="outline"
               size="sm"
               disabled={page <= 1}
-              onClick={() => setPage((p) => p - 1)}
+              onClick={() => goToPage(page - 1)}
             >
               Previous
             </Button>
@@ -486,11 +674,11 @@ export function ActivityPage() {
               variant="outline"
               size="sm"
               disabled={page >= totalPages}
-              onClick={() => setPage((p) => p + 1)}
+              onClick={() => goToPage(page + 1)}
             >
               Next
             </Button>
-          </div>
+          </nav>
         </div>
       )}
     </div>

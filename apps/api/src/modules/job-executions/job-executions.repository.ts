@@ -4,9 +4,10 @@ import { Prisma, JobExecutionStatus } from "@prisma/client";
 
 export interface JobExecutionFilter {
   job_id?: number;
+  search?: string;
   queue_name?: string;
   job_type?: string;
-  status?: string;
+  status?: JobExecutionStatus;
   environment_id?: number;
   environment_ids?: number[];
   date_from?: Date;
@@ -23,6 +24,7 @@ export interface JobExecutionPage {
 export interface JobExecutionRow {
   id: number;
   queue_name: string;
+  job_type: string | null;
   status: string;
   progress: number | null;
   last_error: string | null;
@@ -58,7 +60,7 @@ export class JobExecutionsRepository {
     page: number,
     limit: number,
   ): Promise<JobExecutionPage> {
-    const where: Record<string, unknown> = {};
+    const where: Prisma.JobExecutionWhereInput = {};
     if (filter.job_id) where.id = BigInt(filter.job_id);
 
     if (filter.queue_name) where.queue_name = filter.queue_name;
@@ -78,6 +80,55 @@ export class JobExecutionsRepository {
       };
     }
 
+    const search = filter.search?.trim();
+    if (search) {
+      const contains = { contains: search, mode: "insensitive" as const };
+      const searchPredicates: Prisma.JobExecutionWhereInput[] = [
+        { queue_name: contains },
+        { job_type: contains },
+        { bull_job_id: contains },
+        { last_error: contains },
+        { environment: { is: { type: contains } } },
+        { environment: { is: { url: contains } } },
+        {
+          environment: {
+            is: {
+              project: {
+                is: {
+                  name: contains,
+                },
+              },
+            },
+          },
+        },
+        {
+          environment: {
+            is: {
+              project: {
+                is: {
+                  client: {
+                    is: {
+                      name: contains,
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      ];
+      if (/^\d+$/.test(search)) {
+        const maxBigIntId = "9223372036854775807";
+        if (
+          search.length < maxBigIntId.length ||
+          (search.length === maxBigIntId.length && search <= maxBigIntId)
+        ) {
+          searchPredicates.push({ id: BigInt(search) });
+        }
+      }
+      where.OR = searchPredicates;
+    }
+
     const [total, rows] = await Promise.all([
       this.prisma.jobExecution.count({ where }),
       this.prisma.jobExecution.findMany({
@@ -88,6 +139,7 @@ export class JobExecutionsRepository {
         select: {
           id: true,
           queue_name: true,
+          job_type: true,
           bull_job_id: true,
           status: true,
           progress: true,

@@ -31,6 +31,7 @@ export class JobExecutionsController {
       {
         queue_name: query.queue_name,
         job_id: query.job_id,
+        search: query.search,
         job_type: query.job_type,
         status: query.status,
         environment_id: query.environment_id,

@@ -103,6 +103,12 @@ export class SyncProcessor extends WorkerHost {
       }),
     ]);
 
+    await tracker.track({
+      step: "Sync direction",
+      level: "info",
+      detail: `${sourceEnv.project.name} (${sourceEnv.type}) → ${targetEnv.project.name} (${targetEnv.type})`,
+    });
+
     // Connect to both servers
     await tracker.track({
       step: "Connecting to source server",
@@ -216,6 +222,7 @@ export class SyncProcessor extends WorkerHost {
       sourceCreds,
       job.id ?? "default",
       "sync_src",
+      { includeDatabase: false },
     );
 
     const cloneSafeProtected = this.syncDb.normalizeProtectedTables(
@@ -582,6 +589,12 @@ export class SyncProcessor extends WorkerHost {
     ]);
 
     await tracker.track({
+      step: "Sync direction",
+      level: "info",
+      detail: `${sourceEnv.project.name} (${sourceEnv.type}) → ${targetEnv.project.name} (${targetEnv.type})`,
+    });
+
+    await tracker.track({
       step: "Connecting to source server",
       level: "info",
       detail: sourceEnv.server.ip_address,
@@ -902,6 +915,7 @@ export class SyncProcessor extends WorkerHost {
       sourceCreds,
       job.id ?? "default",
       "push_src",
+      { includeDatabase: false },
     );
 
     const pushSafeProtected = this.syncDb.normalizeProtectedTables(
