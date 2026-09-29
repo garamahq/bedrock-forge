@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7](https://github.com/garamahq/bedrock-forge/compare/bedrock-forge-v0.1.6...bedrock-forge-v0.1.7) (2026-09-29)
+
+
+### Features
+
+* **activity:** improve job search and execution logs ([b0c6bec](https://github.com/garamahq/bedrock-forge/commit/b0c6bec14b6f3d746f1b444745ccc2015840ddd1))
+
 ## [0.1.6](https://github.com/garamahq/bedrock-forge/compare/bedrock-forge-v0.1.5...bedrock-forge-v0.1.6) (2026-09-29)
 
 
