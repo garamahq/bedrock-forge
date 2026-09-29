@@ -37,11 +37,13 @@ export function AddEnvironmentWizard({
   onSuccess: () => void;
 }) {
   const [step, setStep] = useState<1 | 2>(1);
+  const [manualMode, setManualMode] = useState(false);
   const [selectedServerId, setSelectedServerId] = useState<number | null>(null);
   const [sites, setSites] = useState<ScannedSite[]>([]);
   const [selectedSite, setSelectedSite] = useState<ScannedSite | null>(null);
   const [envType, setEnvType] = useState<EnvTypeValue>("production");
   const [customUrl, setCustomUrl] = useState("");
+  const [manualRootPath, setManualRootPath] = useState("");
   const [isCreating, setIsCreating] = useState(false);
 
   const scanMutation = useMutation({
@@ -59,8 +61,10 @@ export function AddEnvironmentWizard({
     setSelectedServerId(null);
     setSites([]);
     setSelectedSite(null);
+    setManualMode(false);
     setEnvType("production");
     setCustomUrl("");
+    setManualRootPath("");
   }
 
   function handleClose(o: boolean) {
@@ -69,10 +73,21 @@ export function AddEnvironmentWizard({
   }
 
   async function handleCreate() {
-    if (!selectedSite || !selectedServerId) return;
-    const url = customUrl.trim() || selectedSite.siteUrl || "";
+    if (!selectedServerId || (!manualMode && !selectedSite)) return;
+    const url = customUrl.trim() || selectedSite?.siteUrl || "";
     if (!url) {
       toast({ title: "Site URL is required", variant: "destructive" });
+      return;
+    }
+    if (
+      manualMode &&
+      (!/^\/[A-Za-z0-9_./-]+$/.test(manualRootPath.trim()) ||
+        manualRootPath.split("/").includes(".."))
+    ) {
+      toast({
+        title: "Enter a safe absolute document root path",
+        variant: "destructive",
+      });
       return;
     }
     setIsCreating(true);
@@ -81,16 +96,23 @@ export function AddEnvironmentWizard({
         type: envType,
         server_id: selectedServerId,
         url,
-        root_path: selectedSite.path,
-        ...(selectedSite.dbCredentials
+        root_path: manualMode ? manualRootPath.trim() : selectedSite!.path,
+        ...(!manualMode && selectedSite?.dbCredentials
           ? { db_credentials: selectedSite.dbCredentials }
           : {}),
       });
       toast({ title: "Environment created" });
       onSuccess();
       handleClose(false);
-    } catch {
-      toast({ title: "Create failed", variant: "destructive" });
+    } catch (error) {
+      toast({
+        title: "Environment creation failed",
+        description:
+          error instanceof Error
+            ? error.message
+            : "Please check the site URL and document root.",
+        variant: "destructive",
+      });
     } finally {
       setIsCreating(false);
     }
@@ -137,23 +159,104 @@ export function AddEnvironmentWizard({
               >
                 Cancel
               </Button>
-              <Button
-                disabled={!selectedServerId || scanMutation.isPending}
-                onClick={() =>
-                  selectedServerId && scanMutation.mutate(selectedServerId)
-                }
+              <div className="flex gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={!selectedServerId}
+                  onClick={() => {
+                    setManualMode(true);
+                    setStep(2);
+                  }}
+                >
+                  Enter manually
+                </Button>
+                <Button
+                  disabled={!selectedServerId || scanMutation.isPending}
+                  onClick={() =>
+                    selectedServerId && scanMutation.mutate(selectedServerId)
+                  }
+                >
+                  {scanMutation.isPending ? (
+                    <>
+                      <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+                      Scanning…
+                    </>
+                  ) : (
+                    <>
+                      <ScanLine className="h-4 w-4 mr-1.5" />
+                      Scan Server
+                    </>
+                  )}
+                </Button>
+              </div>
+            </DialogFooter>
+          </div>
+        ) : manualMode ? (
+          <div className="space-y-4">
+            <p className="text-sm text-muted-foreground">
+              Enter the WordPress installation details for the selected server.
+              The document root must be an absolute path without parent
+              traversal.
+            </p>
+            <div className="space-y-1">
+              <Label htmlFor="manual-env-type">Environment Type</Label>
+              <Select
+                value={envType}
+                onValueChange={(value) => setEnvType(value as EnvTypeValue)}
               >
-                {scanMutation.isPending ? (
-                  <>
-                    <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
-                    Scanning…
-                  </>
-                ) : (
-                  <>
-                    <ScanLine className="h-4 w-4 mr-1.5" />
-                    Scan Server
-                  </>
-                )}
+                <SelectTrigger id="manual-env-type">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {ENV_TYPES.map((type) => (
+                    <SelectItem key={type.value} value={type.value}>
+                      {type.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="manual-env-url">Site URL</Label>
+              <Input
+                id="manual-env-url"
+                type="url"
+                value={customUrl}
+                onChange={(event) => setCustomUrl(event.target.value)}
+                placeholder="https://example.com"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="manual-env-root">Document root</Label>
+              <Input
+                id="manual-env-root"
+                value={manualRootPath}
+                onChange={(event) => setManualRootPath(event.target.value)}
+                placeholder="/home/site/public_html"
+              />
+            </div>
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  setManualMode(false);
+                  setStep(1);
+                }}
+              >
+                Back
+              </Button>
+              <Button
+                disabled={
+                  !selectedServerId ||
+                  !customUrl.trim() ||
+                  !manualRootPath.trim() ||
+                  isCreating
+                }
+                onClick={handleCreate}
+              >
+                {isCreating ? "Creating…" : "Create Environment"}
               </Button>
             </DialogFooter>
           </div>
@@ -164,6 +267,15 @@ export function AddEnvironmentWizard({
                 ? "No WordPress sites found on this server."
                 : `Found ${sites.length} site${sites.length !== 1 ? "s" : ""}. Select one to add as an environment.`}
             </p>
+            {sites.length === 0 && (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setManualMode(true)}
+              >
+                Enter details manually
+              </Button>
+            )}
 
             {sites.length > 0 && (
               <div className="border rounded-lg divide-y max-h-64 overflow-y-auto">
@@ -256,7 +368,10 @@ export function AddEnvironmentWizard({
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => setStep(1)}
+                onClick={() => {
+                  setManualMode(false);
+                  setStep(1);
+                }}
               >
                 Back
               </Button>

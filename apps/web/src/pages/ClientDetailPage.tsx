@@ -18,6 +18,8 @@ import { Badge } from "@/components/ui/badge";
 import { ClientFormDialog } from "./ClientsPage";
 import { ResourceActivityFeed } from "@/components/ResourceActivityFeed";
 import { ErrorState } from "@/components/crud";
+import { Pagination } from "@/components/crud";
+import { Input } from "@/components/ui/input";
 import { useAuthStore } from "@/store/auth.store";
 
 interface TagItem {
@@ -62,6 +64,9 @@ export function ClientDetailPage() {
     (s) => s.user?.roles?.includes("admin") ?? false,
   );
   const [editOpen, setEditOpen] = useState(false);
+  const [projectSearch, setProjectSearch] = useState("");
+  const [projectPage, setProjectPage] = useState(1);
+  const projectLimit = 10;
 
   const { data: tags = [] } = useQuery<TagItem[]>({
     queryKey: ["tags"],
@@ -92,6 +97,30 @@ export function ClientDetailPage() {
   });
 
   const invoices = invoicesData?.data ?? [];
+
+  const {
+    data: projectsData,
+    isLoading: projectsLoading,
+    isError: projectsError,
+    refetch: refetchProjects,
+  } = useQuery<{ items: Project[]; total: number }>({
+    queryKey: ["client-projects", id, projectPage, projectSearch],
+    queryFn: () => {
+      const params = new URLSearchParams({
+        client_id: id ?? "",
+        page: String(projectPage),
+        limit: String(projectLimit),
+      });
+      if (projectSearch.trim()) params.set("search", projectSearch.trim());
+      return api.get(`/projects?${params.toString()}`);
+    },
+    enabled: !!id,
+  });
+  const projects = projectsData?.items ?? [];
+  const projectTotalPages = Math.max(
+    1,
+    Math.ceil((projectsData?.total ?? 0) / projectLimit),
+  );
 
   function statusVariant(
     status: Invoice["status"],
@@ -237,20 +266,47 @@ export function ClientDetailPage() {
         <div className="flex items-center justify-between mb-3">
           <h2 className="font-semibold flex items-center gap-2">
             <FolderKanban className="h-4 w-4" />
-            Projects ({client.projects.length})
+            Projects ({projectsData?.total ?? client.projects.length})
           </h2>
           <Button asChild variant="outline" size="sm">
-            <Link to="/projects">View All Projects</Link>
+            <Link to={`/projects?client_id=${client.id}`}>
+              View All Projects
+            </Link>
           </Button>
         </div>
 
-        {client.projects.length === 0 ? (
+        <div className="mb-3 max-w-sm">
+          <label htmlFor="client-project-search" className="sr-only">
+            Search this client’s projects
+          </label>
+          <Input
+            id="client-project-search"
+            value={projectSearch}
+            placeholder="Search projects…"
+            onChange={(event) => {
+              setProjectSearch(event.target.value);
+              setProjectPage(1);
+            }}
+          />
+        </div>
+
+        {projectsError ? (
+          <ErrorState
+            title="Projects could not be loaded"
+            onRetry={() => void refetchProjects()}
+            className="py-8"
+          />
+        ) : projectsLoading ? (
+          <p className="text-muted-foreground text-sm">Loading projects…</p>
+        ) : projects.length === 0 ? (
           <p className="text-muted-foreground text-sm">
-            No projects linked to this client.
+            {projectSearch
+              ? "No projects match this search."
+              : "No projects linked to this client."}
           </p>
         ) : (
           <div className="space-y-2">
-            {client.projects.map((project) => (
+            {projects.map((project) => (
               <Link
                 key={project.id}
                 to={`/projects/${project.id}`}
@@ -272,6 +328,13 @@ export function ClientDetailPage() {
               </Link>
             ))}
           </div>
+        )}
+        {projectTotalPages > 1 && (
+          <Pagination
+            page={projectPage}
+            totalPages={projectTotalPages}
+            onPageChange={setProjectPage}
+          />
         )}
       </div>
 

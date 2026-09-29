@@ -2,6 +2,7 @@ import { Injectable } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { EncryptionService } from "../../common/encryption/encryption.service";
+import { JOB_TYPES } from "@bedrock-forge/shared";
 import {
   CreateEnvironmentDto,
   UpdateEnvironmentDto,
@@ -66,11 +67,20 @@ export class EnvironmentsRepository {
           select: { id: true, name: true, ip_address: true, status: true },
         },
         job_executions: {
-          where: { job_type: "project:create-bedrock" },
+          where: {
+            job_type: {
+              in: [
+                JOB_TYPES.PROJECT_CREATE_BEDROCK,
+                JOB_TYPES.PROJECT_ARCHIVE,
+                JOB_TYPES.ENVIRONMENT_DECOMMISSION,
+              ],
+            },
+          },
           orderBy: { created_at: "desc" },
           take: 1,
           select: {
             id: true,
+            job_type: true,
             status: true,
             progress: true,
             last_error: true,
@@ -235,7 +245,9 @@ export class EnvironmentsRepository {
     return this.prisma.environment.create({
       data,
       include: {
-        server: { select: { id: true, name: true, ip_address: true, status: true } },
+        server: {
+          select: { id: true, name: true, ip_address: true, status: true },
+        },
       },
     });
   }
@@ -255,11 +267,16 @@ export class EnvironmentsRepository {
   }
 
   async getSchedulesForEnvironment(envId: bigint) {
-    const [backupSchedules, pluginUpdateSchedules, monitors] = await Promise.all([
-      this.prisma.backupSchedule.findMany({ where: { environment_id: envId } }),
-      this.prisma.pluginUpdateSchedule.findMany({ where: { environment_id: envId } }),
-      this.prisma.monitor.findMany({ where: { environment_id: envId } }),
-    ]);
+    const [backupSchedules, pluginUpdateSchedules, monitors] =
+      await Promise.all([
+        this.prisma.backupSchedule.findMany({
+          where: { environment_id: envId },
+        }),
+        this.prisma.pluginUpdateSchedule.findMany({
+          where: { environment_id: envId },
+        }),
+        this.prisma.monitor.findMany({ where: { environment_id: envId } }),
+      ]);
     return { backupSchedules, pluginUpdateSchedules, monitors };
   }
 

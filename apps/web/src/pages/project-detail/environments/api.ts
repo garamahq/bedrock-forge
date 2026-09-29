@@ -113,6 +113,7 @@ export const environmentsApi = {
     type ApiEnv = Omit<Environment, "latestProvisioningJob"> & {
       job_executions: Array<{
         id: number;
+        job_type: string | null;
         status: string;
         progress: number | null;
         last_error: string | null;
@@ -136,7 +137,12 @@ export const environmentsApi = {
   deleteEnvironment: async (
     projectId: number,
     envId: number,
-  ): Promise<void> => {
+  ): Promise<{
+    message: string;
+    environmentId: number;
+    jobExecutionId: number;
+    jobId: string;
+  }> => {
     return api.delete(`/projects/${projectId}/environments/${envId}`);
   },
 };

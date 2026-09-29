@@ -42,6 +42,12 @@ export class BackupsRepository {
         take: limit,
         orderBy: { created_at: "desc" },
         include: {
+          environment: {
+            select: {
+              id: true,
+              project: { select: { id: true, name: true } },
+            },
+          },
           jobExecution: {
             select: {
               id: true,
@@ -182,4 +188,3 @@ export class BackupsRepository {
       .then((r) => r !== null);
   }
 }
-

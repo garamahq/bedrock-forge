@@ -1,10 +1,10 @@
-import { RefreshCw, Database, Upload } from "lucide-react";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { RefreshCw } from "lucide-react";
 import { Environment } from "./types";
 import { useSyncHistoryQuery, useCancelSyncMutation } from "./hooks";
-import { ClonePanel } from "./components/ClonePanel";
 import { PushPanel } from "./components/PushPanel";
 import { SyncHistoryRow } from "./components/SyncHistoryRow";
+import { Pagination, ErrorState } from "@/components/crud";
+import { useState } from "react";
 
 export function SyncTab({
   projectId,
@@ -13,59 +13,55 @@ export function SyncTab({
   projectId: number;
   environments: Environment[];
 }) {
+  const [page, setPage] = useState(1);
   const envIds = environments.map((e) => e.id).join(",");
 
-  const { data: historyData } = useSyncHistoryQuery(
-    projectId,
-    envIds,
-    environments.length > 0,
-  );
+  const {
+    data: historyData,
+    isLoading: historyLoading,
+    isError: historyError,
+    refetch: refetchHistory,
+  } = useSyncHistoryQuery(projectId, envIds, environments.length > 0, page);
 
   const cancelHistoryMutation = useCancelSyncMutation(projectId);
-
-  if (environments.length < 2) {
-    return (
-      <div className="text-center py-12 text-muted-foreground">
-        <RefreshCw className="h-10 w-10 mx-auto mb-3 opacity-40" />
-        <p className="font-medium">Need at least 2 environments to sync</p>
-        <p className="text-sm mt-1">Add environments in the Environments tab</p>
-      </div>
-    );
-  }
 
   return (
     <div className="space-y-6 max-w-2xl">
       <div>
         <h3 className="font-semibold mb-1">Sync Environments</h3>
         <p className="text-sm text-muted-foreground">
-          Clone copies data from source to target. Push lets you select scope
-          (database, files, or both) for more granular control.
+          Choose the source, target, and whether to sync the database, files, or
+          both. A safety backup is created before the sync unless you explicitly
+          skip it.
         </p>
       </div>
 
-      <Tabs defaultValue="clone">
-        <TabsList className="w-full">
-          <TabsTrigger value="clone" className="flex-1">
-            <Database className="h-3.5 w-3.5 mr-1.5" />
-            Clone DB
-          </TabsTrigger>
-          <TabsTrigger value="push" className="flex-1">
-            <Upload className="h-3.5 w-3.5 mr-1.5" />
-            Push
-          </TabsTrigger>
-        </TabsList>
-        <TabsContent value="clone" className="pt-4">
-          <ClonePanel projectId={projectId} environments={environments} />
-        </TabsContent>
-        <TabsContent value="push" className="pt-4">
-          <PushPanel projectId={projectId} environments={environments} />
-        </TabsContent>
-      </Tabs>
+      {environments.length < 2 ? (
+        <div className="text-center py-12 text-muted-foreground border rounded-lg">
+          <RefreshCw className="h-10 w-10 mx-auto mb-3 opacity-40" />
+          <p className="font-medium">Need at least 2 environments to sync</p>
+          <p className="text-sm mt-1">
+            Add environments in the Environments tab
+          </p>
+        </div>
+      ) : (
+        <PushPanel projectId={projectId} environments={environments} />
+      )}
 
       <div className="space-y-3">
         <h4 className="text-sm font-semibold">Sync History</h4>
 
-        {!historyData || historyData.data.length === 0 ? (
+        {historyError ? (
+          <ErrorState
+            title="Sync history could not be loaded"
+            description="The request failed. Retry to check recent sync jobs."
+            onRetry={() => void refetchHistory()}
+          />
+        ) : historyLoading ? (
+          <div className="border rounded-lg text-center py-8 text-muted-foreground text-sm">
+            Loading sync history…
+          </div>
+        ) : !historyData || historyData.data.length === 0 ? (
           <div className="border rounded-lg text-center py-8 text-muted-foreground text-sm">
             No sync jobs yet for this project.
           </div>
@@ -104,6 +100,13 @@ export function SyncTab({
               </tbody>
             </table>
           </div>
+        )}
+        {historyData && historyData.total > 10 && (
+          <Pagination
+            page={page}
+            totalPages={Math.ceil(historyData.total / 10)}
+            onPageChange={setPage}
+          />
         )}
       </div>
     </div>

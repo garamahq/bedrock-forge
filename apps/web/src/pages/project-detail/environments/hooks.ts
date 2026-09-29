@@ -102,10 +102,14 @@ export function useDeleteEnvironmentMutation(projectId: number) {
   return useMutation({
     mutationFn: (envId: number) =>
       environmentsApi.deleteEnvironment(projectId, envId),
-    onSuccess: () => {
+    onSuccess: (result) => {
       qc.invalidateQueries({ queryKey: ["environments", projectId] });
       qc.invalidateQueries({ queryKey: ["project", projectId] });
-      toast({ title: "Environment deleted" });
+      qc.invalidateQueries({ queryKey: ["job-executions"] });
+      toast({
+        title: "Environment decommission queued",
+        description: result.message,
+      });
     },
     onError: () => {
       toast({ title: "Delete failed", variant: "destructive" });

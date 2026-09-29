@@ -782,7 +782,7 @@ export function ServersPage() {
         open={!!deleteTarget}
         onOpenChange={(o) => !o && setDeleteTarget(null)}
         title="Delete Server"
-        description={`"${deleteTarget?.name}" (${deleteTarget?.ip_address}) will be permanently deleted. All associated environments and data will be removed.`}
+        description={`Servers with linked environments cannot be deleted. Decommission or remove their projects and environments first, then retry.`}
         confirmLabel="Delete"
         onConfirm={() => deleteTarget && deleteMutation.mutate(deleteTarget.id)}
         isPending={deleteMutation.isPending}

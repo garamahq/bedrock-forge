@@ -34,9 +34,12 @@ export const syncApi = {
     );
   },
 
-  getSyncHistory: async (envIds: string): Promise<SyncHistoryPage> => {
+  getSyncHistory: async (
+    envIds: string,
+    page: number,
+  ): Promise<SyncHistoryPage> => {
     return api.get<SyncHistoryPage>(
-      `/job-executions?queue_name=sync&environment_ids=${envIds}&limit=20`,
+      `/job-executions?queue_name=sync&environment_ids=${envIds}&page=${page}&limit=10`,
     );
   },
 };

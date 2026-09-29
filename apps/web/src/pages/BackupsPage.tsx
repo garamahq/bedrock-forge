@@ -9,7 +9,7 @@ import {
   FolderKanban,
   Globe,
 } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { api } from "@/lib/api-client";
 import { useAuthStore } from "@/store/auth.store";
 import { useWebSocketEvent, useSubscribeEnvironment } from "@/lib/websocket";
@@ -59,6 +59,7 @@ interface Backup {
   size_bytes: number | null;
   error_message: string | null;
   created_at: string;
+  environment: { id: number; project: { id: number; name: string } };
   jobExecution: {
     id: number;
     bull_job_id: string;
@@ -89,12 +90,19 @@ const BACKUP_TYPES = [
 
 export function BackupsPage() {
   const qc = useQueryClient();
-  const [projectId, setProjectId] = useState<string>("all");
-  const [envId, setEnvId] = useState<number | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const projectId = searchParams.get("project_id") ?? "all";
+  const requestedEnvId = Number(searchParams.get("environment_id"));
+  const envId =
+    Number.isSafeInteger(requestedEnvId) && requestedEnvId > 0
+      ? requestedEnvId
+      : null;
   const [backupType, setBackupType] = useState<string>("full");
   const [page, setPage] = useState(1);
   const [restoreTarget, setRestoreTarget] = useState<Backup | null>(null);
-  const [restoreTargetEnvId, setRestoreTargetEnvId] = useState<number | null>(null);
+  const [restoreTargetEnvId, setRestoreTargetEnvId] = useState<number | null>(
+    null,
+  );
   const [deleteTarget, setDeleteTarget] = useState<Backup | null>(null);
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [isBulkDeleting, setIsBulkDeleting] = useState(false);
@@ -113,7 +121,10 @@ export function BackupsPage() {
   });
 
   const projects = useMemo(() => {
-    const map = new Map<number, { id: number; name: string; envCount: number }>();
+    const map = new Map<
+      number,
+      { id: number; name: string; envCount: number }
+    >();
     for (const e of envs ?? []) {
       if (e.project) {
         const existing = map.get(e.project.id);
@@ -139,6 +150,24 @@ export function BackupsPage() {
     return envs.filter((e) => String(e.project.id) === projectId);
   }, [envs, projectId]);
 
+  useEffect(() => {
+    if (!envs || projectId === "all") return;
+    const currentEnv = envs.find((environment) => environment.id === envId);
+    if (currentEnv && String(currentEnv.project.id) === projectId) return;
+    const nextEnv = envs.find(
+      (environment) => String(environment.project.id) === projectId,
+    );
+    setSearchParams(
+      (previous) => {
+        const next = new URLSearchParams(previous);
+        if (nextEnv) next.set("environment_id", String(nextEnv.id));
+        else next.delete("environment_id");
+        return next;
+      },
+      { replace: true },
+    );
+  }, [envs, envId, projectId, setSearchParams]);
+
   const {
     data: backupsData,
     isLoading,
@@ -155,7 +184,9 @@ export function BackupsPage() {
   });
 
   useEffect(() => {
-    const visibleIds = new Set(backupsData?.items.map((backup) => backup.id) ?? []);
+    const visibleIds = new Set(
+      backupsData?.items.map((backup) => backup.id) ?? [],
+    );
     setSelectedIds((previous) => {
       const next = previous.filter((backupId) => visibleIds.has(backupId));
       return next.length === previous.length ? previous : next;
@@ -177,8 +208,13 @@ export function BackupsPage() {
   });
 
   const restoreBackup = useMutation({
-    mutationFn: ({ backupId, targetEnvironmentId }: { backupId: number; targetEnvironmentId?: number }) =>
-      api.post("/backups/restore", { backupId, targetEnvironmentId }),
+    mutationFn: ({
+      backupId,
+      targetEnvironmentId,
+    }: {
+      backupId: number;
+      targetEnvironmentId?: number;
+    }) => api.post("/backups/restore", { backupId, targetEnvironmentId }),
     onSuccess: () => {
       setRestoreTarget(null);
       setRestoreTargetEnvId(null);
@@ -198,13 +234,30 @@ export function BackupsPage() {
   });
 
   const bulkDeleteMutation = useMutation({
-    mutationFn: (ids: number[]) =>
-      Promise.all(ids.map((id) => api.delete(`/backups/${id}`))),
-    onSuccess: () => {
+    mutationFn: async (ids: number[]) => {
+      const results = await Promise.allSettled(
+        ids.map((id) => api.delete(`/backups/${id}`)),
+      );
+      return {
+        succeeded:
+          results.length -
+          results.filter((result) => result.status === "rejected").length,
+        failedIds: ids.filter(
+          (_, index) => results[index]?.status === "rejected",
+        ),
+      };
+    },
+    onSuccess: ({ succeeded, failedIds }) => {
       qc.invalidateQueries({ queryKey: ["backups", envId] });
-      setSelectedIds([]);
+      setSelectedIds(failedIds);
       setIsBulkDeleting(false);
-      toast({ title: "Backups deleted successfully" });
+      toast({
+        title: failedIds.length
+          ? "Some backups could not be deleted"
+          : "Backups deleted",
+        description: `${succeeded} deleted, ${failedIds.length} failed. Failed items remain selected for review.`,
+        variant: failedIds.length ? "destructive" : undefined,
+      });
     },
     onError: () => {
       setIsBulkDeleting(false);
@@ -321,19 +374,21 @@ export function BackupsPage() {
           <Select
             value={projectId}
             onValueChange={(v) => {
-              setProjectId(v);
-              if (v === "all") {
-                // keep or clear
-              } else {
-                const pEnvs = (envs ?? []).filter(
-                  (e) => String(e.project.id) === v,
-                );
-                if (pEnvs.length > 0) {
-                  setEnvId(pEnvs[0].id);
+              const pEnvs = (envs ?? []).filter(
+                (e) => String(e.project.id) === v,
+              );
+              setSearchParams((previous) => {
+                const next = new URLSearchParams(previous);
+                if (v === "all") {
+                  next.delete("project_id");
+                  next.delete("environment_id");
                 } else {
-                  setEnvId(null);
+                  next.set("project_id", v);
+                  if (pEnvs[0]) next.set("environment_id", String(pEnvs[0].id));
+                  else next.delete("environment_id");
                 }
-              }
+                return next;
+              });
               setPage(1);
               setSelectedIds([]);
             }}
@@ -363,16 +418,16 @@ export function BackupsPage() {
             value={envId?.toString() ?? ""}
             onValueChange={(v) => {
               const newId = v ? Number(v) : null;
-              setEnvId(newId);
+              const found = (envs ?? []).find((e) => e.id === newId);
+              setSearchParams((previous) => {
+                const next = new URLSearchParams(previous);
+                if (newId) next.set("environment_id", String(newId));
+                else next.delete("environment_id");
+                if (found) next.set("project_id", String(found.project.id));
+                return next;
+              });
               if (newId) {
-                const found = (envs ?? []).find((e) => e.id === newId);
-                if (
-                  found &&
-                  projectId !== "all" &&
-                  String(found.project.id) !== projectId
-                ) {
-                  setProjectId(String(found.project.id));
-                }
+                setPage(1);
               }
               setPage(1);
               setSelectedIds([]);
@@ -674,14 +729,18 @@ export function BackupsPage() {
 
       <BulkActionsBar
         selectedCount={selectedIds.length}
-        actions={[
-          {
-            label: "Delete Selected",
-            icon: Trash2,
-            variant: "destructive",
-            onClick: () => setIsBulkDeleting(true),
-          },
-        ]}
+        actions={
+          isAdmin
+            ? [
+                {
+                  label: "Delete Selected",
+                  icon: Trash2,
+                  variant: "destructive",
+                  onClick: () => setIsBulkDeleting(true),
+                },
+              ]
+            : []
+        }
         onClear={() => setSelectedIds([])}
       />
 
@@ -699,7 +758,10 @@ export function BackupsPage() {
             <DialogTitle>Restore Backup</DialogTitle>
             <DialogDescription>
               Restore the {restoreTarget?.type} backup from{" "}
-              {restoreTarget ? new Date(restoreTarget.created_at).toLocaleString() : ""}.
+              {restoreTarget
+                ? new Date(restoreTarget.created_at).toLocaleString()
+                : ""}
+              .
             </DialogDescription>
           </DialogHeader>
 
@@ -708,40 +770,62 @@ export function BackupsPage() {
               <Label htmlFor="restore-target-env">Target Environment</Label>
               <Select
                 value={restoreTargetEnvId?.toString() ?? ""}
-                onValueChange={(v) => setRestoreTargetEnvId(v ? Number(v) : null)}
+                onValueChange={(v) =>
+                  setRestoreTargetEnvId(v ? Number(v) : null)
+                }
               >
                 <SelectTrigger id="restore-target-env" className="w-full">
                   <SelectValue placeholder="Select target environment…" />
                 </SelectTrigger>
                 <SelectContent>
-                  {envs?.map((e) => (
-                    <SelectItem key={e.id} value={e.id.toString()}>
-                      {e.project.name} — {e.type} ({e.server.name})
-                    </SelectItem>
-                  ))}
+                  {envs
+                    ?.filter(
+                      (environment) =>
+                        environment.project.id ===
+                        restoreTarget?.environment.project.id,
+                    )
+                    .map((e) => (
+                      <SelectItem key={e.id} value={e.id.toString()}>
+                        {e.project.name} — {e.type} ({e.server.name})
+                      </SelectItem>
+                    ))}
                 </SelectContent>
               </Select>
             </div>
 
-            {restoreTarget && restoreTargetEnvId && restoreTargetEnvId !== envId && (
-              <div className="rounded-lg border border-warning/20 bg-warning/10 p-3.5 text-warning space-y-1">
-                <p className="font-semibold text-sm">Cross-Environment Restore Detected</p>
-                <p className="text-xs opacity-90 leading-relaxed">
-                  You are restoring this backup to a different environment. The system will automatically:
-                </p>
-                <ul className="list-disc list-inside text-xs opacity-90 pl-1 space-y-0.5">
-                  <li>Rewrite URLs in options, posts, metadata, comments, and links</li>
-                  <li>Perform a deep search-replace across all assets in the files</li>
-                  <li>Update on-server DB credentials and settings</li>
-                  <li>Flush the WordPress cache and rewrite rules</li>
-                </ul>
-              </div>
-            )}
+            {restoreTarget &&
+              restoreTargetEnvId &&
+              restoreTargetEnvId !== envId && (
+                <div className="rounded-lg border border-warning/20 bg-warning/10 p-3.5 text-warning space-y-1">
+                  <p className="font-semibold text-sm">
+                    Cross-Environment Restore Detected
+                  </p>
+                  <p className="text-xs opacity-90 leading-relaxed">
+                    You are restoring this backup to a different environment.
+                    The system will automatically:
+                  </p>
+                  <ul className="list-disc list-inside text-xs opacity-90 pl-1 space-y-0.5">
+                    <li>
+                      Rewrite URLs in options, posts, metadata, comments, and
+                      links
+                    </li>
+                    <li>
+                      Perform a deep search-replace across all assets in the
+                      files
+                    </li>
+                    <li>Update on-server DB credentials and settings</li>
+                    <li>Flush the WordPress cache and rewrite rules</li>
+                  </ul>
+                </div>
+              )}
 
             <div className="rounded-lg border border-destructive/20 bg-destructive/10 p-3 text-destructive">
-              <p className="font-medium text-sm">Warning: Destructive Operation</p>
+              <p className="font-medium text-sm">
+                Warning: Destructive Operation
+              </p>
               <p className="text-xs mt-0.5 opacity-80">
-                This will overwrite the target site's files and database. This action cannot be undone.
+                This will overwrite the target site's files and database. This
+                action cannot be undone.
               </p>
             </div>
           </div>

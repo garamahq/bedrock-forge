@@ -19,6 +19,7 @@ import {
   BookmarkPlus,
 } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { isHttpStatusWorking } from "@bedrock-forge/shared";
 import { api } from "@/lib/api-client";
 import { useAuthStore } from "@/store/auth.store";
 import { toast } from "@/hooks/use-toast";
@@ -102,7 +103,7 @@ interface Project {
 
 const projectSchema = z.object({
   name: z.string().min(1, "Name is required").max(150),
-  status: z.enum(["active", "inactive", "archived"], {
+  status: z.enum(["active", "inactive"], {
     required_error: "Status is required",
   }),
   client_id: z.coerce
@@ -113,7 +114,7 @@ const projectSchema = z.object({
 });
 type ProjectForm = z.infer<typeof projectSchema>;
 
-const STATUS_OPTIONS = ["active", "inactive", "archived"] as const;
+const STATUS_OPTIONS = ["active", "inactive"] as const;
 const SAVED_PROJECT_VIEWS_KEY = "bedrock-forge:saved-project-views:v1";
 const SAVED_VIEW_STATUS_OPTIONS = [
   "exclude:archived",
@@ -228,7 +229,10 @@ export function ProjectFormDialog({
     resolver: zodResolver(projectSchema),
     defaultValues: {
       name: initial?.name ?? "",
-      status: initial?.status ?? "active",
+      status:
+        initial?.status === "archived"
+          ? "inactive"
+          : (initial?.status ?? "active"),
       client_id: initial?.client.id ?? undefined,
       hosting_package_id: undefined,
       support_package_id: undefined,
@@ -239,16 +243,18 @@ export function ProjectFormDialog({
     try {
       const payload = {
         name: data.name,
-        status: data.status,
         client_id: data.client_id,
         hosting_package_id: data.hosting_package_id || undefined,
         support_package_id: data.support_package_id || undefined,
       };
       if (initial) {
-        await api.put(`/projects/${initial.id}`, payload);
+        await api.put(`/projects/${initial.id}`, {
+          ...payload,
+          ...(initial.status === "archived" ? {} : { status: data.status }),
+        });
         toast({ title: "Project updated" });
       } else {
-        await api.post("/projects", payload);
+        await api.post("/projects", { ...payload, status: data.status });
         toast({ title: "Project created" });
       }
       reset();
@@ -303,23 +309,31 @@ export function ProjectFormDialog({
             </div>
             <div className="space-y-1">
               <Label>Status</Label>
-              <Select
-                defaultValue={initial?.status ?? "active"}
-                onValueChange={(v) =>
-                  setValue("status", v as "active" | "inactive" | "archived")
-                }
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {STATUS_OPTIONS.map((s) => (
-                    <SelectItem key={s} value={s}>
-                      {s}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              {initial?.status === "archived" ? (
+                <div className="flex min-h-10 items-center">
+                  <Badge variant="secondary">
+                    Archived — restore from the project actions
+                  </Badge>
+                </div>
+              ) : (
+                <Select
+                  defaultValue={initial?.status ?? "active"}
+                  onValueChange={(v) =>
+                    setValue("status", v as "active" | "inactive")
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {STATUS_OPTIONS.map((s) => (
+                      <SelectItem key={s} value={s}>
+                        {s}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
             </div>
           </div>
 
@@ -446,6 +460,8 @@ function ProjectCard({
         <span
           className="h-2 w-2 rounded-full bg-muted-foreground/40 shrink-0"
           title="No monitor"
+          role="img"
+          aria-label="No monitor configured"
         />
       );
     const s = monitor.last_status;
@@ -454,19 +470,25 @@ function ProjectCard({
         <span
           className="h-2 w-2 rounded-full bg-muted-foreground/40 shrink-0"
           title="Pending"
+          role="img"
+          aria-label="Monitor check pending"
         />
       );
-    if (s === 200)
+    if (isHttpStatusWorking(s))
       return (
         <span
           className="h-2 w-2 rounded-full bg-green-500 shrink-0"
-          title="Up"
+          title={`Working (HTTP ${s})`}
+          role="img"
+          aria-label={`Working, HTTP ${s}`}
         />
       );
     return (
       <span
         className="h-2 w-2 rounded-full bg-red-500 shrink-0"
         title={`Down (${s})`}
+        role="img"
+        aria-label={`Down, HTTP ${s}`}
       />
     );
   }
@@ -925,11 +947,17 @@ export function ProjectsPage() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (id: number) => api.delete(`/projects/${id}`),
-    onSuccess: () => {
+    mutationFn: (id: number) =>
+      api.delete<{ message?: string }>(`/projects/${id}`),
+    onSuccess: (result) => {
       qc.invalidateQueries({ queryKey: ["projects"] });
       setDeleteTarget(null);
-      toast({ title: "Project deleted" });
+      toast({
+        title: result?.message
+          ? "Project decommissioning queued"
+          : "Project deleted",
+        description: result?.message,
+      });
     },
     onError: () => toast({ title: "Delete failed", variant: "destructive" }),
   });
@@ -1112,7 +1140,11 @@ export function ProjectsPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["projects"] });
       clearSelection();
-      toast({ title: "Projects deleted" });
+      toast({
+        title: "Project removal requests completed",
+        description:
+          "Projects with remote resources remain archived until cleanup finishes.",
+      });
     },
     onError: () =>
       toast({ title: "Bulk delete failed", variant: "destructive" }),
@@ -1120,31 +1152,32 @@ export function ProjectsPage() {
 
   return (
     <div className="space-y-4">
-      <PageHeader
-        title="Projects"
-        onCreate={() => setCreateOpen(true)}
-        createLabel="New Project"
-      >
-        <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
-          <ServerIcon className="h-4 w-4 mr-1.5" />
-          Import from Server
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => setBedrockJobsOpen(true)}
-        >
-          <History className="h-4 w-4 mr-1.5" />
-          Bedrock Jobs
-        </Button>
-        <Button
-          variant="default"
-          size="sm"
-          onClick={() => setBedrockOpen(true)}
-        >
-          <Layers className="h-4 w-4 mr-1.5" />
-          Create Bedrock
-        </Button>
+      <PageHeader title="Projects">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button size="sm">
+              <FolderPlus className="mr-1.5 h-4 w-4" />
+              Add project / site
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem onClick={() => setCreateOpen(true)}>
+              New project
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => setImportOpen(true)}>
+              <ServerIcon className="mr-2 h-4 w-4" />
+              Import existing site
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => setBedrockOpen(true)}>
+              <Layers className="mr-2 h-4 w-4" />
+              Provision Bedrock site
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => setBedrockJobsOpen(true)}>
+              <History className="mr-2 h-4 w-4" />
+              View provisioning jobs
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </PageHeader>
 
       <SearchBar
@@ -1315,7 +1348,7 @@ export function ProjectsPage() {
               <SelectValue placeholder="Active Projects" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="exclude:archived">Active Only</SelectItem>
+              <SelectItem value="exclude:archived">Exclude archived</SelectItem>
               <SelectItem value="archived">Archived Only</SelectItem>
               <SelectItem value="all">All Statuses</SelectItem>
             </SelectContent>
@@ -1483,7 +1516,7 @@ export function ProjectsPage() {
         open={!!deleteTarget}
         onOpenChange={(o) => !o && setDeleteTarget(null)}
         title="Delete Project"
-        description={`Are you sure you want to delete "${deleteTarget?.name}"? This will also remove all associated environment records and monitoring history.`}
+        description={`This starts remote cleanup for "${deleteTarget?.name}". The project remains archived while its environments are decommissioned, then the project record is removed.`}
         confirmLabel="Delete"
         confirmVariant="destructive"
         onConfirm={() => deleteTarget && deleteMutation.mutate(deleteTarget.id)}

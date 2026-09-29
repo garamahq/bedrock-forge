@@ -13,7 +13,6 @@ import {
   History,
   Puzzle,
   RefreshCw,
-  Undo2,
   Wrench,
   GitCompare,
   Palette,
@@ -42,7 +41,6 @@ import { EnvironmentsTab } from "./project-detail/EnvironmentsTab";
 import { BackupsTab } from "./project-detail/BackupsTab";
 import { PluginsTab } from "./project-detail/PluginsTab";
 import { SyncTab } from "./project-detail/SyncTab";
-import { RestoreTab } from "./project-detail/RestoreTab";
 import { ToolsTab } from "./project-detail/ToolsTab";
 import { DriftTab } from "./project-detail/DriftTab";
 import { ThemesTab } from "./project-detail/ThemesTab";
@@ -111,7 +109,6 @@ const VALID_PROJECT_TABS = [
   "backups",
   "plugins",
   "sync",
-  "restore",
   "tools",
   "drift",
   "themes",
@@ -434,19 +431,27 @@ export function ProjectDetailPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedTab = searchParams.get("tab");
   const currentTab =
-    requestedTab && VALID_PROJECT_TABS.includes(requestedTab)
-      ? requestedTab
-      : "environments";
+    requestedTab === "restore"
+      ? "backups"
+      : requestedTab && VALID_PROJECT_TABS.includes(requestedTab)
+        ? requestedTab
+        : "environments";
   const [activatedTabs, setActivatedTabs] = useState<Set<string>>(
     new Set([currentTab]),
   );
 
   useEffect(() => {
-    if (requestedTab && !VALID_PROJECT_TABS.includes(requestedTab)) {
+    if (
+      requestedTab === "restore" ||
+      (requestedTab && !VALID_PROJECT_TABS.includes(requestedTab))
+    ) {
       setSearchParams(
         (prev) => {
           const next = new URLSearchParams(prev);
-          next.set("tab", "environments");
+          next.set(
+            "tab",
+            requestedTab === "restore" ? "backups" : "environments",
+          );
           return next;
         },
         { replace: true },
@@ -888,10 +893,49 @@ export function ProjectDetailPage() {
             });
           }}
         >
-          <TabsList
-            aria-label="Project pages"
-            className="flex flex-wrap overflow-visible whitespace-normal h-auto gap-1 bg-muted/60 p-1.5 border border-border/40 rounded-xl shadow-sm backdrop-blur-sm max-w-full justify-start"
-          >
+          <div className="mb-4 max-w-sm space-y-1.5">
+            <Label
+              htmlFor="project-area"
+              className="text-xs font-medium text-muted-foreground"
+            >
+              Project area
+            </Label>
+            <select
+              id="project-area"
+              aria-label="Project area"
+              value={currentTab}
+              onChange={(event) => {
+                setSearchParams((previous) => {
+                  const next = new URLSearchParams(previous);
+                  next.set("tab", event.target.value);
+                  return next;
+                });
+              }}
+              className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              <optgroup label="Project setup">
+                <option value="environments">Environments</option>
+                <option value="deploy">Git &amp; Deploy</option>
+              </optgroup>
+              <optgroup label="Data operations">
+                <option value="backups">Backups &amp; Restore</option>
+                <option value="sync">Sync</option>
+              </optgroup>
+              <optgroup label="WordPress management">
+                <option value="plugins">Plugins</option>
+                <option value="themes">Themes</option>
+                <option value="wp-core">WordPress Core</option>
+                <option value="tools">Tools</option>
+                <option value="files-config">Files &amp; Config</option>
+              </optgroup>
+              <optgroup label="Health &amp; history">
+                <option value="security">Security</option>
+                <option value="drift">Drift</option>
+                <option value="activity">Activity history</option>
+              </optgroup>
+            </select>
+          </div>
+          <TabsList aria-label="Project pages" className="hidden">
             <TabsTrigger
               value="environments"
               className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
@@ -931,13 +975,6 @@ export function ProjectDetailPage() {
             >
               <RefreshCw className="h-3.5 w-3.5 opacity-70" />
               Sync
-            </TabsTrigger>
-            <TabsTrigger
-              value="restore"
-              className="gap-1.5 px-3.5 py-2 rounded-lg text-xs md:text-sm font-medium transition-all data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm shrink-0"
-            >
-              <Undo2 className="h-3.5 w-3.5 opacity-70" />
-              Restore
             </TabsTrigger>
             <TabsTrigger
               value="tools"
@@ -1021,12 +1058,6 @@ export function ProjectDetailPage() {
           <TabsContent value="sync">
             {activatedTabs.has("sync") && (
               <SyncTab projectId={projectId} environments={environments} />
-            )}
-          </TabsContent>
-
-          <TabsContent value="restore">
-            {activatedTabs.has("restore") && (
-              <RestoreTab projectId={projectId} environments={environments} />
             )}
           </TabsContent>
 

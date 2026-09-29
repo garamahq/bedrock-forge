@@ -16,8 +16,18 @@ export class LighthouseService {
     return this.repo.findLatest();
   }
 
-  history(environmentId?: number, page?: number, limit?: number) {
-    return this.repo.findHistory(environmentId, page ?? 1, limit ?? 10);
+  history(
+    environmentId?: number,
+    projectId?: number,
+    page?: number,
+    limit?: number,
+  ) {
+    return this.repo.findHistory(
+      environmentId,
+      projectId,
+      page ?? 1,
+      limit ?? 10,
+    );
   }
 
   async findOne(id: number) {

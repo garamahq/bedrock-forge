@@ -22,6 +22,7 @@ export function BackupsList({
   selectedEnv,
   onRestoreClick,
   onDeleteClick,
+  canDelete,
   cancelBackupMutation,
 }: {
   data?: { items: Backup[]; total: number };
@@ -29,6 +30,7 @@ export function BackupsList({
   selectedEnv?: Environment;
   onRestoreClick: (b: Backup) => void;
   onDeleteClick: (b: Backup) => void;
+  canDelete: boolean;
   cancelBackupMutation: { isPending: boolean; mutate: (id: number) => void };
 }) {
   const [expandedLogId, setExpandedLogId] = useState<number | null>(null);
@@ -161,15 +163,18 @@ export function BackupsList({
                         )}
                       </>
                     )}
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7 text-destructive hover:text-destructive"
-                      title="Delete"
-                      onClick={() => onDeleteClick(b)}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
+                    {canDelete && (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-destructive hover:text-destructive"
+                        title="Delete"
+                        aria-label="Delete backup"
+                        onClick={() => onDeleteClick(b)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    )}
                   </div>
                 </td>
               </tr>

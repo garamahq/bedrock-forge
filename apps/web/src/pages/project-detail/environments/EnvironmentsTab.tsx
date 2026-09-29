@@ -119,9 +119,9 @@ export function EnvironmentsTab({ projectId }: { projectId: number }) {
       <AlertDialog
         open={!!deleteTarget}
         onOpenChange={(o) => !o && setDeleteTarget(null)}
-        title="Delete Environment"
-        description={`Delete the "${deleteTarget?.type}" environment at ${deleteTarget?.url}? All associated backups, plugin scans, and monitor data will be permanently removed.`}
-        confirmLabel="Delete"
+        title="Decommission Environment"
+        description={`Start remote cleanup for the "${deleteTarget?.type}" environment at ${deleteTarget?.url}. Its record and related data remain until cleanup finishes.`}
+        confirmLabel="Start decommission"
         onConfirm={async () => {
           if (deleteTarget) {
             await deleteMutation.mutateAsync(deleteTarget.id);

@@ -75,6 +75,24 @@ export class ServersRepository {
         host_key_fingerprint: true,
         created_at: true,
         updated_at: true,
+        environments: {
+          orderBy: [{ project: { name: "asc" } }, { type: "asc" }],
+          select: {
+            id: true,
+            type: true,
+            url: true,
+            root_path: true,
+            google_drive_folder_id: true,
+            project: {
+              select: {
+                id: true,
+                name: true,
+                client: { select: { id: true, name: true } },
+              },
+            },
+          },
+        },
+        _count: { select: { environments: true } },
       },
     });
   }

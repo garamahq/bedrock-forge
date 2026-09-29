@@ -54,7 +54,7 @@ export class CreateProjectDto {
   @IsInt() @IsPositive() client_id!: number;
   @IsOptional() @IsInt() @IsPositive() hosting_package_id?: number;
   @IsOptional() @IsInt() @IsPositive() support_package_id?: number;
-  @IsOptional() @IsIn(["active", "inactive", "archived"]) status?: string;
+  @IsOptional() @IsIn(["active", "inactive"]) status?: string;
   @IsOptional() @IsString() notes?: string;
   @IsOptional()
   @IsArray()
@@ -65,7 +65,11 @@ export class CreateProjectDto {
   @IsOptional() @IsString() github_repo?: string;
 }
 
-export class UpdateProjectDto extends PartialType(CreateProjectDto) {}
+export class UpdateProjectDto extends PartialType(CreateProjectDto) {
+  @IsOptional()
+  @IsIn(["active", "inactive"])
+  declare status?: string;
+}
 
 export class QueryProjectsDto extends PaginationQueryDto {
   @IsOptional()

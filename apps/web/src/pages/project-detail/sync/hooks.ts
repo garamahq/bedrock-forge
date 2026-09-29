@@ -7,10 +7,11 @@ export function useSyncHistoryQuery(
   projectId: number,
   envIds: string,
   enabled: boolean,
+  page: number,
 ) {
   return useQuery<SyncHistoryPage>({
-    queryKey: ["sync-history", projectId],
-    queryFn: () => syncApi.getSyncHistory(envIds),
+    queryKey: ["sync-history", projectId, page],
+    queryFn: () => syncApi.getSyncHistory(envIds, page),
     enabled: enabled && !!envIds,
     staleTime: 15_000,
     refetchInterval: 30_000,

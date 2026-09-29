@@ -147,11 +147,16 @@ export function LighthousePage() {
     isError: historyError,
     refetch: refetchHistory,
   } = useQuery<{ items: LighthouseAudit[]; total: number }>({
-    queryKey: ["lighthouse", "history", environmentId, page],
-    queryFn: () =>
-      api.get(
-        `/lighthouse/history?page=${page}&limit=10${environmentId ? `&environment_id=${environmentId}` : ""}`,
-      ),
+    queryKey: ["lighthouse", "history", projectId, environmentId, page],
+    queryFn: () => {
+      const params = new URLSearchParams({ page: String(page), limit: "10" });
+      if (environmentId && environmentId !== "all") {
+        params.set("environment_id", environmentId);
+      } else if (projectId !== "all") {
+        params.set("project_id", projectId);
+      }
+      return api.get(`/lighthouse/history?${params.toString()}`);
+    },
     refetchInterval: 30_000,
   });
 
@@ -179,7 +184,16 @@ export function LighthousePage() {
     },
   });
 
-  const topAudits = latest.slice(0, 4);
+  const scopedLatest = latest.filter((audit) => {
+    if (environmentId && environmentId !== "all") {
+      return String(audit.environment_id) === environmentId;
+    }
+    if (projectId !== "all") {
+      return String(audit.environment?.project?.id) === projectId;
+    }
+    return true;
+  });
+  const topAudits = scopedLatest.slice(0, 4);
   const trendData = [...history]
     .filter((audit) => audit.status === "completed")
     .reverse()
@@ -236,14 +250,7 @@ export function LighthousePage() {
               if (val === "all") {
                 setEnvironmentId("");
               } else {
-                const pEnvs = environments.filter(
-                  (e) => String(e.project?.id) === val,
-                );
-                if (pEnvs.length > 0) {
-                  setEnvironmentId(String(pEnvs[0].id));
-                } else {
-                  setEnvironmentId("");
-                }
+                setEnvironmentId("all");
               }
             }}
           >
@@ -289,6 +296,9 @@ export function LighthousePage() {
               <SelectValue placeholder="Select environment" />
             </SelectTrigger>
             <SelectContent>
+              {projectId !== "all" && (
+                <SelectItem value="all">All environments in project</SelectItem>
+              )}
               {filteredEnvs.map((env) => (
                 <SelectItem key={env.id} value={String(env.id)}>
                   <span className="font-medium">{env.project?.name}</span> ·{" "}
@@ -330,7 +340,9 @@ export function LighthousePage() {
 
         <Button
           onClick={() => trigger.mutate()}
-          disabled={!environmentId || trigger.isPending}
+          disabled={
+            !environmentId || environmentId === "all" || trigger.isPending
+          }
         >
           {trigger.isPending ? (
             <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />

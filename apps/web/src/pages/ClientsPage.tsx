@@ -445,7 +445,7 @@ export function ClientsPage() {
         open={!!deleteTarget}
         onOpenChange={(o) => !o && setDeleteTarget(null)}
         title="Delete Client"
-        description={`"${deleteTarget?.name}" and all associated data will be permanently deleted.`}
+        description={`"${deleteTarget?.name}" can only be deleted after its linked projects and invoices are removed or reassigned. This action cannot be undone.`}
         confirmLabel="Delete"
         onConfirm={() => deleteTarget && deleteMutation.mutate(deleteTarget.id)}
         isPending={deleteMutation.isPending}

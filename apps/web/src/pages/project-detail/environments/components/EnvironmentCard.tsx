@@ -14,7 +14,7 @@ import {
   X,
   Plus,
 } from "lucide-react";
-import { WS_EVENTS } from "@bedrock-forge/shared";
+import { JOB_TYPES, WS_EVENTS } from "@bedrock-forge/shared";
 import { useWebSocketEvent, useSubscribeEnvironment } from "@/lib/websocket";
 import { toast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
@@ -60,6 +60,11 @@ export function EnvironmentCard({
   const isProvisioning =
     !!job && (job.status === "queued" || job.status === "active");
   const isProvisionFailed = !!job && job.status === "failed";
+  const operationLabel =
+    job?.job_type === JOB_TYPES.ENVIRONMENT_DECOMMISSION ||
+    job?.job_type === JOB_TYPES.PROJECT_ARCHIVE
+      ? "Decommissioning"
+      : "Provisioning";
 
   // Real-time job events for this environment
   useWebSocketEvent(WS_EVENTS.JOB_PROGRESS, (raw: unknown) => {
@@ -73,7 +78,7 @@ export function EnvironmentCard({
     if (d.environmentId === env.id && d.queueName === "projects") {
       qc.invalidateQueries({ queryKey: ["environments", projectId] });
       qc.invalidateQueries({ queryKey: ["project", projectId] });
-      toast({ title: `${env.type} environment provisioned` });
+      toast({ title: "Environment job completed" });
     }
   });
   useWebSocketEvent(WS_EVENTS.JOB_FAILED, (raw: unknown) => {
@@ -85,7 +90,7 @@ export function EnvironmentCard({
     if (d.environmentId === env.id && d.queueName === "projects") {
       qc.invalidateQueries({ queryKey: ["environments", projectId] });
       toast({
-        title: "Provisioning failed",
+        title: "Environment job failed",
         description: d.error,
         variant: "destructive",
       });
@@ -121,8 +126,8 @@ export function EnvironmentCard({
           <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
           <span className="flex-1">
             {job.status === "queued"
-              ? "Provisioning queued…"
-              : `Provisioning in progress${job.progress ? ` — ${job.progress}%` : "…"}`}
+              ? `${operationLabel} queued…`
+              : `${operationLabel} in progress${job.progress ? ` — ${job.progress}%` : "…"}`}
           </span>
         </div>
       )}
@@ -130,7 +135,7 @@ export function EnvironmentCard({
         <div className="px-4 py-2 bg-red-50 dark:bg-red-950/40 border-b flex items-start gap-2 text-sm text-red-700 dark:text-red-300 rounded-t-lg">
           <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
           <span className="flex-1 line-clamp-2">
-            Provisioning failed
+            Environment job failed
             {job.last_error ? `: ${job.last_error}` : ""}.
           </span>
           <a href="/activity" className="shrink-0 underline whitespace-nowrap">

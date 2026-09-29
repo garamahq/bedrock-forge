@@ -82,12 +82,12 @@ export function PushPanel({
       setJobDone(null);
       setProgress(null);
       qc.invalidateQueries({ queryKey: ["sync-history", projectId] });
-      toast({ title: "Push job queued", description: `Job ${res.jobId}` });
+      toast({ title: "Sync job queued", description: `Job ${res.jobId}` });
     },
     onError: (err: unknown) => {
-      const msg = err instanceof Error ? err.message : "Failed to queue push";
+      const msg = err instanceof Error ? err.message : "Failed to queue sync";
       toast({
-        title: "Push failed to queue",
+        title: "Sync failed to queue",
         description: msg,
         variant: "destructive",
       });
@@ -102,10 +102,10 @@ export function PushPanel({
       setProgress(null);
       setJobDone({ jobId: "", status: "failed", message: "Cancelled by user" });
       qc.invalidateQueries({ queryKey: ["sync-history", projectId] });
-      toast({ title: "Push job cancelled" });
+      toast({ title: "Sync job cancelled" });
     },
     onError: () =>
-      toast({ title: "Could not cancel push", variant: "destructive" }),
+      toast({ title: "Could not cancel sync", variant: "destructive" }),
   });
 
   useWebSocketEvent("job:progress", (raw: unknown) => {
@@ -117,7 +117,7 @@ export function PushPanel({
     if (r.jobId === jobId) {
       setJobDone({ ...r, status: "completed" });
       qc.invalidateQueries({ queryKey: ["sync-history", projectId] });
-      toast({ title: "Push completed successfully" });
+      toast({ title: "Sync completed successfully" });
     }
   });
   useWebSocketEvent("job:failed", (raw: unknown) => {
@@ -126,7 +126,7 @@ export function PushPanel({
       setJobDone({ ...r, status: "failed" });
       qc.invalidateQueries({ queryKey: ["sync-history", projectId] });
       toast({
-        title: "Push failed",
+        title: "Sync failed",
         description: r.message,
         variant: "destructive",
       });
@@ -148,14 +148,14 @@ export function PushPanel({
   return (
     <div className="space-y-5">
       <p className="text-sm text-muted-foreground">
-        Push data from one environment to another — choose database, files
+        Sync data from one environment to another — choose database, files
         (wp-content/), or both. Uses rsync for fast file transfer with a tar
         relay fallback.
       </p>
 
       {/* Scope selector */}
       <div className="space-y-1.5">
-        <label className="text-sm font-medium">What to push</label>
+        <label className="text-sm font-medium">What to sync</label>
         <div className="grid grid-cols-3 gap-2">
           {SCOPE_OPTIONS.map(({ value, label, icon: Icon, desc }) => (
             <button
@@ -334,7 +334,7 @@ export function PushPanel({
               Skip safety backup
             </Label>
             <p className="text-xs text-muted-foreground">
-              Push database without a prior snapshot. Use when target has no
+              Sync database without a prior snapshot. Use when target has no
               Google Drive folder or you accept data-loss risk.
             </p>
           </div>
@@ -357,15 +357,15 @@ export function PushPanel({
         onClick={() => setConfirmOpen(true)}
       >
         <Upload className={`h-4 w-4 mr-1.5 ${isBusy ? "animate-pulse" : ""}`} />
-        {isBusy ? "Pushing…" : "Start Push"}
+        {isBusy ? "Syncing…" : "Start Sync"}
       </Button>
 
       <AlertDialog
         open={confirmOpen}
         onOpenChange={setConfirmOpen}
-        title="Confirm Push — This will overwrite data"
+        title="Confirm Sync — This will overwrite data"
         description={`The ${target?.type ?? ""} environment on ${target?.server.name ?? ""} will have its ${scope === "both" ? "database and files" : scope === "database" ? "database" : "wp-content files"} overwritten with data from ${source?.type ?? ""}.${skipSafetyBackup && needsGdrive ? " No backup will be taken." : ""}`}
-        confirmLabel="Yes, start push"
+        confirmLabel="Yes, start sync"
         confirmVariant="destructive"
         onConfirm={() => {
           setConfirmOpen(false);

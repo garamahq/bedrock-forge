@@ -34,6 +34,7 @@ export interface Environment {
   }>;
   latestProvisioningJob?: {
     id: number;
+    job_type: string | null;
     status: string;
     progress: number | null;
     last_error: string | null;

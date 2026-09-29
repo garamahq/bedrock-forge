@@ -3,7 +3,15 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { Calendar, Trash2, Plus, Server, Layout, AlertCircle, Clock } from "lucide-react";
+import {
+  Calendar,
+  Trash2,
+  Plus,
+  Server,
+  Layout,
+  AlertCircle,
+  Clock,
+} from "lucide-react";
 import { api } from "@/lib/api-client";
 import { toast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
@@ -12,7 +20,12 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { AlertDialog } from "@/components/ui/alert-dialog";
-import { PageHeader, DataTable, type Column } from "@/components/crud";
+import {
+  PageHeader,
+  DataTable,
+  Pagination,
+  type Column,
+} from "@/components/crud";
 import {
   Dialog,
   DialogContent,
@@ -20,7 +33,13 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 interface MaintenanceWindow {
   id: number;
@@ -28,7 +47,7 @@ interface MaintenanceWindow {
   resource_id: number;
   starts_at: string;
   ends_at: string;
-  description: string | null;
+  reason: string | null;
   created_by: number;
   created_at: string;
   server?: { id: number; name: string };
@@ -46,20 +65,25 @@ interface EnvironmentOption {
   url: string;
 }
 
-const windowSchema = z.object({
-  resource_type: z.enum(["server", "environment"]),
-  resource_id: z.string().min(1, "Please select a resource"),
-  starts_at: z.string().min(1, "Start date and time is required"),
-  ends_at: z.string().min(1, "End date and time is required"),
-  description: z.string().optional().or(z.literal("")),
-}).refine(data => {
-  const start = new Date(data.starts_at).getTime();
-  const end = new Date(data.ends_at).getTime();
-  return end > start;
-}, {
-  message: "End time must be after start time",
-  path: ["ends_at"],
-});
+const windowSchema = z
+  .object({
+    resource_type: z.enum(["server", "environment"]),
+    resource_id: z.string().min(1, "Please select a resource"),
+    starts_at: z.string().min(1, "Start date and time is required"),
+    ends_at: z.string().min(1, "End date and time is required"),
+    reason: z.string().optional().or(z.literal("")),
+  })
+  .refine(
+    (data) => {
+      const start = new Date(data.starts_at).getTime();
+      const end = new Date(data.ends_at).getTime();
+      return end > start;
+    },
+    {
+      message: "End time must be after start time",
+      path: ["ends_at"],
+    },
+  );
 
 type WindowForm = z.infer<typeof windowSchema>;
 
@@ -75,7 +99,9 @@ function MaintenanceWindowFormDialog({
   const { data: servers = [] } = useQuery<ServerOption[]>({
     queryKey: ["servers-options"],
     queryFn: async () => {
-      const res = await api.get<{ items: ServerOption[] }>("/servers?limit=100");
+      const res = await api.get<{ items: ServerOption[] }>(
+        "/servers?limit=100",
+      );
       return res.items || [];
     },
   });
@@ -102,7 +128,7 @@ function MaintenanceWindowFormDialog({
       resource_id: "",
       starts_at: "",
       ends_at: "",
-      description: "",
+      reason: "",
     },
   });
 
@@ -116,7 +142,7 @@ function MaintenanceWindowFormDialog({
         resource_id: parseInt(data.resource_id, 10),
         starts_at: new Date(data.starts_at).toISOString(),
         ends_at: new Date(data.ends_at).toISOString(),
-        description: data.description || null,
+        reason: data.reason || null,
       });
       toast({ title: "Maintenance window scheduled successfully" });
       reset();
@@ -162,26 +188,32 @@ function MaintenanceWindowFormDialog({
               onValueChange={(val) => setValue("resource_id", val)}
             >
               <SelectTrigger>
-                <SelectValue placeholder={resourceType === "server" ? "Select Server" : "Select Environment"} />
+                <SelectValue
+                  placeholder={
+                    resourceType === "server"
+                      ? "Select Server"
+                      : "Select Environment"
+                  }
+                />
               </SelectTrigger>
               <SelectContent>
-                {resourceType === "server" ? (
-                  servers.map((s) => (
-                    <SelectItem key={s.id} value={s.id.toString()}>
-                      {s.name}
-                    </SelectItem>
-                  ))
-                ) : (
-                  environments.map((e) => (
-                    <SelectItem key={e.id} value={e.id.toString()}>
-                      {e.type} ({e.url})
-                    </SelectItem>
-                  ))
-                )}
+                {resourceType === "server"
+                  ? servers.map((s) => (
+                      <SelectItem key={s.id} value={s.id.toString()}>
+                        {s.name}
+                      </SelectItem>
+                    ))
+                  : environments.map((e) => (
+                      <SelectItem key={e.id} value={e.id.toString()}>
+                        {e.type} ({e.url})
+                      </SelectItem>
+                    ))}
               </SelectContent>
             </Select>
             {errors.resource_id && (
-              <p className="text-xs text-destructive">{errors.resource_id.message}</p>
+              <p className="text-xs text-destructive">
+                {errors.resource_id.message}
+              </p>
             )}
           </div>
 
@@ -194,7 +226,9 @@ function MaintenanceWindowFormDialog({
                 {...register("starts_at")}
               />
               {errors.starts_at && (
-                <p className="text-xs text-destructive">{errors.starts_at.message}</p>
+                <p className="text-xs text-destructive">
+                  {errors.starts_at.message}
+                </p>
               )}
             </div>
             <div className="space-y-1.5">
@@ -205,16 +239,18 @@ function MaintenanceWindowFormDialog({
                 {...register("ends_at")}
               />
               {errors.ends_at && (
-                <p className="text-xs text-destructive">{errors.ends_at.message}</p>
+                <p className="text-xs text-destructive">
+                  {errors.ends_at.message}
+                </p>
               )}
             </div>
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="description">Reason / Description</Label>
+            <Label htmlFor="reason">Reason</Label>
             <Textarea
-              id="description"
-              {...register("description")}
+              id="reason"
+              {...register("reason")}
               placeholder="Migrating server to new host, upgrading PHP, etc..."
               rows={3}
             />
@@ -245,8 +281,12 @@ function MaintenanceWindowFormDialog({
 
 export function MaintenanceWindowsPage() {
   const qc = useQueryClient();
+  const [page, setPage] = useState(1);
+  const limit = 10;
   const [createOpen, setCreateOpen] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<MaintenanceWindow | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<MaintenanceWindow | null>(
+    null,
+  );
 
   const {
     data: response,
@@ -254,11 +294,12 @@ export function MaintenanceWindowsPage() {
     isError,
     refetch,
   } = useQuery<{ data: MaintenanceWindow[]; total: number }>({
-    queryKey: ["maintenance-windows"],
-    queryFn: () => api.get("/maintenance-windows"),
+    queryKey: ["maintenance-windows", page, limit],
+    queryFn: () => api.get(`/maintenance-windows?page=${page}&limit=${limit}`),
   });
 
   const data = response?.data ?? [];
+  const totalPages = Math.max(1, Math.ceil((response?.total ?? 0) / limit));
 
   const deleteMutation = useMutation({
     mutationFn: (id: number) => api.delete(`/maintenance-windows/${id}`),
@@ -267,7 +308,11 @@ export function MaintenanceWindowsPage() {
       setDeleteTarget(null);
       toast({ title: "Maintenance window deleted" });
     },
-    onError: () => toast({ title: "Failed to delete maintenance window", variant: "destructive" }),
+    onError: () =>
+      toast({
+        title: "Failed to delete maintenance window",
+        variant: "destructive",
+      }),
   });
 
   function getStatus(w: MaintenanceWindow) {
@@ -296,7 +341,11 @@ export function MaintenanceWindowsPage() {
           )}
           <div>
             <span className="font-medium text-foreground">
-              {w.resource_type === "server" ? (w.server?.name || `Server #${w.resource_id}`) : (w.environment ? `${w.environment.type} (${w.environment.url})` : `Environment #${w.resource_id}`)}
+              {w.resource_type === "server"
+                ? w.server?.name || `Server #${w.resource_id}`
+                : w.environment
+                  ? `${w.environment.type} (${w.environment.url})`
+                  : `Environment #${w.resource_id}`}
             </span>
             <span className="ml-1.5 text-xs text-muted-foreground capitalize">
               ({w.resource_type})
@@ -306,10 +355,12 @@ export function MaintenanceWindowsPage() {
       ),
     },
     {
-      header: "Description / Reason",
+      header: "Reason",
       render: (w) => (
         <span className="text-sm text-muted-foreground">
-          {w.description || <em className="text-muted-foreground/50">No reason provided</em>}
+          {w.reason || (
+            <em className="text-muted-foreground/50">No reason provided</em>
+          )}
         </span>
       ),
     },
@@ -344,7 +395,10 @@ export function MaintenanceWindowsPage() {
       >
         <div className="text-sm text-muted-foreground flex items-center gap-1.5 mt-1">
           <Clock className="h-4 w-4 text-indigo-500" />
-          <span>Alerts and checks are suppressed for resources under maintenance.</span>
+          <span>
+            Monitor checks continue and record results; notifications are
+            suppressed during active windows.
+          </span>
         </div>
       </PageHeader>
 
@@ -365,10 +419,6 @@ export function MaintenanceWindowsPage() {
             </Button>
           }
           renderActions={(w) => {
-            const now = new Date().getTime();
-            const end = new Date(w.ends_at).getTime();
-            const isPast = now > end;
-
             return (
               <div className="flex items-center gap-1">
                 <Button
@@ -385,10 +435,20 @@ export function MaintenanceWindowsPage() {
         />
       </div>
 
+      {totalPages > 1 && (
+        <Pagination
+          page={page}
+          totalPages={totalPages}
+          onPageChange={setPage}
+        />
+      )}
+
       <MaintenanceWindowFormDialog
         open={createOpen}
         onOpenChange={setCreateOpen}
-        onSuccess={() => qc.invalidateQueries({ queryKey: ["maintenance-windows"] })}
+        onSuccess={() =>
+          qc.invalidateQueries({ queryKey: ["maintenance-windows"] })
+        }
       />
 
       <AlertDialog

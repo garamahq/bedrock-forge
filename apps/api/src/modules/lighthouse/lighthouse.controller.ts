@@ -29,11 +29,13 @@ export class LighthouseController {
   @Get("history")
   history(
     @Query("environment_id") environmentId?: string,
+    @Query("project_id") projectId?: string,
     @Query("page") page?: string,
     @Query("limit") limit?: string,
   ) {
     return this.svc.history(
       environmentId ? Number(environmentId) : undefined,
+      projectId ? Number(projectId) : undefined,
       page ? Number(page) : undefined,
       limit ? Number(limit) : undefined,
     );
