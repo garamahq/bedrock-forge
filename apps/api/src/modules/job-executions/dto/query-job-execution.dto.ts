@@ -26,6 +26,7 @@ const VALID_STATUSES = [
   "completed",
   "failed",
   "dead_letter",
+  "discarded",
 ];
 
 export class QueryJobExecutionDto {

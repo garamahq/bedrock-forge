@@ -24,6 +24,8 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { ExecutionLogPanel } from "@/components/ui/execution-log-panel";
+import { AlertDialog } from "@/components/ui/alert-dialog";
+import { useAuthStore } from "@/store/auth.store";
 
 interface JobExecutionRow {
   id: number;
@@ -47,6 +49,21 @@ interface JobExecutionRow {
 interface PageResult {
   data: JobExecutionRow[];
   total: number;
+}
+
+interface RecoveryPreview {
+  total: number;
+  inspected: number;
+  repairable: number;
+  held: number;
+  hasMore: boolean;
+  items: Array<{
+    id: number;
+    queue_name: string;
+    status: string;
+    repairStatus: "completed" | "failed" | null;
+    reason: string;
+  }>;
 }
 
 const QUEUE_LABELS: Record<string, string> = {
@@ -188,28 +205,57 @@ function JobRow({
 
 export function ActionCenter() {
   const queryClient = useQueryClient();
+  const isAdmin = useAuthStore(
+    (state) => state.user?.roles?.includes("admin") ?? false,
+  );
   const [open, setOpen] = useState(false);
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [isRecovering, setIsRecovering] = useState(false);
+  const [recoveryDialogOpen, setRecoveryDialogOpen] = useState(false);
   const [recoveryMessage, setRecoveryMessage] = useState<string | null>(null);
+  const [recoveryFailed, setRecoveryFailed] = useState(false);
+
+  const {
+    data: recoveryPreview,
+    isPending: isLoadingRecoveryPreview,
+    isError: isRecoveryPreviewError,
+  } = useQuery<RecoveryPreview>({
+    queryKey: ["job-execution-recovery-preview"],
+    queryFn: () => api.get("/job-executions/recovery-preview"),
+    enabled: recoveryDialogOpen && isAdmin,
+    retry: false,
+  });
+
+  const recoveryByQueue = (recoveryPreview?.items ?? []).reduce<
+    Record<string, { repairable: number; held: number }>
+  >((summary, item) => {
+    const counts = summary[item.queue_name] ?? { repairable: 0, held: 0 };
+    if (item.repairStatus) counts.repairable++;
+    else counts.held++;
+    summary[item.queue_name] = counts;
+    return summary;
+  }, {});
 
   async function handleRecoverQueues() {
+    if (!isAdmin || !recoveryPreview?.repairable) return;
     setIsRecovering(true);
     try {
-      const res = await api.post<{ success: boolean; message: string; dbCleaned: number }>(
-        "/job-executions/recover-stalled",
-        {},
-      );
-      setRecoveryMessage(
-        res.dbCleaned > 0
-          ? `Recovered ${res.dbCleaned} stalled jobs`
-          : "Queues inspected & recovered",
-      );
+      const res = await api.post<{
+        success: boolean;
+        message: string;
+        reconciled: number;
+      }>("/job-executions/recover-stalled", {});
+      setRecoveryMessage(res.message);
+      setRecoveryFailed(false);
+      setRecoveryDialogOpen(false);
       setTimeout(() => setRecoveryMessage(null), 4000);
       queryClient.invalidateQueries({ queryKey: ["action-center"] });
       queryClient.invalidateQueries({ queryKey: ["job-executions"] });
     } catch (err) {
-      console.error("Failed to recover queues:", err);
+      setRecoveryFailed(true);
+      setRecoveryMessage(
+        err instanceof Error ? err.message : "Queue reconciliation failed.",
+      );
     } finally {
       setIsRecovering(false);
     }
@@ -302,6 +348,8 @@ export function ActionCenter() {
       <button
         type="button"
         onClick={() => setOpen(true)}
+        aria-label={`Open Action Center. ${activeJobs.length} running jobs, ${failedJobs.length} failed jobs.`}
+        title="Action Center"
         className="relative flex items-center gap-1.5 rounded-lg border h-8 px-2.5 text-xs font-medium bg-card hover:bg-accent transition-colors shrink-0"
       >
         {activeJobs.length > 0 ? (
@@ -313,12 +361,18 @@ export function ActionCenter() {
         )}
         <span className="hidden md:inline">Action Center</span>
         {activeJobs.length > 0 && (
-          <Badge variant="info" className="h-4 px-1 text-[9px] min-w-4 flex items-center justify-center">
+          <Badge
+            variant="info"
+            className="h-4 px-1 text-[9px] min-w-4 flex items-center justify-center"
+          >
             {activeJobs.length}
           </Badge>
         )}
         {activeJobs.length === 0 && failedJobs.length > 0 && (
-          <Badge variant="destructive" className="h-4 px-1 text-[9px] min-w-4 flex items-center justify-center">
+          <Badge
+            variant="destructive"
+            className="h-4 px-1 text-[9px] min-w-4 flex items-center justify-center"
+          >
             {failedJobs.length}
           </Badge>
         )}
@@ -336,19 +390,21 @@ export function ActionCenter() {
                 </p>
               </div>
               <div className="flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-8 gap-1.5 text-xs text-amber-500 border-amber-500/30 hover:bg-amber-500/10 hover:text-amber-400"
-                  onClick={handleRecoverQueues}
-                  disabled={isRecovering}
-                  title="Unstick and recover all queues and stalled jobs"
-                >
-                  <Wrench
-                    className={`h-3.5 w-3.5 ${isRecovering ? "animate-spin" : ""}`}
-                  />
-                  <span>Recover Queues</span>
-                </Button>
+                {isAdmin && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-8 gap-1.5 text-xs text-amber-500 border-amber-500/30 hover:bg-amber-500/10 hover:text-amber-400"
+                    onClick={() => setRecoveryDialogOpen(true)}
+                    disabled={isRecovering}
+                    title="Review stale job records before reconciling"
+                  >
+                    <Wrench
+                      className={`h-3.5 w-3.5 ${isRecovering ? "animate-spin" : ""}`}
+                    />
+                    <span>Recover Queues</span>
+                  </Button>
+                )}
                 <Button
                   variant="outline"
                   size="sm"
@@ -367,8 +423,16 @@ export function ActionCenter() {
 
           <div className="flex-1 overflow-y-auto px-6 py-4">
             {recoveryMessage && (
-              <div className="mb-3 rounded-md bg-emerald-500/10 border border-emerald-500/30 px-3 py-2 text-xs text-emerald-400 flex items-center gap-2">
-                <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+              <div
+                role={recoveryFailed ? "alert" : "status"}
+                aria-live={recoveryFailed ? "assertive" : "polite"}
+                className={`mb-3 flex items-center gap-2 rounded-md border px-3 py-2 text-xs ${recoveryFailed ? "border-destructive/30 bg-destructive/10 text-destructive" : "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"}`}
+              >
+                {recoveryFailed ? (
+                  <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                ) : (
+                  <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                )}
                 <span>{recoveryMessage}</span>
               </div>
             )}
@@ -427,6 +491,93 @@ export function ActionCenter() {
           </div>
         </SheetContent>
       </Sheet>
+
+      <AlertDialog
+        open={recoveryDialogOpen}
+        onOpenChange={setRecoveryDialogOpen}
+        title="Reconcile stale job records?"
+        description={
+          isLoadingRecoveryPreview
+            ? "Checking queue and worker state for stale records. No jobs will change until you confirm."
+            : isRecoveryPreviewError
+              ? "Queue state could not be verified. Nothing will be changed. Close this dialog and try again later."
+              : recoveryPreview
+                ? `${recoveryPreview.repairable} stale record(s) can be reconciled. ${recoveryPreview.held} record(s) still have active work or an unverified queue state and will be left untouched.`
+                : "Queue state could not be verified. Nothing will be changed."
+        }
+        confirmLabel={`Reconcile ${recoveryPreview?.repairable ?? 0} records`}
+        confirmVariant="default"
+        onConfirm={handleRecoverQueues}
+        isPending={isRecovering}
+        confirmDisabled={
+          isLoadingRecoveryPreview ||
+          isRecoveryPreviewError ||
+          !recoveryPreview?.repairable
+        }
+      >
+        {recoveryPreview && (
+          <div className="space-y-4 px-6 pb-2 text-sm">
+            <section aria-label="Recovery counts by queue">
+              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Queue breakdown
+              </h3>
+              <div className="space-y-1.5">
+                {Object.entries(recoveryByQueue).map(([queue, counts]) => (
+                  <div
+                    key={queue}
+                    className="flex items-center justify-between rounded-md border px-3 py-2 text-xs"
+                  >
+                    <span className="font-medium">
+                      {QUEUE_LABELS[queue] ?? queue}
+                    </span>
+                    <span className="text-muted-foreground">
+                      {counts.repairable} to reconcile · {counts.held} held
+                    </span>
+                  </div>
+                ))}
+                {recoveryPreview.hasMore && (
+                  <p className="text-xs text-muted-foreground">
+                    Showing the first {recoveryPreview.inspected} of{" "}
+                    {recoveryPreview.total} stale records. Reconcile this batch,
+                    then review the next one.
+                  </p>
+                )}
+              </div>
+            </section>
+            <section aria-label="Inspected stale jobs">
+              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Inspected jobs
+              </h3>
+              <div className="max-h-40 space-y-2 overflow-y-auto pr-1">
+                {recoveryPreview.items.map((item) => (
+                  <div
+                    key={item.id}
+                    className="rounded-md bg-muted/40 px-3 py-2 text-xs"
+                  >
+                    <div className="flex justify-between gap-3">
+                      <span className="font-medium">
+                        {QUEUE_LABELS[item.queue_name] ?? item.queue_name} · #
+                        {item.id}
+                      </span>
+                      <span
+                        className={
+                          item.repairStatus
+                            ? "text-emerald-600"
+                            : "text-muted-foreground"
+                        }
+                      >
+                        {item.status} ·{" "}
+                        {item.repairStatus ? "reconcile" : "held"}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-muted-foreground">{item.reason}</p>
+                  </div>
+                ))}
+              </div>
+            </section>
+          </div>
+        )}
+      </AlertDialog>
     </>
   );
 }

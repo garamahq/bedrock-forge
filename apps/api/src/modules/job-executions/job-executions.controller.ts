@@ -13,6 +13,7 @@ import { Roles } from "../../common/decorators/roles.decorator";
 import { ROLES } from "@bedrock-forge/shared";
 import { JobExecutionsService } from "./job-executions.service";
 import { QueryJobExecutionDto } from "./dto/query-job-execution.dto";
+import { RecoverQueueDto } from "./dto/recover-queue.dto";
 
 @Controller("job-executions")
 @UseGuards(AuthGuard("jwt"), RolesGuard)
@@ -42,6 +43,12 @@ export class JobExecutionsController {
     );
   }
 
+  @Get("recovery-preview")
+  @Roles(ROLES.ADMIN)
+  recoveryPreview(@Query() query: RecoverQueueDto) {
+    return this.svc.recoveryPreview(query.queue_name);
+  }
+
   /** GET /job-executions/:id — full record with environment/project/client */
   @Get(":id")
   findOne(@Param("id", ParseIntPipe) id: number) {
@@ -60,10 +67,11 @@ export class JobExecutionsController {
     return this.svc.retry(id);
   }
 
-  /** POST /job-executions/recover-stalled — Clean and unstick any stalled queues and jobs */
+  /** Reconcile stale records only when BullMQ confirms that work has stopped. */
   @Post("recover-stalled")
-  recoverStalled(@Query("queue_name") queueName?: string) {
-    return this.svc.recoverStalled(queueName);
+  @Roles(ROLES.ADMIN)
+  recoverStalled(@Query() query: RecoverQueueDto) {
+    return this.svc.recoverStalled(query.queue_name);
   }
 
   /** POST /job-executions/:id/discard — Mark job as discarded */

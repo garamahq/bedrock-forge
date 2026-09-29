@@ -596,7 +596,7 @@ export function DashboardPage() {
               <RefreshCw
                 className={`h-4 w-4 ${runningJobs.length > 0 ? "animate-spin" : ""}`}
               />
-              Active Processes
+              Active Work
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -604,31 +604,25 @@ export function DashboardPage() {
               <p className="text-sm text-muted-foreground text-center py-8">
                 Active job status is unavailable.
               </p>
-            ) : runningJobs.length > 0 ? (
-              runningJobs.map((job) => (
-                <div key={job.id} className="space-y-2">
-                  <div className="flex items-center justify-between text-xs font-medium">
-                    <span className="capitalize">
-                      {job.job_type || job.queue_name}
-                    </span>
-                    <span>{job.progress}%</span>
-                  </div>
-                  <div className="h-2 bg-muted rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-info transition-all duration-1000"
-                      style={{ width: `${job.progress}%` }}
-                    />
-                  </div>
-                  <p className="text-[10px] text-muted-foreground truncate">
-                    Project: {job.environment?.project?.name || "System"}
+            ) : (
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-3xl font-semibold tabular-nums">
+                    {runningJobs.length}
+                  </p>
+                  <p className="text-sm text-muted-foreground">
+                    {runningJobs.length === 1
+                      ? "operation running"
+                      : "operations running"}
                   </p>
                 </div>
-              ))
-            ) : (
-              <div className="text-center py-8 text-muted-foreground">
-                <Zap className="h-8 w-8 mx-auto mb-2 opacity-20" />
-                <p className="text-sm">No active background jobs</p>
+                <Zap className="h-8 w-8 text-muted-foreground opacity-30" />
               </div>
+            )}
+            {!summaryError && (
+              <Button asChild variant="outline" size="sm" className="w-full">
+                <Link to="/activity?status=active">View running activity</Link>
+              </Button>
             )}
           </CardContent>
         </Card>
@@ -675,7 +669,9 @@ export function DashboardPage() {
                           ? "bg-success"
                           : job.status === "failed"
                             ? "bg-destructive"
-                            : "bg-info animate-pulse"
+                            : job.status === "discarded"
+                              ? "bg-muted-foreground"
+                              : "bg-info animate-pulse"
                       }`}
                     />
                     <div>
@@ -688,7 +684,7 @@ export function DashboardPage() {
                     </div>
                   </div>
                   <Badge variant="outline" className="text-[10px] uppercase">
-                    {job.status}
+                    {job.status === "discarded" ? "Removed" : job.status}
                   </Badge>
                 </div>
               ))}

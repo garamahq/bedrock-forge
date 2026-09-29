@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import {
@@ -10,11 +10,9 @@ import {
   ChevronDown,
   ChevronUp,
   AlertTriangle,
-  Wrench,
-  RotateCw,
+  Trash2,
 } from "lucide-react";
 import { api } from "@/lib/api-client";
-import { toast } from "@/hooks/use-toast";
 import {
   Select,
   SelectContent,
@@ -68,18 +66,20 @@ const QUEUE_LABELS: Record<string, string> = {
 
 const STATUS_ORDER = [
   "active",
-  "pending",
+  "queued",
   "completed",
   "failed",
   "dead_letter",
+  "discarded",
 ];
 
 const STATUS_LABELS: Record<string, string> = {
   active: "Running",
-  pending: "Pending",
+  queued: "Queued",
   completed: "Completed",
   failed: "Failed",
   dead_letter: "Dead Letter",
+  discarded: "Removed from queue",
 };
 
 // ─── Sub-components ──────────────────────────────────────────────────────────
@@ -116,6 +116,20 @@ function StatusBadge({ status }: { status: string }) {
         Running
       </Badge>
     );
+  if (status === "queued")
+    return (
+      <Badge variant="secondary" className="gap-1">
+        <Clock className="h-3 w-3" />
+        Queued
+      </Badge>
+    );
+  if (status === "discarded")
+    return (
+      <Badge variant="secondary" className="gap-1">
+        <Trash2 className="h-3 w-3" />
+        Removed
+      </Badge>
+    );
   return (
     <Badge variant="secondary" className="gap-1">
       <Clock className="h-3 w-3" />
@@ -142,7 +156,7 @@ function durationLabel(
 
 function ExecutionRow({ row }: { row: JobExecutionRow }) {
   const [expanded, setExpanded] = useState(false);
-  const isActive = row.status === "active" || row.status === "pending";
+  const isActive = row.status === "active" || row.status === "queued";
 
   return (
     <>
@@ -254,39 +268,26 @@ export function ActivityPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [page, setPage] = useState(1);
   const [queueFilter, setQueueFilter] = useState("all");
-  const [statusFilter, setStatusFilter] = useState("all");
-  const [isRecovering, setIsRecovering] = useState(false);
-  const [recoveryMessage, setRecoveryMessage] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState(() => {
+    const status = searchParams.get("status");
+    return status && STATUS_ORDER.includes(status) ? status : "all";
+  });
   const jobIdFilter = searchParams.get("job") ?? "";
   const LIMIT = 10;
 
-  async function handleRecoverQueues() {
-    setIsRecovering(true);
-    try {
-      const res = await api.post<{
-        success: boolean;
-        message: string;
-        dbCleaned: number;
-      }>("/job-executions/recover-stalled", {});
-      setRecoveryMessage(
-        res.dbCleaned > 0
-          ? `Recovered ${res.dbCleaned} stalled jobs`
-          : "Queues inspected & recovered",
-      );
-      setTimeout(() => setRecoveryMessage(null), 4000);
-      queryClient.invalidateQueries({ queryKey: ["job-executions"] });
-    } catch (err) {
-      toast({
-        title: "Failed to recover queues",
-        description: err instanceof Error ? err.message : "Please try again.",
-        variant: "destructive",
-      });
-    } finally {
-      setIsRecovering(false);
-    }
-  }
+  useEffect(() => {
+    const status = searchParams.get("status");
+    setStatusFilter(status && STATUS_ORDER.includes(status) ? status : "all");
+    setPage(1);
+  }, [searchParams]);
 
-  const queryKey = ["job-executions", page, queueFilter, statusFilter, jobIdFilter];
+  const queryKey = [
+    "job-executions",
+    page,
+    queueFilter,
+    statusFilter,
+    jobIdFilter,
+  ];
 
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey,
@@ -332,22 +333,8 @@ export function ActivityPage() {
           )}
         </div>
 
-        {/* Filters and Actions */}
+        {/* Filters */}
         <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-8 gap-1.5 text-xs text-amber-500 border-amber-500/30 hover:bg-amber-500/10 hover:text-amber-400"
-            onClick={handleRecoverQueues}
-            disabled={isRecovering}
-            title="Unstick and recover all queues and stalled jobs"
-          >
-            <Wrench
-              className={`h-3.5 w-3.5 ${isRecovering ? "animate-spin" : ""}`}
-            />
-            <span>Recover Queues</span>
-          </Button>
-
           <Select
             value={queueFilter}
             onValueChange={(v) => {
@@ -372,6 +359,10 @@ export function ActivityPage() {
             value={statusFilter}
             onValueChange={(v) => {
               setStatusFilter(v);
+              const next = new URLSearchParams(searchParams);
+              if (v === "all") next.delete("status");
+              else next.set("status", v);
+              setSearchParams(next);
               resetPage();
             }}
           >
@@ -405,13 +396,6 @@ export function ActivityPage() {
           >
             Clear filter
           </Button>
-        </div>
-      )}
-
-      {recoveryMessage && (
-        <div className="rounded-md bg-emerald-500/10 border border-emerald-500/30 px-3 py-2 text-xs text-emerald-400 flex items-center gap-2">
-          <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-          <span>{recoveryMessage}</span>
         </div>
       )}
 

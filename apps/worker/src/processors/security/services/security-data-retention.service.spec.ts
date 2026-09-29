@@ -10,13 +10,19 @@ describe("SecurityDataRetentionService", () => {
       securityScan: { deleteMany: jest.fn().mockResolvedValue({ count: 0 }) },
       pluginScan: { deleteMany: jest.fn().mockResolvedValue({ count: 0 }) },
       themeScan: { deleteMany: jest.fn().mockResolvedValue({ count: 0 }) },
-      lighthouseAudit: { deleteMany: jest.fn().mockResolvedValue({ count: 0 }) },
+      lighthouseAudit: {
+        deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+      },
       monitorResult: { deleteMany: jest.fn().mockResolvedValue({ count: 0 }) },
       monitorLog: { deleteMany: jest.fn().mockResolvedValue({ count: 0 }) },
       systemBackup: { deleteMany: jest.fn().mockResolvedValue({ count: 0 }) },
       auditLog: { deleteMany: jest.fn().mockResolvedValue({ count: 0 }) },
-      notificationLog: { deleteMany: jest.fn().mockResolvedValue({ count: 0 }) },
-      userNotification: { deleteMany: jest.fn().mockResolvedValue({ count: 0 }) },
+      notificationLog: {
+        deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+      },
+      userNotification: {
+        deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+      },
     };
     service = new SecurityDataRetentionService(prismaMock);
   });
@@ -42,7 +48,7 @@ describe("SecurityDataRetentionService", () => {
 
     const call = prismaMock.jobExecution.deleteMany.mock.calls[0][0];
     expect(call.where.status).toEqual({
-      in: ["completed", "failed", "dead_letter"],
+      in: ["completed", "failed", "dead_letter", "discarded"],
     });
     expect(call.where.completed_at).toHaveProperty("lt");
   });

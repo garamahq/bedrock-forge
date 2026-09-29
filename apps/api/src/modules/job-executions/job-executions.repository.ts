@@ -41,6 +41,14 @@ export interface JobExecutionRow {
   } | null;
 }
 
+export interface StalledExecutionCandidate {
+  id: bigint;
+  queue_name: string;
+  bull_job_id: string | null;
+  status: string;
+  created_at: Date;
+}
+
 @Injectable()
 export class JobExecutionsRepository {
   constructor(private readonly prisma: PrismaService) {}
@@ -175,7 +183,9 @@ export class JobExecutionsRepository {
           where: { id: monitorId },
           select: { environment_id: true },
         });
-        return monitor?.environment_id ? Number(monitor.environment_id) : undefined;
+        return monitor?.environment_id
+          ? Number(monitor.environment_id)
+          : undefined;
       }
 
       const exec = await this.prisma.jobExecution.findFirst({
@@ -205,11 +215,17 @@ export class JobExecutionsRepository {
   }
 
   async updateStatus(id: bigint, status: JobExecutionStatus, error?: string) {
+    const isFinished =
+      status === "completed" ||
+      status === "failed" ||
+      status === "dead_letter" ||
+      status === "discarded";
     return this.prisma.jobExecution.update({
       where: { id },
       data: {
         status,
         last_error: error,
+        ...(isFinished ? { completed_at: new Date() } : {}),
       },
     });
   }
@@ -220,7 +236,11 @@ export class JobExecutionsRepository {
     status: JobExecutionStatus,
     error?: string,
   ) {
-    const isFinished = status === "completed" || status === "failed";
+    const isFinished =
+      status === "completed" ||
+      status === "failed" ||
+      status === "dead_letter" ||
+      status === "discarded";
     await this.prisma.jobExecution.updateMany({
       where: {
         bull_job_id: bullJobId,
@@ -251,18 +271,61 @@ export class JobExecutionsRepository {
     });
   }
 
-  async markStalledAsFailed(cutoff: Date, reason: string): Promise<number> {
-    const res = await this.prisma.jobExecution.updateMany({
+  async findStalledCandidates(
+    cutoff: Date,
+    queueName?: string,
+  ): Promise<StalledExecutionCandidate[]> {
+    return this.prisma.jobExecution.findMany({
       where: {
+        status: { in: ["active", "queued"] },
+        created_at: { lt: cutoff },
+        ...(queueName ? { queue_name: queueName } : {}),
+      },
+      orderBy: { created_at: "asc" },
+      take: 250,
+      select: {
+        id: true,
+        queue_name: true,
+        bull_job_id: true,
+        status: true,
+        created_at: true,
+      },
+    });
+  }
+
+  async countStalledCandidates(
+    cutoff: Date,
+    queueName?: string,
+  ): Promise<number> {
+    return this.prisma.jobExecution.count({
+      where: {
+        status: { in: ["active", "queued"] },
+        created_at: { lt: cutoff },
+        ...(queueName ? { queue_name: queueName } : {}),
+      },
+    });
+  }
+
+  async reconcileStalledCandidate(
+    id: bigint,
+    cutoff: Date,
+    status: "completed" | "failed",
+    reason?: string,
+  ): Promise<number> {
+    const result = await this.prisma.jobExecution.updateMany({
+      where: {
+        id,
         status: { in: ["active", "queued"] },
         created_at: { lt: cutoff },
       },
       data: {
-        status: "failed",
-        last_error: reason,
+        status,
+        last_error:
+          status === "failed" ? (reason ?? "Queue job is missing") : null,
+        ...(status === "completed" ? { progress: 100 } : {}),
         completed_at: new Date(),
       },
     });
-    return res.count;
+    return result.count;
   }
 }

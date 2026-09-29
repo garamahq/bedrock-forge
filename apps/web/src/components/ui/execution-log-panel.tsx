@@ -18,6 +18,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Button } from "@/components/ui/button";
+import { toast } from "@/hooks/use-toast";
 
 export interface ExecutionLogEntry {
   ts: string;
@@ -200,23 +201,42 @@ export function ExecutionLogPanel({
     try {
       await api.post(`/job-executions/${jobExecutionId}/retry`, {});
       queryClient.invalidateQueries({ queryKey: ["job-executions"] });
-      queryClient.invalidateQueries({ queryKey: ["execution-log", jobExecutionId] });
+      queryClient.invalidateQueries({
+        queryKey: ["execution-log", jobExecutionId],
+      });
+      toast({ title: "Job retry queued" });
     } catch (err) {
-      console.error("Failed to retry job:", err);
+      toast({
+        title: "Could not retry job",
+        description: err instanceof Error ? err.message : "Please try again.",
+        variant: "destructive",
+      });
     } finally {
       setIsActionPending(false);
     }
   }
 
-  async function handleDiscard() {
+  async function handleRemoveFromQueue() {
     if (!jobExecutionId) return;
     setIsActionPending(true);
     try {
       await api.post(`/job-executions/${jobExecutionId}/discard`, {});
       queryClient.invalidateQueries({ queryKey: ["job-executions"] });
-      queryClient.invalidateQueries({ queryKey: ["execution-log", jobExecutionId] });
+      queryClient.invalidateQueries({
+        queryKey: ["execution-log", jobExecutionId],
+      });
+      toast({
+        title:
+          data?.status === "queued"
+            ? "Queued job removed from queue"
+            : "Queue job removed",
+      });
     } catch (err) {
-      console.error("Failed to discard job:", err);
+      toast({
+        title: "Could not remove queued job",
+        description: err instanceof Error ? err.message : "Please try again.",
+        variant: "destructive",
+      });
     } finally {
       setIsActionPending(false);
     }
@@ -296,7 +316,9 @@ export function ExecutionLogPanel({
           {active && (
             <span className="mr-1.5 h-2 w-2 animate-pulse rounded-full bg-current" />
           )}
-          {data?.status?.replace("_", " ") ?? "queued"}
+          {data?.status === "discarded"
+            ? "Removed from queue"
+            : (data?.status?.replace("_", " ") ?? "queued")}
         </Badge>
         {elapsed && (
           <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
@@ -340,16 +362,23 @@ export function ExecutionLogPanel({
               Retry Job
             </Button>
           )}
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={handleDiscard}
-            disabled={isActionPending}
-            className="h-7 px-2.5 text-xs gap-1 border-rose-800 text-rose-400 hover:bg-rose-950/20 hover:text-rose-300"
-          >
-            <Trash2 className="h-3 w-3" />
-            {active ? "Cancel Job" : "Discard Job"}
-          </Button>
+          {data?.status === "queued" ? (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={handleRemoveFromQueue}
+              disabled={isActionPending}
+              className="h-7 px-2.5 text-xs gap-1 border-rose-800 text-rose-400 hover:bg-rose-950/20 hover:text-rose-300"
+            >
+              <Trash2 className="h-3 w-3" />
+              Remove from queue
+            </Button>
+          ) : data?.status === "active" ? (
+            <p className="text-xs text-muted-foreground" role="status">
+              This job is running. Wait for it to finish; it cannot be cancelled
+              here.
+            </p>
+          ) : null}
         </div>
       )}
     </div>

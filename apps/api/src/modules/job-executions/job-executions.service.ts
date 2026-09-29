@@ -8,10 +8,11 @@ import { JobExecutionStatus } from "@prisma/client";
 import { ModuleRef } from "@nestjs/core";
 import { getQueueToken } from "@nestjs/bullmq";
 import { Queue } from "bullmq";
-import { QUEUES } from "@bedrock-forge/shared";
+import { QueueName } from "@bedrock-forge/shared";
 import {
   JobExecutionsRepository,
   JobExecutionFilter,
+  StalledExecutionCandidate,
 } from "./job-executions.repository";
 import { JobOrchestratorService } from "./job-orchestrator.service";
 
@@ -109,92 +110,176 @@ export class JobExecutionsService {
       throw new NotFoundException(`Job execution ${id} not found`);
     }
 
-    // Attempt to remove / fail the active or waiting job in BullMQ Redis
+    if (jobExec.status !== "queued") {
+      throw new BadRequestException(
+        "Only queued jobs can be removed. Finished job history is preserved.",
+      );
+    }
+    if (!jobExec.bull_job_id) {
+      throw new BadRequestException(
+        "This queued job has no queue ID, so its state cannot be verified.",
+      );
+    }
+
     try {
-      const token = getQueueToken(jobExec.queue_name);
-      const queue = this.moduleRef.get<Queue>(token, { strict: false });
-      if (queue && jobExec.bull_job_id) {
-        const bullJob = await queue.getJob(jobExec.bull_job_id);
-        if (bullJob) {
-          await bullJob
-            .moveToFailed(new Error("Discarded by operator"), "0", true)
-            .catch(async () => {
-              await bullJob.remove().catch(() => {});
-            });
+      const queue = this.moduleRef.get<Queue>(
+        getQueueToken(jobExec.queue_name),
+        { strict: false },
+      );
+      if (!queue) {
+        throw new BadRequestException(
+          `Queue ${jobExec.queue_name} is unavailable; the job state cannot be verified.`,
+        );
+      }
+      const bullJob = await queue.getJob(jobExec.bull_job_id);
+      if (bullJob) {
+        const state = await bullJob.getState();
+        if (state === "active") {
+          throw new BadRequestException(
+            "This job is already running and cannot be removed from the queue.",
+          );
+        }
+        if (["waiting", "delayed", "paused", "prioritized"].includes(state)) {
+          await bullJob.remove();
+        } else {
+          throw new BadRequestException(
+            `Queue job is already ${state}; refresh the activity log before acting.`,
+          );
         }
       }
     } catch (err) {
-      this.logger.debug(
-        `Could not remove bull job ${jobExec.bull_job_id} from queue: ${err}`,
+      if (err instanceof BadRequestException) throw err;
+      throw new BadRequestException(
+        `Could not verify or remove the queued job: ${String(err)}`,
       );
     }
 
     return this.repo.updateStatus(
       BigInt(id),
-      "failed",
-      "Discarded by operator",
+      "discarded",
+      "Removed from queue by operator",
     );
   }
 
-  async recoverStalled(queueName?: string) {
-    const targetQueues = queueName ? [queueName] : Object.values(QUEUES);
-    const summary: Record<string, { reclaimed: number; cleaned: number }> = {};
-
-    for (const qName of targetQueues) {
-      try {
-        const token = getQueueToken(qName);
-        const queue = this.moduleRef.get<Queue>(token, { strict: false });
-        if (!queue) continue;
-
-        let reclaimed = 0;
-        const activeJobs = await queue.getActive();
-        const client = await queue.client;
-
-        for (const job of activeJobs) {
-          try {
-            const lockKey = `bull:${qName}:${job.id}:lock`;
-            const hasLock = Boolean(await client.get(lockKey));
-            if (!hasLock) {
-              await job
-                .moveToFailed(
-                  new Error("Stalled active job recovered by operator"),
-                  "0",
-                  true,
-                )
-                .catch(async () => {
-                  await job.remove().catch(() => {});
-                });
-              reclaimed++;
-            }
-          } catch (jobErr) {
-            this.logger.debug(
-              `Error checking active job ${job.id} on ${qName}: ${jobErr}`,
-            );
-          }
-        }
-
-        const cleaned = await queue.clean(0, 0, "active");
-        summary[qName] = {
-          reclaimed,
-          cleaned: Array.isArray(cleaned) ? cleaned.length : 0,
-        };
-      } catch (err) {
-        this.logger.warn(`Failed to recover queue ${qName}: ${err}`);
-      }
-    }
-
-    // Also update any database records in 'active' or 'queued' older than 5 minutes
-    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
-    const dbCleaned = await this.repo.markStalledAsFailed(
-      fiveMinutesAgo,
-      "Recovered / marked failed by operator",
+  async recoveryPreview(queueName?: QueueName) {
+    const cutoff = this.stalledCutoff();
+    const [candidates, total] = await Promise.all([
+      this.repo.findStalledCandidates(cutoff, queueName),
+      this.repo.countStalledCandidates(cutoff, queueName),
+    ]);
+    const inspected = await Promise.all(
+      candidates.map((candidate) => this.inspectCandidate(candidate)),
     );
+    const repairable = inspected.filter((item) => item.repairStatus !== null);
+
+    return {
+      cutoff,
+      total,
+      inspected: inspected.length,
+      repairable: repairable.length,
+      held: inspected.length - repairable.length,
+      hasMore: total > inspected.length,
+      items: inspected,
+    };
+  }
+
+  async recoverStalled(queueName?: QueueName) {
+    const cutoff = this.stalledCutoff();
+    const candidates = await this.repo.findStalledCandidates(cutoff, queueName);
+    const inspected = await Promise.all(
+      candidates.map((candidate) => this.inspectCandidate(candidate)),
+    );
+    let reconciled = 0;
+    const summary: Record<string, { reconciled: number; held: number }> = {};
+
+    for (const item of inspected) {
+      const entry = (summary[item.queue_name] ??= { reconciled: 0, held: 0 });
+      if (!item.repairStatus) {
+        entry.held++;
+        continue;
+      }
+
+      const updated = await this.repo.reconcileStalledCandidate(
+        BigInt(item.id),
+        cutoff,
+        item.repairStatus,
+        item.reason,
+      );
+      entry.reconciled += updated;
+      reconciled += updated;
+    }
 
     return {
       success: true,
-      message: "Queues inspected and recovered successfully",
-      dbCleaned,
+      message: `${reconciled} stale job record(s) reconciled; active or unverified queue work was left untouched.`,
+      reconciled,
+      held: inspected.length - reconciled,
       summary,
     };
+  }
+
+  private stalledCutoff(): Date {
+    return new Date(Date.now() - 5 * 60 * 1000);
+  }
+
+  private async inspectCandidate(candidate: StalledExecutionCandidate) {
+    const base = {
+      id: Number(candidate.id),
+      queue_name: candidate.queue_name,
+      status: candidate.status,
+      created_at: candidate.created_at,
+      repairStatus: null as "completed" | "failed" | null,
+      reason: "",
+    };
+
+    if (!candidate.bull_job_id) {
+      return {
+        ...base,
+        reason: "No queue job ID is recorded; queue state cannot be verified.",
+      };
+    }
+
+    try {
+      const queue = this.moduleRef.get<Queue>(
+        getQueueToken(candidate.queue_name),
+        { strict: false },
+      );
+      if (!queue) {
+        return { ...base, reason: "Queue is not available in this process." };
+      }
+      const job = await queue.getJob(candidate.bull_job_id);
+      if (!job) {
+        return {
+          ...base,
+          repairStatus: "failed" as const,
+          reason: "Queue job no longer exists.",
+        };
+      }
+
+      const state = await job.getState();
+      if (state === "completed" || state === "failed") {
+        return {
+          ...base,
+          repairStatus: state,
+          reason:
+            state === "failed"
+              ? job.failedReason || "Queue reports the job failed."
+              : "Queue reports the job completed.",
+        };
+      }
+
+      return {
+        ...base,
+        reason:
+          state === "active"
+            ? "Worker still owns this job; BullMQ will handle stalled-job recovery."
+            : `Queue job is still ${state}.`,
+      };
+    } catch (error) {
+      this.logger.warn(
+        `Could not inspect queue job ${candidate.bull_job_id} on ${candidate.queue_name}: ${error}`,
+      );
+      return { ...base, reason: "Queue state could not be verified." };
+    }
   }
 }

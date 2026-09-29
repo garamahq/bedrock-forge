@@ -19,7 +19,7 @@ function sixMonthsAgo(): Date {
  * Runs once per night (wired via security processor scheduler tick).
  * Deletes old completed/failed operational records to keep the database lean:
  *
- *   - job_executions      → completed | failed | dead_letter > 6 months
+ *   - job_executions      → completed | failed | dead_letter | discarded > 6 months
  *   - security_scans      → completed | failed               > 6 months
  *   - plugin_scans        → all                              > 6 months
  *   - theme_scans         → all                              > 6 months
@@ -78,7 +78,7 @@ export class SecurityDataRetentionService {
   private async purgeJobExecutions(cutoff: Date): Promise<number> {
     const { count } = await this.prisma.jobExecution.deleteMany({
       where: {
-        status: { in: ["completed", "failed", "dead_letter"] },
+        status: { in: ["completed", "failed", "dead_letter", "discarded"] },
         completed_at: { lt: cutoff },
       },
     });
@@ -132,9 +132,7 @@ export class SecurityDataRetentionService {
       },
     });
     if (count > 0) {
-      this.logger.log(
-        `[Retention] lighthouse_audits: deleted ${count} row(s)`,
-      );
+      this.logger.log(`[Retention] lighthouse_audits: deleted ${count} row(s)`);
     }
     return count;
   }
@@ -207,7 +205,9 @@ export class SecurityDataRetentionService {
       },
     });
     if (count > 0) {
-      this.logger.log(`[Retention] user_notifications: deleted ${count} row(s)`);
+      this.logger.log(
+        `[Retention] user_notifications: deleted ${count} row(s)`,
+      );
     }
     return count;
   }

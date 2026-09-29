@@ -20,7 +20,9 @@ interface AlertDialogProps {
   confirmVariant?: "default" | "destructive";
   onConfirm: () => void;
   isPending?: boolean;
+  confirmDisabled?: boolean;
   requireTextConfirm?: string;
+  children?: React.ReactNode;
 }
 
 /**
@@ -37,7 +39,9 @@ export function AlertDialog({
   confirmVariant = "destructive",
   onConfirm,
   isPending = false,
+  confirmDisabled = false,
   requireTextConfirm,
+  children,
 }: AlertDialogProps) {
   const [typedText, setTypedText] = React.useState("");
 
@@ -47,7 +51,10 @@ export function AlertDialog({
     }
   }, [open]);
 
-  const isDisabled = isPending || (!!requireTextConfirm && typedText !== requireTextConfirm);
+  const isDisabled =
+    isPending ||
+    confirmDisabled ||
+    (!!requireTextConfirm && typedText !== requireTextConfirm);
   const buttonLabel = confirmLabel || confirmText || "Confirm";
 
   return (
@@ -60,7 +67,11 @@ export function AlertDialog({
             {requireTextConfirm && (
               <div className="space-y-2 pt-3 border-t border-border/50">
                 <p className="text-xs text-muted-foreground">
-                  To confirm deletion, type <span className="font-mono font-semibold text-foreground select-all bg-muted px-1.5 py-0.5 rounded border">{requireTextConfirm}</span> below:
+                  To confirm deletion, type{" "}
+                  <span className="font-mono font-semibold text-foreground select-all bg-muted px-1.5 py-0.5 rounded border">
+                    {requireTextConfirm}
+                  </span>{" "}
+                  below:
                 </p>
                 <Input
                   value={typedText}
@@ -73,6 +84,7 @@ export function AlertDialog({
             )}
           </DialogDescription>
         </DialogHeader>
+        {children}
         <DialogFooter>
           <Button
             variant="outline"
