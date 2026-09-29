@@ -170,7 +170,9 @@ export async function apiFetch<T>(
   }
 
   if (res.status === 204) return undefined as T;
-  return res.json() as Promise<T>;
+  const body = await res.text();
+  if (body.trim() === "") return null as T;
+  return JSON.parse(body) as T;
 }
 
 // Convenience helpers
