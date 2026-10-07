@@ -28,6 +28,45 @@ type Executor = Awaited<ReturnType<typeof createRemoteExecutor>>;
 
 const STAGING_DIR = "/tmp/forge-sync";
 
+export type BlogPublicValue = "0" | "1";
+
+export interface TargetRuntimeOption {
+  name: string;
+  valueBase64: string;
+  autoload: string;
+}
+
+export interface TargetRuntimeOptionsSnapshot {
+  prefix: string;
+  options: TargetRuntimeOption[];
+}
+
+const SECURE_GUARD_TABLE_SUFFIXES = [
+  "sg_tokens",
+  "sg_logs",
+  "sg_rate_limits",
+  "sg_jwt_denylist",
+] as const;
+
+export function secureGuardTableNamesForPrefix(prefix: string): string[] {
+  if (!/^[A-Za-z0-9_]+$/.test(prefix)) return [];
+  return SECURE_GUARD_TABLE_SUFFIXES.map((suffix) => `${prefix}${suffix}`);
+}
+
+export function targetBlogPublicForEnvironment(
+  targetType: string | null | undefined,
+  previousValue: BlogPublicValue | null,
+): BlogPublicValue {
+  const normalizedType = targetType?.trim().toLowerCase();
+  if (!normalizedType || normalizedType === "production") {
+    // Keep an explicit production choice; a new production DB defaults public.
+    return previousValue ?? "1";
+  }
+
+  // A database copied into staging/development must not become crawlable.
+  return "0";
+}
+
 @Injectable()
 export class SyncDbService {
   private readonly logger = new Logger(SyncDbService.name);
@@ -38,6 +77,340 @@ export class SyncDbService {
     private readonly rclone: RcloneService,
     private readonly encryption: EncryptionService,
   ) {}
+
+  async captureTargetBlogPublic(
+    executor: Executor,
+    creds: Creds,
+    mycnf: string,
+    tracker: StepTracker,
+  ): Promise<BlogPublicValue | null> {
+    const prefix = await this.resolveOptionsPrefix(executor, creds, mycnf);
+    if (!prefix) {
+      const tableCount = await executor.execute(
+        `mysql --defaults-extra-file=${shellQuote(mycnf)} ${shellQuote(creds.dbName)} -sN -e ${shellQuote(
+          `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${escapeMysql(creds.dbName)}'`,
+        )}`,
+      );
+      if (tableCount.code !== 0) {
+        throw new Error(
+          `Could not determine whether the target database is empty before reading search visibility: ${tableCount.stderr.trim()}`,
+        );
+      }
+      if (Number(tableCount.stdout.trim()) > 0) {
+        throw new Error(
+          "The target database contains tables but has no readable WordPress options table; refusing to change its search visibility.",
+        );
+      }
+
+      await tracker.track({
+        step: "Target search visibility could not be read before database sync",
+        level: "warn",
+        detail:
+          "The target has no readable WordPress options table; production will use the public default.",
+      });
+      return null;
+    }
+
+    const query = `SELECT option_value FROM \`${prefix}options\` WHERE option_name = 'blog_public' LIMIT 1`;
+    const result = await executor.execute(
+      `mysql --defaults-extra-file=${shellQuote(mycnf)} ${shellQuote(creds.dbName)} -sN -e ${shellQuote(query)}`,
+    );
+    if (result.code !== 0) {
+      throw new Error(
+        `Could not capture target search visibility: ${result.stderr.trim()}`,
+      );
+    }
+    const value = result.stdout.trim();
+    const previousValue: BlogPublicValue | null =
+      value === "0" || value === "1" ? value : null;
+
+    await tracker.track({
+      step: "Captured target search visibility before database sync",
+      level: previousValue === null ? "warn" : "info",
+      detail:
+        previousValue === null
+          ? "No existing blog_public value; apply the target environment default after import."
+          : "The target environment’s existing search visibility will be restored after import.",
+    });
+
+    return previousValue;
+  }
+
+  async enforceTargetBlogPublic(
+    executor: Executor,
+    creds: Creds,
+    mycnf: string,
+    targetType: string | null | undefined,
+    previousValue: BlogPublicValue | null,
+    tracker: StepTracker,
+  ): Promise<void> {
+    const value = targetBlogPublicForEnvironment(targetType, previousValue);
+    const prefix = await this.resolveOptionsPrefix(executor, creds, mycnf);
+    if (!prefix) {
+      throw new Error(
+        "Could not find the target WordPress options table after database import; refusing to finish without restoring target search visibility.",
+      );
+    }
+
+    const query =
+      `INSERT INTO \`${prefix}options\` (option_name, option_value, autoload) ` +
+      `VALUES ('blog_public', '${value}', 'yes') ` +
+      `ON DUPLICATE KEY UPDATE option_value = VALUES(option_value)`;
+    const result = await executor.execute(
+      `mysql --defaults-extra-file=${shellQuote(mycnf)} ${shellQuote(creds.dbName)} -e ${shellQuote(query)}`,
+    );
+    if (result.code !== 0) {
+      throw new Error(
+        `Could not apply target search visibility after database import: ${result.stderr.trim()}`,
+      );
+    }
+
+    const normalizedType = targetType?.trim().toLowerCase();
+    const environment =
+      !normalizedType || normalizedType === "production"
+        ? "production"
+        : "non-production";
+    await tracker.track({
+      step: "Restored target search visibility after database sync",
+      level: "info",
+      detail: `${environment} target policy applied (blog_public=${value}).`,
+    });
+  }
+
+  async getExistingSecureGuardTables(
+    executor: Executor,
+    creds: Creds,
+    mycnf: string,
+  ): Promise<string[]> {
+    const prefix = await this.resolveOptionsPrefix(executor, creds, mycnf);
+    if (!prefix) return [];
+
+    const candidates = secureGuardTableNamesForPrefix(prefix);
+    const tableNames = candidates
+      .map((name) => `'${escapeMysql(name)}'`)
+      .join(",");
+    const query =
+      `SELECT TABLE_NAME FROM information_schema.tables ` +
+      `WHERE table_schema = '${escapeMysql(creds.dbName)}' ` +
+      `AND TABLE_NAME IN (${tableNames})`;
+    const result = await executor.execute(
+      `mysql --defaults-extra-file=${shellQuote(mycnf)} ${shellQuote(creds.dbName)} -sN -e ${shellQuote(query)}`,
+    );
+    if (result.code !== 0) {
+      throw new Error(
+        `Could not inspect Secure Guard tables before database sync: ${result.stderr.trim()}`,
+      );
+    }
+
+    const existing = new Set(
+      result.stdout
+        .split("\n")
+        .map((name) => name.trim())
+        .filter((name) => candidates.includes(name)),
+    );
+    return candidates.filter((name) => existing.has(name));
+  }
+
+  async scheduleSecureGuardSchemaRepair(
+    executor: Executor,
+    creds: Creds,
+    mycnf: string,
+    tracker: StepTracker,
+  ): Promise<void> {
+    const prefix = await this.resolveOptionsPrefix(executor, creds, mycnf);
+    if (!prefix) {
+      throw new Error(
+        "Could not find the target WordPress options table while checking Secure Guard tables after database sync.",
+      );
+    }
+
+    const optionsTable = `${prefix}options`;
+    const installationCheck = await executor.execute(
+      `mysql --defaults-extra-file=${shellQuote(mycnf)} ${shellQuote(creds.dbName)} -sN -e ${shellQuote(
+        `SELECT COUNT(*) FROM \`${optionsTable}\` WHERE option_name LIKE 'secure_guard_%' OR (option_name = 'active_plugins' AND option_value LIKE '%wp-secure-guard/secure-guard.php%')`,
+      )}`,
+    );
+    if (installationCheck.code !== 0) {
+      throw new Error(
+        `Could not determine whether Secure Guard is installed on the target: ${installationCheck.stderr.trim()}`,
+      );
+    }
+    if (Number(installationCheck.stdout.trim()) === 0) return;
+
+    const expectedTables = secureGuardTableNamesForPrefix(prefix);
+    const existingTables = await this.getExistingSecureGuardTables(
+      executor,
+      creds,
+      mycnf,
+    );
+    const missingTables = expectedTables.filter(
+      (table) => !existingTables.includes(table),
+    );
+    if (missingTables.length === 0) return;
+
+    // Source Secure Guard data is deliberately excluded from staging-to-production
+    // dumps. Force the installed plugin to rerun dbDelta on its next load so an
+    // imported current DB version cannot leave a partial/missing schema undetected.
+    // Keep the schema version intact so the one-time token migration is not rerun.
+    const query =
+      `INSERT INTO \`${optionsTable}\` (option_name, option_value, autoload) ` +
+      `VALUES ('secure_guard_plugin_version', '0.0.0', 'no') ` +
+      `ON DUPLICATE KEY UPDATE option_value = VALUES(option_value)`;
+    const result = await executor.execute(
+      `mysql --defaults-extra-file=${shellQuote(mycnf)} ${shellQuote(creds.dbName)} -e ${shellQuote(query)}`,
+    );
+    if (result.code !== 0) {
+      throw new Error(
+        `Could not schedule Secure Guard schema repair for missing table(s): ${missingTables.join(", ")}. ${result.stderr.trim()}`,
+      );
+    }
+
+    await tracker.track({
+      step: "Scheduled Secure Guard schema repair",
+      level: "warn",
+      detail: `The next Secure Guard load will create missing table(s): ${missingTables.join(", ")}.`,
+    });
+  }
+
+  async captureTargetRuntimeOptions(
+    executor: Executor,
+    creds: Creds,
+    mycnf: string,
+    tracker: StepTracker,
+  ): Promise<TargetRuntimeOptionsSnapshot | null> {
+    const prefix = await this.resolveOptionsPrefix(executor, creds, mycnf);
+    if (!prefix) {
+      const tableCount = await executor.execute(
+        `mysql --defaults-extra-file=${shellQuote(mycnf)} ${shellQuote(creds.dbName)} -sN -e ${shellQuote(
+          `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${escapeMysql(creds.dbName)}'`,
+        )}`,
+      );
+      if (tableCount.code !== 0) {
+        throw new Error(
+          `Could not determine whether the target database is empty before sync: ${tableCount.stderr.trim()}`,
+        );
+      }
+      if (Number(tableCount.stdout.trim()) > 0) {
+        throw new Error(
+          "The target database contains tables but has no readable WordPress options table; refusing to overwrite unknown production state.",
+        );
+      }
+
+      await tracker.track({
+        step: "No existing target runtime options to preserve",
+        level: "info",
+        detail:
+          "The target database is empty, so there are no plugin activation or Secure Guard settings to restore.",
+      });
+      return null;
+    }
+
+    const query =
+      `SELECT option_name, REPLACE(TO_BASE64(option_value), CHAR(10), ''), autoload ` +
+      `FROM \`${prefix}options\` ` +
+      `WHERE option_name = 'active_plugins' ` +
+      `OR (LEFT(option_name, 13) = 'secure_guard_' AND option_name <> 'secure_guard_lock_state')`;
+    const result = await executor.execute(
+      `mysql --defaults-extra-file=${shellQuote(mycnf)} ${shellQuote(creds.dbName)} -sN -e ${shellQuote(query)}`,
+    );
+    if (result.code !== 0) {
+      throw new Error(
+        `Could not capture target plugin activation and Secure Guard settings: ${result.stderr.trim()}`,
+      );
+    }
+
+    const options: TargetRuntimeOption[] = [];
+    for (const line of result.stdout.split("\n")) {
+      if (!line.trim()) continue;
+      const [name, valueBase64, autoload] = line.split("\t");
+      if (
+        !name ||
+        !(
+          name === "active_plugins" || /^secure_guard_[A-Za-z0-9_]+$/.test(name)
+        ) ||
+        name === "secure_guard_lock_state" ||
+        !/^[A-Za-z0-9+/]*={0,2}$/.test(valueBase64 ?? "") ||
+        !/^[A-Za-z_-]+$/.test(autoload ?? "")
+      ) {
+        throw new Error(
+          "Target plugin settings returned an unexpected database value; refusing to continue the sync.",
+        );
+      }
+      options.push({ name, valueBase64, autoload });
+    }
+
+    await tracker.track({
+      step: "Captured production plugin activation and Secure Guard settings",
+      level: "info",
+      detail: `${options.length} target-specific option(s) will be restored after import.`,
+    });
+
+    return { prefix, options };
+  }
+
+  async restoreTargetRuntimeOptions(
+    executor: Executor,
+    creds: Creds,
+    mycnf: string,
+    snapshot: TargetRuntimeOptionsSnapshot | null,
+    tracker: StepTracker,
+  ): Promise<void> {
+    if (!snapshot || snapshot.options.length === 0) return;
+
+    const table = `${snapshot.prefix}options`;
+    const tableCheck = await executor.execute(
+      `mysql --defaults-extra-file=${shellQuote(mycnf)} ${shellQuote(creds.dbName)} -sN -e ${shellQuote(
+        `SELECT TABLE_NAME FROM information_schema.tables WHERE table_schema='${escapeMysql(creds.dbName)}' AND TABLE_NAME='${escapeMysql(table)}' LIMIT 1`,
+      )}`,
+    );
+    if (tableCheck.code !== 0 || tableCheck.stdout.trim() !== table) {
+      throw new Error(
+        `Target options table ${table} is missing after database import; refusing to finish with a broken target environment.`,
+      );
+    }
+
+    const statements = snapshot.options.map(
+      ({ name, valueBase64, autoload }) =>
+        `INSERT INTO \`${table}\` (option_name, option_value, autoload) ` +
+        `VALUES ('${escapeMysql(name)}', FROM_BASE64('${valueBase64}'), '${escapeMysql(autoload)}') ` +
+        `ON DUPLICATE KEY UPDATE option_value=VALUES(option_value), autoload=VALUES(autoload)`,
+    );
+    const result = await executor.execute(
+      `mysql --defaults-extra-file=${shellQuote(mycnf)} ${shellQuote(creds.dbName)} -e ${shellQuote(statements.join("; "))}`,
+    );
+    if (result.code !== 0) {
+      throw new Error(
+        `Could not restore target plugin activation and Secure Guard settings: ${result.stderr.trim()}`,
+      );
+    }
+
+    await tracker.track({
+      step: "Restored production plugin activation and Secure Guard settings",
+      level: "info",
+      detail: `${snapshot.options.length} target-specific option(s) restored.`,
+    });
+  }
+
+  private async resolveOptionsPrefix(
+    executor: Executor,
+    creds: Creds,
+    mycnf: string,
+  ): Promise<string | null> {
+    const query =
+      `SELECT LEFT(table_name, LENGTH(table_name) - LENGTH('options')) FROM information_schema.tables ` +
+      `WHERE table_schema = '${escapeMysql(creds.dbName)}' ` +
+      `AND table_name LIKE '%options' ORDER BY LENGTH(table_name) ASC LIMIT 1`;
+    const result = await executor.execute(
+      `mysql --defaults-extra-file=${shellQuote(mycnf)} ${shellQuote(creds.dbName)} -sN -e ${shellQuote(query)}`,
+    );
+    if (result.code !== 0) {
+      throw new Error(
+        `Could not resolve the target WordPress options table: ${result.stderr.trim()}`,
+      );
+    }
+    const prefix = result.stdout.trim();
+    return /^[A-Za-z0-9_]+$/.test(prefix) ? prefix : null;
+  }
 
   /**
    * Resolve DB credentials from a remote environment.
@@ -362,7 +735,9 @@ export class SyncDbService {
       );
     } finally {
       await cleanupRemoteMyCnf(executor, tgtMycnf);
-      await executor.execute(`rm -f ${shellQuote(queriesSqlFile)}`).catch(() => {});
+      await executor
+        .execute(`rm -f ${shellQuote(queriesSqlFile)}`)
+        .catch(() => {});
     }
 
     await tracker.trackCommand(
@@ -449,7 +824,9 @@ export class SyncDbService {
 
     await mkdir(localDir, { recursive: true });
     await targetExecutor.pullFileToPath(remoteTemp, localFile);
-    await targetExecutor.execute(`rm -f ${shellQuote(remoteTemp)}`).catch(() => {});
+    await targetExecutor
+      .execute(`rm -f ${shellQuote(remoteTemp)}`)
+      .catch(() => {});
 
     const { size: dumpBytes } = await stat(localFile);
 

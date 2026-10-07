@@ -22,6 +22,47 @@ describe("SyncFilesService", () => {
     service = new SyncFilesService(sshKey);
   });
 
+  describe("getProductionPromotionExcludes()", () => {
+    it("preserves production robots policy and uploads during staging promotion", () => {
+      expect(
+        (service as any).getProductionPromotionExcludes(
+          "staging",
+          "production",
+        ),
+      ).toEqual([
+        "robots.txt",
+        "web/robots.txt",
+        "wp-content/uploads/",
+        "app/uploads/",
+        "web/app/uploads/",
+        "wp-content/plugins/wp-secure-guard/",
+        "app/plugins/wp-secure-guard/",
+        "web/app/plugins/wp-secure-guard/",
+        "wp-content/mu-plugins/secure-guard-watchdog.php",
+        "app/mu-plugins/secure-guard-watchdog.php",
+        "web/app/mu-plugins/secure-guard-watchdog.php",
+      ]);
+    });
+
+    it("does not apply production-only file protections to other sync directions", () => {
+      expect(
+        (service as any).getProductionPromotionExcludes(
+          "production",
+          "staging",
+        ),
+      ).toEqual([]);
+      expect(
+        (service as any).getProductionPromotionExcludes(
+          "production",
+          "production",
+        ),
+      ).toEqual([]);
+      expect(
+        (service as any).getProductionPromotionExcludes("staging", null),
+      ).toContain("web/robots.txt");
+    });
+  });
+
   function makeJob(name: string, data: object) {
     return {
       id: "sync-job-001",

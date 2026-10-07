@@ -63,9 +63,10 @@ export class SyncFilesService {
    */
   async pushFiles(
     job: Job,
-    sourceEnv: { root_path: string },
+    sourceEnv: { root_path: string; type?: string | null },
     targetEnv: {
       root_path: string;
+      type?: string | null;
       server: {
         ip_address: string;
         ssh_port: number;
@@ -81,6 +82,23 @@ export class SyncFilesService {
   ): Promise<void> {
     const sourceSite = sourceEnv.root_path;
     const targetSite = targetEnv.root_path;
+    const productionSafetyExcludes = this.getProductionPromotionExcludes(
+      sourceEnv.type,
+      targetEnv.type,
+    );
+    const allProtectedFileExcludes = [
+      ...protectedFileExcludes,
+      ...productionSafetyExcludes,
+    ];
+
+    if (productionSafetyExcludes.length > 0) {
+      await tracker.track({
+        step: "Production file safety rules enabled",
+        level: "info",
+        detail:
+          "Keeping production robots.txt, uploads, and Secure Guard files out of staging-to-production file replacement/deletion.",
+      });
+    }
 
     await tracker.track({
       step: "Checking source site directory",
@@ -129,7 +147,7 @@ export class SyncFilesService {
         targetEnv,
         sourceExecutor,
         tracker,
-        protectedFileExcludes,
+        allProtectedFileExcludes,
       );
     } else {
       await tracker.track({
@@ -144,7 +162,7 @@ export class SyncFilesService {
         sourceExecutor,
         targetExecutor,
         tracker,
-        protectedFileExcludes,
+        allProtectedFileExcludes,
       );
     }
 
@@ -182,7 +200,8 @@ export class SyncFilesService {
     // Prepend '/' to anchor each pattern to the transfer root, so rsync won't
     // strip nested directories with the same name inside plugins or themes.
     const allExcludes = this.buildFileSyncExcludes(protectedFileExcludes);
-    const excludeFileContent = allExcludes.map((e) => `/${e}`).join("\n") + "\n";
+    const excludeFileContent =
+      allExcludes.map((e) => `/${e}`).join("\n") + "\n";
     await sourceExecutor.pushFile({
       remotePath: excludeFilePath,
       content: Buffer.from(excludeFileContent, "utf8"),
@@ -199,7 +218,9 @@ export class SyncFilesService {
       "--timeout=300",
       `--exclude-from=${shellQuote(excludeFilePath)}`,
       "-e",
-      shellQuote(`ssh -i ${keyPath} -p ${targetEnv.server.ssh_port} -o StrictHostKeyChecking=no -o ConnectTimeout=30`),
+      shellQuote(
+        `ssh -i ${keyPath} -p ${targetEnv.server.ssh_port} -o StrictHostKeyChecking=no -o ConnectTimeout=30`,
+      ),
       `${shellQuote(sourceRoot)}/`,
       `${shellQuote(targetEnv.server.ssh_user)}@${targetEnv.server.ip_address}:${shellQuote(targetRoot)}/`,
     ].join(" ");
@@ -214,16 +235,17 @@ export class SyncFilesService {
       step: "Syncing site files via rsync",
       level: "info",
       detail: `${sourceRoot} → ${targetEnv.server.ip_address}:${targetRoot} (excluding: ${loggedExcludes})`,
-      command: "rsync -az --delete --no-perms --exclude-from=[excludes] (key redacted)",
+      command:
+        "rsync -az --delete --no-perms --exclude-from=[excludes] (key redacted)",
     });
 
     const rsyncStart = Date.now();
     const rsyncResult = await sourceExecutor.execute(rsyncCmd);
 
     // Cleanup key and exclude file regardless of outcome
-    await sourceExecutor.execute(
-      `rm -f ${shellQuote(keyPath)} ${shellQuote(excludeFilePath)}`,
-    ).catch(() => {});
+    await sourceExecutor
+      .execute(`rm -f ${shellQuote(keyPath)} ${shellQuote(excludeFilePath)}`)
+      .catch(() => {});
 
     await tracker.trackCommand(
       "rsync site files",
@@ -302,6 +324,38 @@ export class SyncFilesService {
     return Array.from(new Set([...this.RSYNC_EXCLUDES, ...cleanProtected]));
   }
 
+  private getProductionPromotionExcludes(
+    sourceType?: string | null,
+    targetType?: string | null,
+  ): string[] {
+    const normalizedTargetType = targetType?.trim().toLowerCase();
+    if (normalizedTargetType && normalizedTargetType !== "production") {
+      return [];
+    }
+    if (
+      normalizedTargetType === "production" &&
+      sourceType?.trim().toLowerCase() === "production"
+    ) {
+      return [];
+    }
+
+    // Production owns its crawler policy and customer uploads. A staging tree
+    // often has a disallow-all robots file and may lag behind production media.
+    return [
+      "robots.txt",
+      "web/robots.txt",
+      "wp-content/uploads/",
+      "app/uploads/",
+      "web/app/uploads/",
+      "wp-content/plugins/wp-secure-guard/",
+      "app/plugins/wp-secure-guard/",
+      "web/app/plugins/wp-secure-guard/",
+      "wp-content/mu-plugins/secure-guard-watchdog.php",
+      "app/mu-plugins/secure-guard-watchdog.php",
+      "web/app/mu-plugins/secure-guard-watchdog.php",
+    ];
+  }
+
   /**
    * Fallback file sync: tar on source → pull through worker → untar on target.
    */
@@ -318,7 +372,8 @@ export class SyncFilesService {
     const tarExcludeFile = `/tmp/forge_tar_exclude_${job.id}.txt`;
 
     const allExcludes = this.buildFileSyncExcludes(protectedFileExcludes);
-    const tarExcludeContent = allExcludes.map((e) => `./${e}`).join("\n") + "\n";
+    const tarExcludeContent =
+      allExcludes.map((e) => `./${e}`).join("\n") + "\n";
     await sourceExecutor.pushFile({
       remotePath: tarExcludeFile,
       content: Buffer.from(tarExcludeContent, "utf8"),
@@ -332,7 +387,9 @@ export class SyncFilesService {
     });
     const tarStart = Date.now();
     const tarResult = await sourceExecutor.execute(tarCmd);
-    await sourceExecutor.execute(`rm -f ${shellQuote(tarExcludeFile)}`).catch(() => {});
+    await sourceExecutor
+      .execute(`rm -f ${shellQuote(tarExcludeFile)}`)
+      .catch(() => {});
     await tracker.trackCommand(
       "tar site files",
       `tar -czf [tar] --exclude-from=[excludes] -C ${sourceContent} .`,
@@ -360,7 +417,9 @@ export class SyncFilesService {
     const localTarPath = join(localTarDir, `content_${job.id}.tar.gz`);
     try {
       await sourceExecutor.pullFileToPath(remoteTar, localTarPath);
-      await sourceExecutor.execute(`rm -f ${shellQuote(remoteTar)}`).catch(() => {});
+      await sourceExecutor
+        .execute(`rm -f ${shellQuote(remoteTar)}`)
+        .catch(() => {});
       const tarStat = await stat(localTarPath);
       await tracker.track({
         step: `Archive pulled (${(tarStat.size / 1024 / 1024).toFixed(1)} MB) — pushing to target`,
@@ -381,7 +440,9 @@ export class SyncFilesService {
     });
     const extractStart = Date.now();
     const extractResult = await targetExecutor.execute(extractCmd);
-    await targetExecutor.execute(`rm -f ${shellQuote(remoteTar)}`).catch(() => {});
+    await targetExecutor
+      .execute(`rm -f ${shellQuote(remoteTar)}`)
+      .catch(() => {});
     await tracker.trackCommand(
       "tar extract on target",
       extractCmd,

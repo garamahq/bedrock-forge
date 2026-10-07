@@ -1,4 +1,8 @@
-import { SyncDbService } from "./sync-db.service";
+import {
+  SyncDbService,
+  secureGuardTableNamesForPrefix,
+  targetBlogPublicForEnvironment,
+} from "./sync-db.service";
 import { PrismaService } from "../../../prisma/prisma.service";
 import { RcloneService } from "../../../services/rclone.service";
 import { StepTracker } from "../../../services/step-tracker";
@@ -49,6 +53,200 @@ describe("SyncDbService", () => {
       trackCommand: jest.fn().mockResolvedValue(undefined),
     } as unknown as StepTracker;
   }
+
+  describe("targetBlogPublicForEnvironment()", () => {
+    it("preserves an explicit production setting and defaults new production sites to indexable", () => {
+      expect(targetBlogPublicForEnvironment("production", "0")).toBe("0");
+      expect(targetBlogPublicForEnvironment("production", "1")).toBe("1");
+      expect(targetBlogPublicForEnvironment("production", null)).toBe("1");
+      expect(targetBlogPublicForEnvironment(null, null)).toBe("1");
+    });
+
+    it("keeps staging and development sites out of search", () => {
+      expect(targetBlogPublicForEnvironment("staging", "1")).toBe("0");
+      expect(targetBlogPublicForEnvironment("development", null)).toBe("0");
+    });
+  });
+
+  describe("captureTargetBlogPublic()", () => {
+    it("preserves a private setting from an existing target", async () => {
+      const executor = {
+        execute: jest
+          .fn()
+          .mockResolvedValueOnce({ code: 0, stdout: "wp_", stderr: "" })
+          .mockResolvedValueOnce({ code: 0, stdout: "0\n", stderr: "" }),
+      };
+
+      await expect(
+        service.captureTargetBlogPublic(
+          executor as any,
+          { dbName: "testdb" } as any,
+          "/tmp/db.cnf",
+          makeTracker(),
+        ),
+      ).resolves.toBe("0");
+    });
+
+    it("allows a public default only when the target database is empty", async () => {
+      const executor = {
+        execute: jest
+          .fn()
+          .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "" })
+          .mockResolvedValueOnce({ code: 0, stdout: "0\n", stderr: "" }),
+      };
+
+      await expect(
+        service.captureTargetBlogPublic(
+          executor as any,
+          { dbName: "testdb" } as any,
+          "/tmp/db.cnf",
+          makeTracker(),
+        ),
+      ).resolves.toBeNull();
+    });
+
+    it("refuses to default a non-empty database to publicly indexable", async () => {
+      const executor = {
+        execute: jest
+          .fn()
+          .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "" })
+          .mockResolvedValueOnce({ code: 0, stdout: "4\n", stderr: "" }),
+      };
+
+      await expect(
+        service.captureTargetBlogPublic(
+          executor as any,
+          { dbName: "testdb" } as any,
+          "/tmp/db.cnf",
+          makeTracker(),
+        ),
+      ).rejects.toThrow("refusing to change its search visibility");
+    });
+  });
+
+  describe("production Secure Guard state protection", () => {
+    it("builds Secure Guard table names only from a safe WordPress prefix", () => {
+      expect(secureGuardTableNamesForPrefix("wp_")).toEqual([
+        "wp_sg_tokens",
+        "wp_sg_logs",
+        "wp_sg_rate_limits",
+        "wp_sg_jwt_denylist",
+      ]);
+      expect(
+        secureGuardTableNamesForPrefix("bad-prefix; DROP TABLE users"),
+      ).toEqual([]);
+    });
+
+    it("discovers only Secure Guard tables that exist on the side being checked", async () => {
+      const executor = {
+        execute: jest
+          .fn()
+          .mockResolvedValueOnce({ code: 0, stdout: "wp_", stderr: "" })
+          .mockResolvedValueOnce({
+            code: 0,
+            stdout: "wp_sg_logs\nwp_sg_rate_limits\n",
+            stderr: "",
+          }),
+      };
+
+      await expect(
+        service.getExistingSecureGuardTables(
+          executor as any,
+          { dbName: "testdb" } as any,
+          "/tmp/db.cnf",
+        ),
+      ).resolves.toEqual(["wp_sg_logs", "wp_sg_rate_limits"]);
+    });
+
+    it("captures and restores production plugin activation and Secure Guard settings", async () => {
+      const executor = {
+        execute: jest
+          .fn()
+          .mockResolvedValueOnce({ code: 0, stdout: "wp_", stderr: "" })
+          .mockResolvedValueOnce({
+            code: 0,
+            stdout:
+              "active_plugins\taToxOnt9\tyes\nsecure_guard_settings\te30=\tyes\n",
+            stderr: "",
+          })
+          .mockResolvedValueOnce({
+            code: 0,
+            stdout: "wp_options\n",
+            stderr: "",
+          })
+          .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "" }),
+      };
+      const tracker = makeTracker();
+      const creds = { dbName: "testdb" } as any;
+
+      const snapshot = await service.captureTargetRuntimeOptions(
+        executor as any,
+        creds,
+        "/tmp/db.cnf",
+        tracker,
+      );
+      expect(snapshot).toEqual({
+        prefix: "wp_",
+        options: [
+          { name: "active_plugins", valueBase64: "aToxOnt9", autoload: "yes" },
+          {
+            name: "secure_guard_settings",
+            valueBase64: "e30=",
+            autoload: "yes",
+          },
+        ],
+      });
+
+      await service.restoreTargetRuntimeOptions(
+        executor as any,
+        creds,
+        "/tmp/db.cnf",
+        snapshot,
+        tracker,
+      );
+
+      const restoreCommand = (executor.execute as jest.Mock).mock.calls[3][0];
+      expect(restoreCommand).toContain("FROM_BASE64");
+      expect(restoreCommand).toContain("aToxOnt9");
+      expect(restoreCommand).toContain("e30=");
+      expect(restoreCommand).toContain("ON DUPLICATE KEY UPDATE");
+    });
+
+    it("schedules plugin schema repair when imported databases lack Secure Guard tables", async () => {
+      const executor = {
+        execute: jest
+          .fn()
+          .mockResolvedValueOnce({ code: 0, stdout: "wp_", stderr: "" })
+          .mockResolvedValueOnce({ code: 0, stdout: "1\n", stderr: "" })
+          .mockResolvedValueOnce({ code: 0, stdout: "wp_", stderr: "" })
+          .mockResolvedValueOnce({
+            code: 0,
+            stdout: "wp_sg_logs\nwp_sg_rate_limits\n",
+            stderr: "",
+          })
+          .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "" }),
+      };
+      const tracker = makeTracker();
+
+      await service.scheduleSecureGuardSchemaRepair(
+        executor as any,
+        { dbName: "testdb" } as any,
+        "/tmp/db.cnf",
+        tracker,
+      );
+
+      const repairCommand = (executor.execute as jest.Mock).mock.calls[4][0];
+      expect(repairCommand).toContain("secure_guard_plugin_version");
+      expect(repairCommand).toContain("'0.0.0'");
+      expect(repairCommand).not.toContain("secure_guard_db_version");
+      expect(tracker.track).toHaveBeenCalledWith(
+        expect.objectContaining({
+          step: "Scheduled Secure Guard schema repair",
+          level: "warn",
+        }),
+      );
+    });
+  });
 
   describe("validateUrlReplacement()", () => {
     function makeExecutor({

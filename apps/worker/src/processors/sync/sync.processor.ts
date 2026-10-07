@@ -225,8 +225,17 @@ export class SyncProcessor extends WorkerHost {
       { includeDatabase: false },
     );
 
-    const cloneSafeProtected = this.syncDb.normalizeProtectedTables(
+    const cloneConfiguredProtected = this.syncDb.normalizeProtectedTables(
       targetEnv.protected_tables ?? [],
+    );
+    const cloneSourceGuardTables =
+      await this.syncDb.getExistingSecureGuardTables(
+        sourceExecutor,
+        sourceCreds,
+        srcMycnf,
+      );
+    const cloneSafeProtected = Array.from(
+      new Set([...cloneConfiguredProtected, ...cloneSourceGuardTables]),
     );
     let protectedPostTypesBackup: ProtectedPostTypeBackup | null = null;
 
@@ -312,6 +321,29 @@ export class SyncProcessor extends WorkerHost {
       "sync_imp",
     );
     try {
+      const targetBlogPublic = await this.syncDb.captureTargetBlogPublic(
+        targetExecutor,
+        targetCreds,
+        tgtMycnf,
+        tracker,
+      );
+      const targetRuntimeOptions =
+        await this.syncDb.captureTargetRuntimeOptions(
+          targetExecutor,
+          targetCreds,
+          tgtMycnf,
+          tracker,
+        );
+      const cloneTargetGuardTables =
+        await this.syncDb.getExistingSecureGuardTables(
+          targetExecutor,
+          targetCreds,
+          tgtMycnf,
+        );
+      const cloneTargetProtected = Array.from(
+        new Set([...cloneConfiguredProtected, ...cloneTargetGuardTables]),
+      );
+
       if (
         targetEnv.protected_post_types &&
         targetEnv.protected_post_types.length > 0
@@ -326,11 +358,11 @@ export class SyncProcessor extends WorkerHost {
           );
       }
 
-      if (cloneSafeProtected.length > 0 || protectedPostTypesBackup) {
+      if (cloneTargetProtected.length > 0 || protectedPostTypesBackup) {
         await tracker.track({
           step: "Protected tables — checking target database existence",
           level: "info",
-          detail: `Will preserve: ${cloneSafeProtected.join(", ")}`,
+          detail: `Will preserve: ${cloneTargetProtected.join(", ")}`,
         });
         const dbExistsRes = await targetExecutor.execute(
           `mysql --defaults-extra-file=${shellQuote(tgtMycnf)} -e ${shellQuote(`SHOW DATABASES LIKE '${targetCreds.dbName}';`)}`,
@@ -344,7 +376,7 @@ export class SyncProcessor extends WorkerHost {
             targetExecutor,
             tgtMycnf,
             targetCreds.dbName,
-            cloneSafeProtected,
+            cloneTargetProtected,
             tracker,
           );
           await tracker.track({
@@ -427,6 +459,28 @@ export class SyncProcessor extends WorkerHost {
           `mysql import failed (exit ${importResult.code}): ${importResult.stderr}`,
         );
       }
+
+      await this.syncDb.enforceTargetBlogPublic(
+        targetExecutor,
+        targetCreds,
+        tgtMycnf,
+        targetEnv.type,
+        targetBlogPublic,
+        tracker,
+      );
+      await this.syncDb.restoreTargetRuntimeOptions(
+        targetExecutor,
+        targetCreds,
+        tgtMycnf,
+        targetRuntimeOptions,
+        tracker,
+      );
+      await this.syncDb.scheduleSecureGuardSchemaRepair(
+        targetExecutor,
+        targetCreds,
+        tgtMycnf,
+        tracker,
+      );
     } finally {
       await cleanupRemoteMyCnf(targetExecutor, tgtMycnf);
       const cleanTgtResult = await targetExecutor.execute(
@@ -522,7 +576,10 @@ export class SyncProcessor extends WorkerHost {
       tracker,
     );
 
-    await job.updateProgress({ value: 85, step: "Files synced & config ensured" });
+    await job.updateProgress({
+      value: 85,
+      step: "Files synced & config ensured",
+    });
 
     // Replace hardcoded URLs inside content files
     if (sourceUrl && targetUrl && sourceUrl !== targetUrl) {
@@ -859,6 +916,7 @@ export class SyncProcessor extends WorkerHost {
       id: bigint;
       root_path: string;
       url?: string | null;
+      type?: string | null;
       protected_tables?: string[];
       sql_protection_queries?: string[];
       protected_post_types?: string[];
@@ -918,8 +976,17 @@ export class SyncProcessor extends WorkerHost {
       { includeDatabase: false },
     );
 
-    const pushSafeProtected = this.syncDb.normalizeProtectedTables(
+    const pushConfiguredProtected = this.syncDb.normalizeProtectedTables(
       targetEnv.protected_tables ?? [],
+    );
+    const pushSourceGuardTables =
+      await this.syncDb.getExistingSecureGuardTables(
+        sourceExecutor,
+        sourceCreds,
+        srcMycnf,
+      );
+    const pushSafeProtected = Array.from(
+      new Set([...pushConfiguredProtected, ...pushSourceGuardTables]),
     );
     let protectedPostTypesBackup: ProtectedPostTypeBackup | null = null;
 
@@ -974,7 +1041,9 @@ export class SyncProcessor extends WorkerHost {
     const localPushPath = join(localPushDir, `push_${job.id}.sql`);
     try {
       await sourceExecutor.pullFileToPath(dumpRemote, localPushPath);
-      await sourceExecutor.execute(`rm -f ${shellQuote(dumpRemote)}`).catch(() => {});
+      await sourceExecutor
+        .execute(`rm -f ${shellQuote(dumpRemote)}`)
+        .catch(() => {});
 
       const readStream = createReadStream(localPushPath);
       await targetExecutor.pushFileFromStream(dumpRemote, readStream);
@@ -990,6 +1059,29 @@ export class SyncProcessor extends WorkerHost {
       "push_imp",
     );
     try {
+      const targetBlogPublic = await this.syncDb.captureTargetBlogPublic(
+        targetExecutor,
+        targetCreds,
+        tgtMycnf,
+        tracker,
+      );
+      const targetRuntimeOptions =
+        await this.syncDb.captureTargetRuntimeOptions(
+          targetExecutor,
+          targetCreds,
+          tgtMycnf,
+          tracker,
+        );
+      const pushTargetGuardTables =
+        await this.syncDb.getExistingSecureGuardTables(
+          targetExecutor,
+          targetCreds,
+          tgtMycnf,
+        );
+      const pushTargetProtected = Array.from(
+        new Set([...pushConfiguredProtected, ...pushTargetGuardTables]),
+      );
+
       if (
         targetEnv.protected_post_types &&
         targetEnv.protected_post_types.length > 0
@@ -1004,11 +1096,11 @@ export class SyncProcessor extends WorkerHost {
           );
       }
 
-      if (pushSafeProtected.length > 0 || protectedPostTypesBackup) {
+      if (pushTargetProtected.length > 0 || protectedPostTypesBackup) {
         await tracker.track({
           step: "Protected tables — checking target database existence",
           level: "info",
-          detail: `Will preserve: ${pushSafeProtected.join(", ")}`,
+          detail: `Will preserve: ${pushTargetProtected.join(", ")}`,
         });
         const dbExistsRes = await targetExecutor.execute(
           `mysql --defaults-extra-file=${shellQuote(tgtMycnf)} -e ${shellQuote(`SHOW DATABASES LIKE '${targetCreds.dbName}';`)}`,
@@ -1022,7 +1114,7 @@ export class SyncProcessor extends WorkerHost {
             targetExecutor,
             tgtMycnf,
             targetCreds.dbName,
-            pushSafeProtected,
+            pushTargetProtected,
             tracker,
           );
           await tracker.track({
@@ -1105,6 +1197,28 @@ export class SyncProcessor extends WorkerHost {
           `mysql import failed (exit ${importResult.code}): ${importResult.stderr}`,
         );
       }
+
+      await this.syncDb.enforceTargetBlogPublic(
+        targetExecutor,
+        targetCreds,
+        tgtMycnf,
+        targetEnv.type,
+        targetBlogPublic,
+        tracker,
+      );
+      await this.syncDb.restoreTargetRuntimeOptions(
+        targetExecutor,
+        targetCreds,
+        tgtMycnf,
+        targetRuntimeOptions,
+        tracker,
+      );
+      await this.syncDb.scheduleSecureGuardSchemaRepair(
+        targetExecutor,
+        targetCreds,
+        tgtMycnf,
+        tracker,
+      );
     } finally {
       await cleanupRemoteMyCnf(targetExecutor, tgtMycnf);
       const cleanTgtResult = await targetExecutor.execute(
