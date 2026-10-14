@@ -20,6 +20,19 @@ export function SyncHistoryRow({
 }) {
   const [expanded, setExpanded] = useState(false);
   const isActive = row.status === "active" || row.status === "pending";
+  const execRejected =
+    row.last_error?.includes("Unable to exec") ||
+    row.last_error?.includes("SSH server rejected the remote command request");
+  const errorLabel = execRejected
+    ? "SSH command rejected — see log"
+    : row.last_error === "Not connected"
+      ? "SSH connection lost — see log"
+      : row.last_error;
+  const errorTitle = execRejected
+    ? "SSH connected, but the server refused to start a remote command. Forge retries this once on another connection. Expand Log to see which sync step failed; the target may be partially updated."
+    : row.last_error === "Not connected"
+      ? "Forge could not use its SSH connection. Expand Log to see the last completed sync step; this older record does not identify whether the source download or target upload failed."
+      : row.last_error;
 
   return (
     <>
@@ -58,12 +71,12 @@ export function SyncHistoryRow({
               </div>
               <span className="text-muted-foreground">{row.progress}%</span>
             </div>
-          ) : row.status === "failed" && row.last_error ? (
+          ) : row.status === "failed" && errorLabel ? (
             <span
               className="text-destructive truncate max-w-[200px] block"
-              title={row.last_error}
+              title={errorTitle ?? undefined}
             >
-              {row.last_error}
+              {errorLabel}
             </span>
           ) : null}
         </td>

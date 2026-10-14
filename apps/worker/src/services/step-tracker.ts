@@ -156,6 +156,24 @@ export class StepTracker {
     });
   }
 
+  /** Update BullMQ progress and persist the same percentage for the API/UI. */
+  async updateProgress(
+    progress: number | { value: number; step?: string },
+  ): Promise<void> {
+    const value = typeof progress === "number" ? progress : progress.value;
+    await this.job?.updateProgress?.(progress);
+    await this.prisma.jobExecution
+      .update({
+        where: { id: this.jobExecutionId },
+        data: { progress: value },
+      })
+      .catch((err) =>
+        this.logger.warn(
+          `[${this.jobId}] Progress persistence failed: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
+  }
+
   /** Persist the current entries array to the database. Fire-and-forget safe. */
   async flush(): Promise<void> {
     await this.prisma.jobExecution

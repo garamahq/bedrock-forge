@@ -103,9 +103,7 @@ export class SshPoolManager extends EventEmitter {
    * the same client becomes a no-op because the entry is already gone.
    */
   destroyConnection(serverKey: string, client: Client): void {
-    const pool = this.getPool(serverKey);
-    const idx = pool.findIndex((c) => c.client === client);
-    if (idx !== -1) pool.splice(idx, 1);
+    this.removeConnection(serverKey, client);
     try {
       client.destroy();
     } catch (_) {
@@ -155,6 +153,13 @@ export class SshPoolManager extends EventEmitter {
     return this.pools.get(serverKey)!;
   }
 
+  private removeConnection(serverKey: string, client: Client): void {
+    const pool = this.pools.get(serverKey);
+    if (!pool) return;
+    const idx = pool.findIndex((c) => c.client === client);
+    if (idx !== -1) pool.splice(idx, 1);
+  }
+
   private createConnection(
     serverKey: string,
     config: SshServerConfig,
@@ -183,7 +188,9 @@ export class SshPoolManager extends EventEmitter {
             }
           } else {
             if (config.onHostKeyFingerprint) {
-              Promise.resolve(config.onHostKeyFingerprint(fingerprint)).catch(() => {});
+              Promise.resolve(config.onHostKeyFingerprint(fingerprint)).catch(
+                () => {},
+              );
             }
             verify(true);
           }
@@ -203,6 +210,7 @@ export class SshPoolManager extends EventEmitter {
       });
 
       client.on("error", (err) => {
+        this.removeConnection(serverKey, client);
         reject(
           new Error(
             `SSH connection failed for server ${serverKey}: ${err.message}`,
@@ -212,8 +220,12 @@ export class SshPoolManager extends EventEmitter {
 
       client.on("end", () => {
         // Remove from pool on disconnect
-        const idx = pool.findIndex((c) => c.client === client);
-        if (idx !== -1) pool.splice(idx, 1);
+        this.removeConnection(serverKey, client);
+      });
+
+      client.on("close", () => {
+        // Some SSH disconnects report close without a prior end event.
+        this.removeConnection(serverKey, client);
       });
 
       client.connect(connectConfig);

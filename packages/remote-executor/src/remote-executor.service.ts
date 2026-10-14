@@ -21,14 +21,17 @@ import {
 const SFTP_STALL_TIMEOUT_MS = 5 * 60 * 1_000; // 5 minutes with no data = stall
 
 /**
- * Returns true when `err` is an SSH channel-open rejection — a sign that the
- * pooled connection is stale/exhausted and must be evicted, not returned idle.
+ * Returns true when the SSH server rejects a channel or command request.
+ * These failures happen before a command or SFTP stream starts, so the
+ * operation is safe to retry once with another connection.
  */
-function isChannelOpenFailure(err: unknown): boolean {
+function isRetryableChannelError(err: unknown): boolean {
   return (
     err instanceof Error &&
-    (err.message.includes("Channel open failure") ||
-      err.message.includes("open failed"))
+    (err.message === "Not connected" ||
+      err.message.includes("Channel open failure") ||
+      err.message.includes("open failed") ||
+      err.message === "Unable to exec")
   );
 }
 
@@ -138,9 +141,8 @@ export class RemoteExecutorService {
 
   /**
    * Acquire a connection from the pool, run `fn`, and release it back.
-   * If `fn` throws a channel-open failure (stale/exhausted connection), the
-   * connection is evicted from the pool and the call is retried once on a
-   * freshly established connection.
+   * If `fn` cannot open a command/SFTP channel on a stale connection, evict
+   * it and retry once before any remote operation has started.
    */
   private async withConnection<T>(
     fn: (client: Client) => Promise<T>,
@@ -150,12 +152,27 @@ export class RemoteExecutorService {
     try {
       return await fn(client);
     } catch (err) {
-      if (isChannelOpenFailure(err)) {
-        // Stale connection — evict and retry once on a fresh one
+      if (isRetryableChannelError(err)) {
+        // The remote operation did not start because the SSH channel/request
+        // was rejected. Evict this connection and retry once on another one.
         this.pool.destroyConnection(serverKey, client);
         const fresh = await this.pool.getConnection(serverKey, this.config);
         try {
           return await fn(fresh);
+        } catch (retryErr) {
+          if (isRetryableChannelError(retryErr)) {
+            this.pool.destroyConnection(serverKey, fresh);
+          }
+          if (
+            retryErr instanceof Error &&
+            retryErr.message === "Unable to exec"
+          ) {
+            throw new Error(
+              "SSH server rejected the remote command request after one reconnect attempt.",
+              { cause: retryErr },
+            );
+          }
+          throw retryErr;
         } finally {
           this.pool.releaseConnection(serverKey, fresh);
         }

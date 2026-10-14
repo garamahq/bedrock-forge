@@ -96,6 +96,15 @@ describe("SSH Execution & Pooling Integration", () => {
       expect(pool.getPoolStats("server1").total).toBe(0);
     });
 
+    it("removes connection from pool when SSH emits close without end", async () => {
+      const client = await pool.getConnection("server1", config);
+      expect(pool.getPoolStats("server1").total).toBe(1);
+
+      client.emit("close");
+
+      expect(pool.getPoolStats("server1").total).toBe(0);
+    });
+
     it("times out if pool is at max capacity and no connection is released", async () => {
       // Connect up to MAX_POOL_SIZE (15)
       for (let i = 0; i < 15; i++) {
@@ -189,6 +198,57 @@ describe("SSH Execution & Pooling Integration", () => {
       const res = await executePromise;
       expect(res.stdout).toBe("success");
       expect(pool.getPoolStats("127.0.0.1:22").total).toBe(1); // Old one was destroyed, only new one left
+    });
+
+    it("evicts a disconnected pooled client and retries before starting the operation", async () => {
+      const client1 = await pool.getConnection("127.0.0.1:22", config);
+      const staleClient = mockClients[0];
+      staleClient.exec = jest.fn().mockImplementation(() => {
+        throw new Error("Not connected");
+      });
+      pool.releaseConnection("127.0.0.1:22", client1);
+
+      const result = await executor.execute("echo retry");
+
+      expect(result.stdout).toBe("success");
+      expect(staleClient.destroy).toHaveBeenCalled();
+      expect(mockClients).toHaveLength(2);
+      expect(pool.getPoolStats("127.0.0.1:22").total).toBe(1);
+    });
+
+    it("retries when the SSH server rejects an exec request", async () => {
+      const client1 = await pool.getConnection("127.0.0.1:22", config);
+      const rejectedClient = mockClients[0];
+      rejectedClient.exec = jest.fn().mockImplementation((_cmd: string, cb: (err: Error) => void) => {
+        cb(new Error("Unable to exec"));
+      });
+      pool.releaseConnection("127.0.0.1:22", client1);
+
+      const result = await executor.execute("echo retry");
+
+      expect(result.stdout).toBe("success");
+      expect(rejectedClient.destroy).toHaveBeenCalled();
+      expect(mockClients).toHaveLength(2);
+      expect(pool.getPoolStats("127.0.0.1:22").total).toBe(1);
+    });
+
+    it("explains a repeated exec request rejection without exposing the command", async () => {
+      const client1 = await pool.getConnection("127.0.0.1:22", config);
+      const rejectedClient = mockClients[0];
+      rejectedClient.exec = jest.fn().mockImplementation((_cmd: string, cb: (err: Error) => void) => {
+        cb(new Error("Unable to exec"));
+      });
+      const client2 = await pool.getConnection("127.0.0.1:22", config);
+      mockClients[1].exec = jest.fn().mockImplementation((_cmd: string, cb: (err: Error) => void) => {
+        cb(new Error("Unable to exec"));
+      });
+      pool.releaseConnection("127.0.0.1:22", client1);
+      pool.releaseConnection("127.0.0.1:22", client2);
+
+      await expect(executor.execute("mysql --password=secret")).rejects.toThrow(
+        "SSH server rejected the remote command request after one reconnect attempt.",
+      );
+      expect(mockClients[1].destroy).toHaveBeenCalled();
     });
 
     it("triggers SFTP stall timeout if no data is transferred", async () => {

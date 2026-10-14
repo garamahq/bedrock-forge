@@ -158,8 +158,9 @@ describe("SyncDbService", () => {
       ).resolves.toEqual(["wp_sg_logs", "wp_sg_rate_limits"]);
     });
 
-    it("captures and restores production plugin activation and Secure Guard settings", async () => {
+    it("captures and restores production plugin activation and Secure Guard settings via a private SQL file", async () => {
       const executor = {
+        pushFile: jest.fn().mockResolvedValue(undefined),
         execute: jest
           .fn()
           .mockResolvedValueOnce({ code: 0, stdout: "wp_", stderr: "" })
@@ -174,6 +175,7 @@ describe("SyncDbService", () => {
             stdout: "wp_options\n",
             stderr: "",
           })
+          .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "" })
           .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "" }),
       };
       const tracker = makeTracker();
@@ -205,11 +207,22 @@ describe("SyncDbService", () => {
         tracker,
       );
 
+      const [sqlFile] = (executor.pushFile as jest.Mock).mock.calls[0];
+      expect(sqlFile.remotePath).toMatch(
+        /^\/tmp\/forge_runtime_options_[a-f0-9]+\.sql$/,
+      );
+      expect(sqlFile.mode).toBe(0o600);
+      expect(sqlFile.content.toString()).toContain("FROM_BASE64('aToxOnt9')");
+      expect(sqlFile.content.toString()).toContain("FROM_BASE64('e30=')");
+      expect(sqlFile.content.toString()).toContain("ON DUPLICATE KEY UPDATE");
+
       const restoreCommand = (executor.execute as jest.Mock).mock.calls[3][0];
-      expect(restoreCommand).toContain("FROM_BASE64");
-      expect(restoreCommand).toContain("aToxOnt9");
-      expect(restoreCommand).toContain("e30=");
-      expect(restoreCommand).toContain("ON DUPLICATE KEY UPDATE");
+      expect(restoreCommand).toContain("< '");
+      expect(restoreCommand).not.toContain("aToxOnt9");
+      expect(restoreCommand).not.toContain("e30=");
+      expect((executor.execute as jest.Mock).mock.calls[4][0]).toContain(
+        "rm -f",
+      );
     });
 
     it("schedules plugin schema repair when imported databases lack Secure Guard tables", async () => {

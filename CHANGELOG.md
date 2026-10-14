@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8] - 2026-10-14
+
+### Bug Fixes
+
+* **sync:** retry rejected SSH command requests and restore runtime options from a private SQL file
+* **sync:** preserve production state, report database transfer stages, and persist sync progress
+
 ## [0.1.7](https://github.com/garamahq/bedrock-forge/compare/bedrock-forge-v0.1.6...bedrock-forge-v0.1.7) (2026-09-29)
 
 

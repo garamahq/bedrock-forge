@@ -1,7 +1,7 @@
 import { Processor, WorkerHost, InjectQueue } from "@nestjs/bullmq";
 import { Logger } from "@nestjs/common";
 import { Job, Queue } from "bullmq";
-import { mkdir, rm, mkdtemp } from "fs/promises";
+import { mkdir, rm, mkdtemp, stat } from "fs/promises";
 import { createReadStream } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -128,7 +128,7 @@ export class SyncProcessor extends WorkerHost {
       await this.sshKey.getSshConfig(targetEnv.server),
     );
 
-    await job.updateProgress({ value: 5, step: "Connected to servers" });
+    await tracker.updateProgress({ value: 5, step: "Connected to servers" });
 
     // Detect WordPress layout on both servers (standard vs Bedrock)
     const [sourceLayout, targetLayout] = await Promise.all([
@@ -173,7 +173,7 @@ export class SyncProcessor extends WorkerHost {
       targetEnv.id,
     );
 
-    await job.updateProgress({ value: 15, step: "Credentials resolved" });
+    await tracker.updateProgress({ value: 15, step: "Credentials resolved" });
 
     // Auto-detect URLs for search-replace — no manual input required
     const sourceUrl = await this.syncDb.resolveWpUrl(
@@ -191,7 +191,7 @@ export class SyncProcessor extends WorkerHost {
       targetEnv.url,
     );
 
-    await job.updateProgress({ value: 20, step: "URLs resolved" });
+    await tracker.updateProgress({ value: 20, step: "URLs resolved" });
 
     // Safety backup of target (optional if skipSafetyBackup=true, mandatory otherwise)
     if (job.data.skipSafetyBackup) {
@@ -210,7 +210,7 @@ export class SyncProcessor extends WorkerHost {
         tracker,
       );
     }
-    await job.updateProgress({ value: 40, step: "Safety backup complete" });
+    await tracker.updateProgress({ value: 40, step: "Safety backup complete" });
 
     if (await tracker.isCancelled(this.syncQueue))
       throw new Error("Cancelled by user");
@@ -282,36 +282,22 @@ export class SyncProcessor extends WorkerHost {
       await cleanupRemoteMyCnf(sourceExecutor, srcMycnf);
     }
 
-    await job.updateProgress({ value: 55, step: "Source database dumped" });
+    await tracker.updateProgress({ value: 55, step: "Source database dumped" });
 
     if (await tracker.isCancelled(this.syncQueue))
       throw new Error("Cancelled by user");
 
-    // Transfer dump to target via worker disk relay
-    await tracker.track({
-      step: "Transferring database dump to target",
-      level: "info",
-    });
-    const localDumpDir = await mkdtemp(join(tmpdir(), "forge-sync-"));
-    const localDumpPath = join(localDumpDir, `sync_${job.id}.sql`);
-    try {
-      await sourceExecutor.pullFileToPath(dumpRemote, localDumpPath);
-      const cleanSrcResult = await sourceExecutor.execute(
-        `rm -f ${shellQuote(dumpRemote)}`,
-      );
-      await tracker.trackCommand(
-        "Source temp cleanup",
-        `rm -f ${dumpRemote}`,
-        cleanSrcResult,
-        0,
-      );
-
-      const readStream = createReadStream(localDumpPath);
-      await targetExecutor.pushFileFromStream(dumpRemote, readStream);
-    } finally {
-      await rm(localDumpDir, { recursive: true, force: true });
-    }
-    await job.updateProgress({ value: 65, step: "Dump transferred to target" });
+    await this.transferDatabaseDump(
+      job,
+      sourceExecutor,
+      targetExecutor,
+      dumpRemote,
+      "forge-sync-",
+      `${sourceEnv.server.name} (${sourceEnv.server.ip_address})`,
+      `${targetEnv.server.name} (${targetEnv.server.ip_address})`,
+      55,
+      tracker,
+    );
 
     // Import on target
     const tgtMycnf = await createRemoteMyCnf(
@@ -320,6 +306,7 @@ export class SyncProcessor extends WorkerHost {
       job.id ?? "default",
       "sync_imp",
     );
+    let databaseImportFailed = false;
     try {
       const targetBlogPublic = await this.syncDb.captureTargetBlogPublic(
         targetExecutor,
@@ -460,37 +447,50 @@ export class SyncProcessor extends WorkerHost {
         );
       }
 
-      await this.syncDb.enforceTargetBlogPublic(
-        targetExecutor,
-        targetCreds,
-        tgtMycnf,
-        targetEnv.type,
-        targetBlogPublic,
+      await this.runTrackedStage(
         tracker,
+        "Restoring target search visibility",
+        () =>
+          this.syncDb.enforceTargetBlogPublic(
+            targetExecutor,
+            targetCreds,
+            tgtMycnf,
+            targetEnv.type,
+            targetBlogPublic,
+            tracker,
+          ),
       );
-      await this.syncDb.restoreTargetRuntimeOptions(
-        targetExecutor,
-        targetCreds,
-        tgtMycnf,
-        targetRuntimeOptions,
+      await this.runTrackedStage(
         tracker,
+        "Restoring target runtime options",
+        () =>
+          this.syncDb.restoreTargetRuntimeOptions(
+            targetExecutor,
+            targetCreds,
+            tgtMycnf,
+            targetRuntimeOptions,
+            tracker,
+          ),
       );
-      await this.syncDb.scheduleSecureGuardSchemaRepair(
-        targetExecutor,
-        targetCreds,
-        tgtMycnf,
-        tracker,
+      await this.runTrackedStage(tracker, "Checking Secure Guard tables", () =>
+        this.syncDb.scheduleSecureGuardSchemaRepair(
+          targetExecutor,
+          targetCreds,
+          tgtMycnf,
+          tracker,
+        ),
       );
+    } catch (err: unknown) {
+      databaseImportFailed = true;
+      throw err;
     } finally {
-      await cleanupRemoteMyCnf(targetExecutor, tgtMycnf);
-      const cleanTgtResult = await targetExecutor.execute(
-        `rm -f ${shellQuote(dumpRemote)}`,
-      );
-      await tracker.trackCommand(
-        "Target temp cleanup",
-        `rm -f ${dumpRemote}`,
-        cleanTgtResult,
-        0,
+      await this.cleanupImportedDatabaseArtifacts(
+        targetExecutor,
+        tgtMycnf,
+        dumpRemote,
+        `${targetEnv.server.name} (${targetEnv.server.ip_address})`,
+        tracker,
+        databaseImportFailed,
       );
     }
 
@@ -507,7 +507,7 @@ export class SyncProcessor extends WorkerHost {
       );
     }
 
-    await job.updateProgress({
+    await tracker.updateProgress({
       value: 80,
       step: "Database imported on target",
     });
@@ -536,7 +536,7 @@ export class SyncProcessor extends WorkerHost {
       );
     }
 
-    await job.updateProgress({
+    await tracker.updateProgress({
       value: 83,
       step: "Database cloned, syncing files",
     });
@@ -576,7 +576,7 @@ export class SyncProcessor extends WorkerHost {
       tracker,
     );
 
-    await job.updateProgress({
+    await tracker.updateProgress({
       value: 85,
       step: "Files synced & config ensured",
     });
@@ -592,7 +592,7 @@ export class SyncProcessor extends WorkerHost {
         job,
       );
     }
-    await job.updateProgress({ value: 93, step: "File URLs replaced" });
+    await tracker.updateProgress({ value: 93, step: "File URLs replaced" });
 
     const urlsIdentical = !sourceUrl || !targetUrl || sourceUrl === targetUrl;
     await this.syncDb.flushWordPressCaches(
@@ -605,7 +605,7 @@ export class SyncProcessor extends WorkerHost {
       targetUrl,
     );
 
-    await job.updateProgress({ value: 100, step: "Clone complete" });
+    await tracker.updateProgress({ value: 100, step: "Clone complete" });
     await tracker.track({
       step: "Sync complete",
       level: "info",
@@ -669,7 +669,7 @@ export class SyncProcessor extends WorkerHost {
       await this.sshKey.getSshConfig(targetEnv.server),
     );
 
-    await job.updateProgress({ value: 5, step: "Connected to servers" });
+    await tracker.updateProgress({ value: 5, step: "Connected to servers" });
 
     // Detect WordPress layout on both servers
     const [sourcePushLayout, targetPushLayout] = await Promise.all([
@@ -712,7 +712,7 @@ export class SyncProcessor extends WorkerHost {
       }
     }
 
-    await job.updateProgress({ value: 20, step: "Safety backup complete" });
+    await tracker.updateProgress({ value: 20, step: "Safety backup complete" });
 
     if (await tracker.isCancelled(this.syncQueue))
       throw new Error("Cancelled by user");
@@ -727,6 +727,8 @@ export class SyncProcessor extends WorkerHost {
         targetPushLayout,
         sourceExecutor,
         targetExecutor,
+        `${sourceEnv.server.name} (${sourceEnv.server.ip_address})`,
+        `${targetEnv.server.name} (${targetEnv.server.ip_address})`,
         tracker,
       );
     } else if (
@@ -775,7 +777,7 @@ export class SyncProcessor extends WorkerHost {
       }
     }
 
-    await job.updateProgress({
+    await tracker.updateProgress({
       value: scope === "database" ? 100 : 60,
       step: scope === "database" ? "Push complete" : "Database pushed",
     });
@@ -900,7 +902,7 @@ export class SyncProcessor extends WorkerHost {
       });
     }
 
-    await job.updateProgress({ value: 100, step: "Push complete" });
+    await tracker.updateProgress({ value: 100, step: "Push complete" });
     await tracker.track({
       step: "Sync push complete",
       level: "info",
@@ -909,6 +911,225 @@ export class SyncProcessor extends WorkerHost {
   }
 
   /** Push database from sourceEnv → targetEnv (same algorithm as processClone). */
+  private async transferDatabaseDump(
+    job: Job,
+    sourceExecutor: Executor,
+    targetExecutor: Executor,
+    dumpRemote: string,
+    localDirectoryPrefix: string,
+    sourceServerLabel: string,
+    targetServerLabel: string,
+    startingProgress: number,
+    tracker: StepTracker,
+  ): Promise<void> {
+    const localDumpDir = await mkdtemp(join(tmpdir(), localDirectoryPrefix));
+    const localDumpPath = join(localDumpDir, `sync_${job.id}.sql`);
+    let targetDumpUploaded = false;
+
+    try {
+      await tracker.updateProgress({
+        value: startingProgress,
+        step: "Downloading database dump from source server",
+      });
+      await tracker.track({
+        step: "Downloading database dump from source server",
+        level: "info",
+        detail: sourceServerLabel,
+      });
+
+      const downloadStartedAt = Date.now();
+      try {
+        await sourceExecutor.pullFileToPath(dumpRemote, localDumpPath);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        await tracker.track({
+          step: "Database dump download failed",
+          level: "error",
+          detail: `${sourceServerLabel}: ${message}`,
+          durationMs: Date.now() - downloadStartedAt,
+        });
+        throw new Error(
+          `Database dump download from source server (${sourceServerLabel}) failed: ${message}`,
+        );
+      } finally {
+        await this.cleanupTemporaryDump(
+          sourceExecutor,
+          dumpRemote,
+          "Source temporary database dump cleanup",
+          tracker,
+        );
+      }
+
+      const dumpSize = (await stat(localDumpPath)).size;
+      await tracker.track({
+        step: "Database dump downloaded from source server",
+        level: "info",
+        detail: `${sourceServerLabel}; ${dumpSize.toLocaleString()} bytes`,
+        durationMs: Date.now() - downloadStartedAt,
+      });
+      await tracker.updateProgress({
+        value: startingProgress + 5,
+        step: "Uploading database dump to target server",
+      });
+      await tracker.track({
+        step: "Uploading database dump to target server",
+        level: "info",
+        detail: `${targetServerLabel}; ${dumpSize.toLocaleString()} bytes`,
+      });
+
+      const uploadStartedAt = Date.now();
+      try {
+        await targetExecutor.pushFileFromStream(
+          dumpRemote,
+          createReadStream(localDumpPath),
+        );
+        targetDumpUploaded = true;
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        await tracker.track({
+          step: "Database dump upload failed",
+          level: "error",
+          detail: `${targetServerLabel}: ${message}`,
+          durationMs: Date.now() - uploadStartedAt,
+        });
+        throw new Error(
+          `Database dump upload to target server (${targetServerLabel}) failed: ${message}`,
+        );
+      }
+
+      await tracker.track({
+        step: "Database dump uploaded to target server",
+        level: "info",
+        detail: `${targetServerLabel}; ${dumpSize.toLocaleString()} bytes`,
+        durationMs: Date.now() - uploadStartedAt,
+      });
+      await tracker.updateProgress({
+        value: startingProgress + 10,
+        step: "Database dump transferred to target",
+      });
+    } finally {
+      await rm(localDumpDir, { recursive: true, force: true });
+      if (!targetDumpUploaded) {
+        await this.cleanupTemporaryDump(
+          targetExecutor,
+          dumpRemote,
+          "Partial target database dump cleanup",
+          tracker,
+        );
+      }
+    }
+  }
+
+  private async cleanupTemporaryDump(
+    executor: Executor,
+    dumpRemote: string,
+    step: string,
+    tracker: StepTracker,
+  ): Promise<void> {
+    try {
+      const result = await executor.execute(`rm -f ${shellQuote(dumpRemote)}`, {
+        timeout: 30_000,
+      });
+      if (result.code !== 0) {
+        await tracker.track({
+          step,
+          level: "warn",
+          detail: `Cleanup command exited ${result.code}: ${result.stderr || result.stdout}`,
+        });
+      }
+    } catch (err: unknown) {
+      await tracker.track({
+        step,
+        level: "warn",
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  private async runTrackedStage<T>(
+    tracker: StepTracker,
+    stage: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    await tracker.track({ step: stage, level: "info" });
+    try {
+      const result = await operation();
+      await tracker.track({ step: `${stage} complete`, level: "info" });
+      return result;
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      await tracker.track({
+        step: `${stage} failed`,
+        level: "error",
+        detail: message,
+      });
+      throw new Error(`${stage} failed: ${message}`);
+    }
+  }
+
+  private async cleanupImportedDatabaseArtifacts(
+    executor: Executor,
+    mycnf: string,
+    dumpRemote: string,
+    serverLabel: string,
+    tracker: StepTracker,
+    previousFailure: boolean,
+  ): Promise<void> {
+    const failures: string[] = [];
+
+    await tracker.track({
+      step: "Removing temporary target database credentials",
+      level: "info",
+      detail: serverLabel,
+    });
+    try {
+      await cleanupRemoteMyCnf(executor, mycnf);
+      await tracker.track({
+        step: "Removed temporary target database credentials",
+        level: "info",
+        detail: serverLabel,
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      failures.push(`temporary database credentials: ${message}`);
+    }
+
+    try {
+      const cleanResult = await executor.execute(
+        `rm -f ${shellQuote(dumpRemote)}`,
+        { timeout: 30_000 },
+      );
+      await tracker.trackCommand(
+        "Target temporary database dump cleanup",
+        `rm -f ${dumpRemote}`,
+        cleanResult,
+        0,
+      );
+      if (cleanResult.code !== 0) {
+        failures.push(
+          `temporary database dump: ${cleanResult.stderr || cleanResult.stdout || `exit ${cleanResult.code}`}`,
+        );
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      failures.push(`temporary database dump: ${message}`);
+    }
+
+    if (failures.length === 0) return;
+
+    const detail = `${serverLabel}; ${failures.join("; ")}`;
+    await tracker.track({
+      step: "Target database cleanup incomplete",
+      level: previousFailure ? "warn" : "error",
+      detail,
+    });
+    if (!previousFailure) {
+      throw new Error(
+        `Database import completed, but temporary files could not be fully removed from ${serverLabel}: ${failures.join("; ")}`,
+      );
+    }
+  }
+
   private async pushDatabase(
     job: Job,
     sourceEnv: { id: bigint; root_path: string; url?: string | null },
@@ -925,6 +1146,8 @@ export class SyncProcessor extends WorkerHost {
     targetLayout: WpLayout,
     sourceExecutor: Executor,
     targetExecutor: Executor,
+    sourceServerLabel: string,
+    targetServerLabel: string,
     tracker: StepTracker,
   ): Promise<string[]> {
     await tracker.track({
@@ -1032,24 +1255,17 @@ export class SyncProcessor extends WorkerHost {
       await cleanupRemoteMyCnf(sourceExecutor, srcMycnf);
     }
 
-    // Transfer via worker disk relay
-    await tracker.track({
-      step: "Transferring database dump to target",
-      level: "info",
-    });
-    const localPushDir = await mkdtemp(join(tmpdir(), "forge-push-"));
-    const localPushPath = join(localPushDir, `push_${job.id}.sql`);
-    try {
-      await sourceExecutor.pullFileToPath(dumpRemote, localPushPath);
-      await sourceExecutor
-        .execute(`rm -f ${shellQuote(dumpRemote)}`)
-        .catch(() => {});
-
-      const readStream = createReadStream(localPushPath);
-      await targetExecutor.pushFileFromStream(dumpRemote, readStream);
-    } finally {
-      await rm(localPushDir, { recursive: true, force: true });
-    }
+    await this.transferDatabaseDump(
+      job,
+      sourceExecutor,
+      targetExecutor,
+      dumpRemote,
+      "forge-push-",
+      sourceServerLabel,
+      targetServerLabel,
+      50,
+      tracker,
+    );
 
     // Import on target
     const tgtMycnf = await createRemoteMyCnf(
@@ -1058,6 +1274,7 @@ export class SyncProcessor extends WorkerHost {
       job.id ?? "default",
       "push_imp",
     );
+    let databaseImportFailed = false;
     try {
       const targetBlogPublic = await this.syncDb.captureTargetBlogPublic(
         targetExecutor,
@@ -1198,37 +1415,50 @@ export class SyncProcessor extends WorkerHost {
         );
       }
 
-      await this.syncDb.enforceTargetBlogPublic(
-        targetExecutor,
-        targetCreds,
-        tgtMycnf,
-        targetEnv.type,
-        targetBlogPublic,
+      await this.runTrackedStage(
         tracker,
+        "Restoring target search visibility",
+        () =>
+          this.syncDb.enforceTargetBlogPublic(
+            targetExecutor,
+            targetCreds,
+            tgtMycnf,
+            targetEnv.type,
+            targetBlogPublic,
+            tracker,
+          ),
       );
-      await this.syncDb.restoreTargetRuntimeOptions(
-        targetExecutor,
-        targetCreds,
-        tgtMycnf,
-        targetRuntimeOptions,
+      await this.runTrackedStage(
         tracker,
+        "Restoring target runtime options",
+        () =>
+          this.syncDb.restoreTargetRuntimeOptions(
+            targetExecutor,
+            targetCreds,
+            tgtMycnf,
+            targetRuntimeOptions,
+            tracker,
+          ),
       );
-      await this.syncDb.scheduleSecureGuardSchemaRepair(
-        targetExecutor,
-        targetCreds,
-        tgtMycnf,
-        tracker,
+      await this.runTrackedStage(tracker, "Checking Secure Guard tables", () =>
+        this.syncDb.scheduleSecureGuardSchemaRepair(
+          targetExecutor,
+          targetCreds,
+          tgtMycnf,
+          tracker,
+        ),
       );
+    } catch (err: unknown) {
+      databaseImportFailed = true;
+      throw err;
     } finally {
-      await cleanupRemoteMyCnf(targetExecutor, tgtMycnf);
-      const cleanTgtResult = await targetExecutor.execute(
-        `rm -f ${shellQuote(dumpRemote)}`,
-      );
-      await tracker.trackCommand(
-        "Target temp cleanup",
-        `rm -f ${dumpRemote}`,
-        cleanTgtResult,
-        0,
+      await this.cleanupImportedDatabaseArtifacts(
+        targetExecutor,
+        tgtMycnf,
+        dumpRemote,
+        targetServerLabel,
+        tracker,
+        databaseImportFailed,
       );
     }
 

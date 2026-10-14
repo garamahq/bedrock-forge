@@ -375,13 +375,43 @@ export class SyncDbService {
         `VALUES ('${escapeMysql(name)}', FROM_BASE64('${valueBase64}'), '${escapeMysql(autoload)}') ` +
         `ON DUPLICATE KEY UPDATE option_value=VALUES(option_value), autoload=VALUES(autoload)`,
     );
-    const result = await executor.execute(
-      `mysql --defaults-extra-file=${shellQuote(mycnf)} ${shellQuote(creds.dbName)} -e ${shellQuote(statements.join("; "))}`,
-    );
-    if (result.code !== 0) {
-      throw new Error(
-        `Could not restore target plugin activation and Secure Guard settings: ${result.stderr.trim()}`,
+
+    // Keep option values out of the SSH exec request. Secure Guard settings
+    // can be large, and embedding them in the command can exceed server-side
+    // exec limits. The SQL file is private because option values may contain
+    // credentials or other site-specific secrets.
+    const sqlFile = `/tmp/forge_runtime_options_${randomBytes(12).toString("hex")}.sql`;
+    try {
+      await executor.pushFile({
+        remotePath: sqlFile,
+        content: Buffer.from(`${statements.join(";\n")}\n`, "utf8"),
+        mode: 0o600,
+      });
+
+      const result = await executor.execute(
+        `mysql --defaults-extra-file=${shellQuote(mycnf)} ${shellQuote(creds.dbName)} < ${shellQuote(sqlFile)}`,
       );
+      if (result.code !== 0) {
+        throw new Error(
+          `Could not restore target plugin activation and Secure Guard settings: ${result.stderr.trim()}`,
+        );
+      }
+    } finally {
+      try {
+        const cleanup = await executor.execute(`rm -f ${shellQuote(sqlFile)}`);
+        if (cleanup.code !== 0) {
+          throw new Error(`cleanup exited ${cleanup.code}`);
+        }
+      } catch (err: unknown) {
+        this.logger.warn(
+          `Could not remove the temporary target runtime options SQL file: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        await tracker.track({
+          step: "Temporary target runtime options cleanup failed",
+          level: "warn",
+          detail: "The private temporary SQL file could not be removed.",
+        });
+      }
     }
 
     await tracker.track({
