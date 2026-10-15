@@ -181,7 +181,7 @@ model Server {
   ip_address              String
   ssh_port                Int      @default(22)
   ssh_user                String   @default("root")
-  ssh_private_key_encrypted String // AES-256-GCM encrypted
+  ssh_private_key_encrypted String? // AES-256-GCM encrypted; null uses the global SSH key
   provider                String?  // e.g. "hetzner", "digitalocean", "vultr"
   cost_monthly            Decimal? @db.Decimal(10, 2) // Monthly server cost for margin tracking
   status                  ServerStatus @default(unknown)

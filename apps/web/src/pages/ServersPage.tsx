@@ -354,6 +354,11 @@ export function ServerFormDialog({
               </div>
             )}
           </div>
+          {errors.root?.message && (
+            <p role="alert" className="text-sm text-destructive">
+              {errors.root.message}
+            </p>
+          )}
           <DialogFooter>
             <Button
               type="button"

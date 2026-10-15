@@ -70,7 +70,7 @@ export class ServersService {
    */
   private async resolvePrivateKey(server: {
     name: string;
-    ssh_private_key_encrypted: string;
+    ssh_private_key_encrypted: string | null;
   }): Promise<string> {
     if (server.ssh_private_key_encrypted) {
       try {
