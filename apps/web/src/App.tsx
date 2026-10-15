@@ -7,7 +7,7 @@ import {
   useNavigate,
 } from "react-router-dom";
 import { useAuthStore, isTokenExpired } from "@/store/auth.store";
-import { api } from "@/lib/api-client";
+import { api, getValidAccessToken } from "@/lib/api-client";
 import { destroySocket } from "@/lib/websocket";
 import { AppLayout } from "@/components/layout/AppLayout";
 
@@ -178,20 +178,43 @@ class ErrorBoundary extends Component<
   }
 }
 
-function PrivateRoute({ children }: { children: React.ReactNode }) {
-  const token = useAuthStore((s) => s.accessToken);
+function useExpiredSessionRefresh(token: string | null): boolean {
   const isExpired = isTokenExpired(token);
-  return token && !isExpired ? (
-    <>{children}</>
-  ) : (
-    <Navigate to="/login" replace />
+
+  useEffect(() => {
+    if (token && isExpired) {
+      void getValidAccessToken();
+    }
+  }, [token, isExpired]);
+
+  return Boolean(token && isExpired);
+}
+
+function SessionLoading() {
+  return (
+    <div
+      className="flex h-screen items-center justify-center"
+      role="status"
+      aria-label="Refreshing session"
+    >
+      <div className="h-8 w-8 animate-spin rounded-full border-b-2 border-primary" />
+    </div>
   );
+}
+
+export function PrivateRoute({ children }: { children: React.ReactNode }) {
+  const token = useAuthStore((s) => s.accessToken);
+  const refreshing = useExpiredSessionRefresh(token);
+  if (refreshing) return <SessionLoading />;
+  return token ? <>{children}</> : <Navigate to="/login" replace />;
 }
 
 function AdminRoute({ children }: { children: React.ReactNode }) {
   const user = useAuthStore((s) => s.user);
   const token = useAuthStore((s) => s.accessToken);
-  if (!user || isTokenExpired(token)) return <Navigate to="/login" replace />;
+  const refreshing = useExpiredSessionRefresh(token);
+  if (refreshing) return <SessionLoading />;
+  if (!user || !token) return <Navigate to="/login" replace />;
   return user.roles.includes("admin") ? (
     <>{children}</>
   ) : (
@@ -202,7 +225,9 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
 function ManagerRoute({ children }: { children: React.ReactNode }) {
   const user = useAuthStore((s) => s.user);
   const token = useAuthStore((s) => s.accessToken);
-  if (!user || isTokenExpired(token)) return <Navigate to="/login" replace />;
+  const refreshing = useExpiredSessionRefresh(token);
+  if (refreshing) return <SessionLoading />;
+  if (!user || !token) return <Navigate to="/login" replace />;
   return user.roles.includes("admin") || user.roles.includes("manager") ? (
     <>{children}</>
   ) : (
@@ -213,7 +238,9 @@ function ManagerRoute({ children }: { children: React.ReactNode }) {
 function MaintainerRoute({ children }: { children: React.ReactNode }) {
   const user = useAuthStore((s) => s.user);
   const token = useAuthStore((s) => s.accessToken);
-  if (!user || isTokenExpired(token)) return <Navigate to="/login" replace />;
+  const refreshing = useExpiredSessionRefresh(token);
+  if (refreshing) return <SessionLoading />;
+  if (!user || !token) return <Navigate to="/login" replace />;
   return user.roles.includes("admin") ||
     user.roles.includes("manager") ||
     user.roles.includes("maintainer") ? (
@@ -221,6 +248,14 @@ function MaintainerRoute({ children }: { children: React.ReactNode }) {
   ) : (
     <Navigate to="/access-denied" replace />
   );
+}
+
+function LoginRoute() {
+  const token = useAuthStore((s) => s.accessToken);
+  const user = useAuthStore((s) => s.user);
+  const refreshing = useExpiredSessionRefresh(token);
+  if (refreshing) return <SessionLoading />;
+  return token && user ? <Navigate to="/dashboard" replace /> : <LoginPage />;
 }
 
 function AccessDeniedPage() {
@@ -317,7 +352,7 @@ export default function App() {
           }
         >
           <Routes>
-            <Route path="/login" element={<LoginPage />} />
+            <Route path="/login" element={<LoginRoute />} />
             <Route
               path="/"
               element={
