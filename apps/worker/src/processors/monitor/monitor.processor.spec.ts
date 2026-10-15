@@ -333,7 +333,7 @@ describe("MonitorProcessor", () => {
     );
   });
 
-  it("fires monitor.up notification on down→up transition", async () => {
+  it("fires monitor.up only after two consecutive successful probes", async () => {
     // Previously down: last_status=503
     const monitor = baseMonitor({
       last_checked_at: new Date(Date.now() - 300_000),
@@ -342,19 +342,105 @@ describe("MonitorProcessor", () => {
     prisma.monitor.findUnique.mockResolvedValue(monitor);
     prisma.monitorResult.count.mockResolvedValue(5);
 
-    // Current check returns 200 → isUp = true
-    jest
+    // Both the first recovery probe and its confirmation return 200.
+    const checkHttpSpy = jest
       .spyOn(processor as any, "checkHttp")
-      .mockResolvedValue({ statusCode: 200, body: "" });
+      .mockResolvedValue({ statusCode: 200, body: "", responseMs: 441 });
+
+    jest.spyOn(global, "setTimeout").mockImplementation((fn: TimerHandler) => {
+      if (typeof fn === "function") fn();
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    });
 
     const job = { id: "j4", data: { monitorId: 1 } } as any;
     await processor.process(job);
 
+    expect(checkHttpSpy).toHaveBeenCalledTimes(2);
     expect(notifQueue.add).toHaveBeenCalledWith(
       expect.any(String),
       expect.objectContaining({
         eventType: "monitor.up",
         payload: expect.objectContaining({ transition: "recovered" }),
+      }),
+      expect.any(Object),
+    );
+  });
+
+  it("does not send a recovery alert when the confirmation probe fails", async () => {
+    const monitor = baseMonitor({
+      last_checked_at: new Date(Date.now() - 300_000),
+      last_status: 503,
+    });
+    prisma.monitor.findUnique.mockResolvedValue(monitor);
+    prisma.monitorResult.count.mockResolvedValue(5);
+
+    const checkHttpSpy = jest
+      .spyOn(processor as any, "checkHttp")
+      .mockResolvedValueOnce({ statusCode: 200, body: "", responseMs: 441 })
+      .mockResolvedValueOnce({ statusCode: 503, body: "", responseMs: 512 });
+    jest.spyOn(global, "setTimeout").mockImplementation((fn: TimerHandler) => {
+      if (typeof fn === "function") fn();
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    });
+
+    const job = {
+      id: "j4b",
+      data: { monitorId: 1 },
+    } as unknown as Parameters<MonitorProcessor["process"]>[0];
+    await processor.process(job);
+
+    expect(checkHttpSpy).toHaveBeenCalledTimes(2);
+    expect(prisma.monitorResult.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ is_up: false, status_code: 503 }),
+      }),
+    );
+    expect(prisma.monitor.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ last_status: 503 }) }),
+    );
+    expect(notifQueue.add).not.toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ eventType: "monitor.up" }),
+      expect.any(Object),
+    );
+  });
+
+  it("records connection errors as down so later recovery can be detected", async () => {
+    const monitor = baseMonitor({
+      last_checked_at: new Date(Date.now() - 300_000),
+      last_status: 200,
+    });
+    prisma.monitor.findUnique.mockResolvedValue(monitor);
+    prisma.monitorResult.count.mockResolvedValue(5);
+
+    const checkHttpSpy = jest
+      .spyOn(processor as any, "checkHttp")
+      .mockRejectedValue(new Error("ECONNREFUSED"));
+    jest.spyOn(global, "setTimeout").mockImplementation((fn: TimerHandler) => {
+      if (typeof fn === "function") fn();
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    });
+
+    const job = {
+      id: "j4c",
+      data: { monitorId: 1 },
+    } as unknown as Parameters<MonitorProcessor["process"]>[0];
+    await processor.process(job);
+
+    expect(checkHttpSpy).toHaveBeenCalledTimes(2);
+    expect(prisma.monitorResult.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ is_up: false, status_code: 0 }),
+      }),
+    );
+    expect(prisma.monitor.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ last_status: 0 }) }),
+    );
+    expect(notifQueue.add).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        eventType: "monitor.down",
+        payload: expect.objectContaining({ transition: "went_down" }),
       }),
       expect.any(Object),
     );

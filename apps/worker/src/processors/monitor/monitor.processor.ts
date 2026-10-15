@@ -132,7 +132,9 @@ export class MonitorProcessor extends WorkerHost {
       isUp = isHttpStatusWorking(result.statusCode);
     } catch {
       isUp = false;
+      statusCode = 0;
       responseTimeMs = Date.now() - start;
+      responseBody = "";
     }
 
     // Confirmation retry: if first check failed, wait 5 s then try once more
@@ -155,9 +157,41 @@ export class MonitorProcessor extends WorkerHost {
         }
       } catch {
         isUp = false;
+        statusCode = 0;
         responseTimeMs = Date.now() - retryStart;
+        responseBody = "";
         this.logger.warn(
           `Monitor ${monitorId}: retry also failed — confirming down`,
+        );
+      }
+    }
+
+    // A single successful response can be a transient edge or load-balancer
+    // response. Confirm recovery with a second consecutive successful probe.
+    if (prevIsUp === false && isUp) {
+      this.logger.log(
+        `Monitor ${monitorId}: first successful probe after downtime — confirming recovery in 5 s`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 5_000));
+      const confirmationStart = Date.now();
+      try {
+        const confirmation = await this.checkHttp(url, timeout);
+        statusCode = confirmation.statusCode;
+        responseTimeMs = confirmation.responseMs;
+        responseBody = confirmation.body;
+        isUp = isHttpStatusWorking(confirmation.statusCode);
+        if (!isUp) {
+          this.logger.warn(
+            `Monitor ${monitorId}: recovery confirmation failed (HTTP ${statusCode}) — keeping monitor down`,
+          );
+        }
+      } catch {
+        isUp = false;
+        statusCode = 0;
+        responseTimeMs = Date.now() - confirmationStart;
+        responseBody = "";
+        this.logger.warn(
+          `Monitor ${monitorId}: recovery confirmation failed — keeping monitor down`,
         );
       }
     }
