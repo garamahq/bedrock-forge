@@ -35,22 +35,22 @@ supports standard WordPress layouts for many operations.
 
 | Area                 | Current capability                                                                                                                                                                                           |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Servers              | Store encrypted SSH credentials, test connectivity, inspect server health, use CyberPanel helpers where configured.                                                                                          |
+| Servers              | Store encrypted per-server SSH credentials or use the global Settings key as a fallback, test connectivity, inspect server health, and use CyberPanel helpers where configured.                                |
 | Clients and projects | Track clients, projects, environments, domains, tags, packages, invoices, and activity.                                                                                                                      |
 | Environments         | Manage production/staging/dev environments, root paths, backup paths, protected DB tables, and WP DB credential discovery.                                                                                   |
-| Backups              | Create full, database-only, files-only, and incremental backups; schedule backups; upload to Google Drive via rclone; restore to the same environment.                                                      |
-| Sync and restore     | Clone/push database and files between environments with safety backups, URL replacement, cache cleanup, and protected table support.                                                                         |
+| Backups              | Create full, database-only, files-only, and incremental backups; schedule and retain backups; upload to Google Drive via rclone with per-environment folder overrides; restore to the originating environment. |
+| Sync and restore     | Clone/push database and files with safety backups, URL replacement, protected data, and restoration of selected target-specific WordPress settings after import.                                              |
 | Plugins              | Scan installed plugins, view Composer/manual/GitHub source, activate/deactivate, install, update, remove, change Composer constraints, schedule Composer updates, and manage a custom GitHub plugin catalog. |
 | Themes               | Scan, install, update, activate, and delete themes through WP-CLI worker jobs.                                                                                                                               |
 | WordPress core       | Check current core version and run core updates through WP-CLI worker jobs.                                                                                                                                  |
 | Tools                | Run cleanup, maintenance mode, debug toggles, WP cron inspection, log fetches, cache fixes, and other environment operations.                                                                                |
 | Files & Config       | Edit remote `.env` safely, compare environment variables, browse safe remote roots, quick-edit text files, tail logs, download small files, archive uploads, and keep project notes.                         |
 | Security             | Run server and WordPress environment scans, schedule scans, review findings, acknowledge findings, apply hardening actions, and configure SSH/file-change alerts.                                            |
-| Monitoring           | HTTP uptime checks, SSL expiry checks, DNS checks, keyword/content checks, response history, incident logs, and notifications.                                                                               |
+| Monitoring           | HTTP uptime checks with retry/confirmation for state transitions, SSL and DNS checks, keyword/content checks, response history, incident logs, and notifications.                                             |
 | Lighthouse           | Queue and review local Lighthouse or PageSpeed performance audits, including mobile/desktop history and trend charts.                                                                                        |
 | Domains              | Track domain WHOIS expiry and SSL expiry.                                                                                                                                                                    |
 | Billing              | Define hosting/support packages, generate invoices, track invoice status, and configure display currency/locale.                                                                                             |
-| Notifications        | Slack delivery, in-app notification records, notification logs, and weekly reports.                                                                                                                          |
+| Notifications        | Slack, Google Chat, generic webhook, and in-app delivery, notification logs, and weekly reports.                                                                                                              |
 | Integrations         | Google Drive backup storage, Cloudflare DNS/cache controls, and encrypted integration credentials.                                                                                                           |
 | Platform ops         | Audit logs, timed job execution logs, system backups, global Cmd/K search across resources and project tabs, dark mode, RBAC, and a cross-project problems feed.                                             |
 
@@ -68,6 +68,10 @@ worker executes remote SSH work and writes step-by-step job logs. The frontend
 subscribes to WebSocket updates and polls job execution logs where needed. Job
 views show status, elapsed time, progress when available, and the latest worker
 step so remote SSH work does not appear stalled.
+
+When an access token expires, protected routes attempt to refresh the session
+before redirecting to login. Monitor checks retry an initial failure and confirm
+recovery with a second successful probe before recording an up transition.
 
 Remote server access is SSH-native:
 
@@ -166,6 +170,7 @@ See [docs/guides/USAGE.md](docs/guides/USAGE.md) for a fuller operator guide.
 | [Quick Start](docs/getting-started/QUICK_START.md)           | First local install and first site workflow.                         |
 | [Installation](docs/getting-started/INSTALLATION.md)         | Docker setup, environment variables, ports, and reverse proxy notes. |
 | [Usage Guide](docs/guides/USAGE.md)                          | How to use the app day to day and what each area is for.             |
+| [Feature Guide](docs/guides/FEATURES.md)                     | Current feature map, safeguards, and links to operator workflows.    |
 | [Deployment](docs/guides/DEPLOYMENT.md)                      | Remote deployment, updates, SSL, backup strategy, and rollback.      |
 | [Development](docs/guides/DEVELOPMENT.md)                    | Local development, module patterns, worker patterns, and tests.      |
 | [Architecture](docs/reference/ARCHITECTURE.md)               | System design, services, queues, schema, security model.             |

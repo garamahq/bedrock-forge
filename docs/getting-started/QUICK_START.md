@@ -68,7 +68,8 @@ Once authenticated, you will arrive at the main system dashboard, which displays
    - **IP address** — your server's public IP
    - **SSH port** — default `22`
    - **SSH user** — e.g. `root` or `deploy`
-   - **SSH private key** — paste your private key (stored encrypted at rest)
+   - **SSH private key** — paste a server-specific key, or leave blank to use
+     the global key from **Settings -> SSH Key** (keys are stored encrypted)
    - **Passphrase** — if your key is passphrase-protected
 4. Click **Save**
 
@@ -138,7 +139,10 @@ remote environment.
 3. Set the **interval** (default: 10 minutes)
 4. Click **Enable**
 
-The monitor will start checking immediately. You can view response time history and uptime percentage on the Monitor detail page.
+The monitor will start checking immediately. You can view response time history
+and uptime percentage on the Monitor detail page. Forge retries an initial
+failed probe after five seconds and confirms recovery with a second successful
+probe before recording an up alert.
 
 ### Uptime Monitors Page
 ![Monitors Page](../assets/monitors.png)
@@ -149,7 +153,9 @@ The monitor will start checking immediately. You can view response time history 
 
 - Configure **backup schedules** from the project backup workflow.
 - Add **Google Drive** credentials in **Settings -> Integrations** for off-site
-  backup uploads.
+  backup uploads. Set a default Drive folder there, then use the environment
+  settings to assign a site-specific folder when you want backups separated by
+  project or environment.
 - Add **Slack notifications** in **Settings -> Integrations** to get alerted on
   failures and outages.
 - Configure **Settings -> Billing** if you need EUR, LYD, GBP, or another
@@ -160,6 +166,8 @@ The monitor will start checking immediately. You can view response time history 
 - Run **Lighthouse** audits to track performance scores.
 - Add more servers, projects, and clients
 - Invite team members via **Users & Roles** (admin only)
+- Browse the [Feature Guide](../guides/FEATURES.md) for the complete feature
+  map and current operational safeguards.
 
 ---
 

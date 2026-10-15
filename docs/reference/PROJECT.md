@@ -5,6 +5,10 @@
 Self-hosted WordPress operations dashboard for managing WordPress and Bedrock
 sites over SSH.
 
+For the current operator-facing feature inventory and workflows, see the
+[Feature Guide](../guides/FEATURES.md) and [Usage Guide](../guides/USAGE.md).
+This reference focuses on implementation structure and data flow.
+
 **Core decisions:**
 
 - REST API (not GraphQL — overrides orchestrator default for this project)
@@ -241,7 +245,8 @@ src/modules/<feature>/
 ### Billing & Notifications
 
 - `invoices` — yearly invoices linked to a project (hosting + support cost)
-- `notification_channels` — Slack webhook channels (with event subscriptions)
+- `notification_channels` — Slack, Google Chat, and generic webhook channels
+  with encrypted credentials and event subscriptions
 - `notification_logs` — delivery log per notification dispatch
 
 ---

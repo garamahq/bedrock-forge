@@ -1,7 +1,8 @@
 # Usage Guide
 
 This guide explains what each part of Bedrock Forge is for and how common
-workflows fit together.
+workflows fit together. For a concise inventory of all product areas, see the
+[Feature Guide](FEATURES.md).
 
 ## Operating Model
 
@@ -12,7 +13,17 @@ Bedrock Forge is an operations dashboard, not a WordPress plugin. You add server
 
 Use the execution log whenever an operation looks stuck or failed. It shows the exact remote step, command label, exit code, worker message, elapsed time, and progress when the worker reports it.
 
-The floating **Action Center** shows recent queued, running, failed, and completed jobs from anywhere in the app. Open it to see live elapsed timers, progress, errors, and the inline execution log without leaving the current screen.
+The floating **Action Center** summarizes the latest 12 job records, including
+queued, running, failed, and completed jobs. Open it to see live elapsed timers,
+progress, errors, and execution logs without leaving the current screen. Use
+**Activity** for searchable history; an old failed job can remain in the badge
+after its later retry succeeds.
+
+### Login sessions
+
+When a protected route detects an expired access token, Forge attempts to refresh
+the session and shows a loading state while it waits. It returns to the login
+page only when the refresh session is missing, expired, or rejected.
 
 ## Global Search
 
@@ -30,8 +41,12 @@ projects, environments, and tabs stay close to hand.
 
 1. **Add a server**
    - Go to **Servers -> Add Server**.
-   - Enter host, port, SSH user, and private key.
+   - Enter host, port, and SSH user. Add a per-server private key, or leave the
+     key blank to use the global key configured in **Settings -> SSH Key**.
    - Save and confirm SSH connectivity.
+
+   A per-server key takes precedence over the global key. Both are encrypted at
+   rest; the UI never displays the stored private key after saving.
 
 2. **Add a client**
    - Go to **Clients -> Add Client**.
@@ -110,8 +125,22 @@ Backup types:
 Schedules can run daily, weekly, or monthly. Retention can prune old backup
 records by count or age depending on schedule settings.
 
-Google Drive upload is supported through rclone configuration. Restore and
-backup-target boundaries are tracked in
+Google Drive upload uses the configured rclone integration. Set a default
+folder in **Settings -> Integrations**, then optionally set a folder ID on each
+environment to direct its archives to a more specific destination. A practical
+Drive layout is `Project / Backups / Environment / Site`; set the environment's
+folder ID to the final site folder. This makes it easier to review and restore
+backups without mixing sites.
+
+For a site with a large media library, choose the smallest backup type that
+meets the recovery need: **Files only** for site files without the database,
+**Database only** for the database, or **Full** for both. **Incremental** stores
+a database dump and rsync hard-link file snapshots; it needs rsync and extra
+space on the managed server. Large Google Drive uploads can take longer than
+archive creation, so wait for the job to show **Completed** and verify the file
+in its destination folder before treating the upload as finished.
+
+Restore and backup-target boundaries are tracked in
 [Current Scope and Boundaries](../reference/LIMITATIONS.md).
 
 ## Sync
@@ -123,6 +152,14 @@ Supported scopes:
 - **Database only**: Generates a database dump on the source server, transfers it to the target, imports it, runs protection steps, and performs URL replacement.
 - **Files only**: Syncs site files (excluding configurations like `.env`, `wp-config.php`, `.htaccess`) using `rsync` (or a tar-relay fallback).
 - **Database + files**: Performs the database sync first, followed by the file sync.
+
+Forge creates a safety backup of the target before a database import unless the
+operator explicitly skips it. It also preserves selected target-specific state
+across the import: WordPress search visibility (`blog_public`), the active
+plugin list, and Secure Guard options other than its lock-state value. If the
+target contains database tables but Forge cannot read its WordPress options
+table, the sync stops instead of importing over unknown target state. Review
+the execution log for each capture, restore, and cleanup step.
 
 ### Data Protection & Sanitization
 
@@ -298,6 +335,14 @@ Monitoring supports:
 - Keyword/content checks.
 - Incident logs and notifications.
 
+Monitor state changes are confirmed to reduce one-off false alerts. A failed
+first HTTP probe is retried after five seconds; if the monitor was up, a
+successful retry prevents a down transition. When a monitor was down, the first
+successful recovery probe is followed by another probe after five seconds. A
+failed confirmation keeps it down and does not send an up alert. The monitor
+still uses the configured worker's network path, so this is not independent
+multi-region verification.
+
 ### Uptime Monitoring Dashboard
 ![Monitors Page](../assets/monitors.png)
 
@@ -331,7 +376,8 @@ Key settings areas:
 | Tab          | Use it for                                                             |
 | ------------ | ---------------------------------------------------------------------- |
 | Account      | Your profile and password.                                             |
-| Integrations | Slack, Google Drive/rclone, GitHub token, and related external config. |
+| SSH Key      | Configure the encrypted global private key used when a server has no key.       |
+| Integrations | Slack, Google Chat, generic webhooks, Google Drive/rclone, Cloudflare, and GitHub. |
 | Automation   | Scheduled/platform automation settings.                                |
 | Plugins      | Custom plugin catalog and installed plugin inventory.                  |
 | Billing      | Currency and locale for billing display.                               |

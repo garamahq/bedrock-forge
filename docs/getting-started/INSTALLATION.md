@@ -220,7 +220,15 @@ Google Drive upload uses `rclone` under the hood.
 3. Set `GDRIVE_CLIENT_ID`, `GDRIVE_CLIENT_SECRET`, and `GDRIVE_TOKEN` in `.env`
 4. Optionally set `GDRIVE_FOLDER_ID` to a specific folder ID (defaults to root)
 
-Per-environment overrides are available in the environment settings page.
+Per-environment overrides are available in the environment settings page. The
+override is a Google Drive folder ID, not a folder name or full URL. A useful
+layout is one project folder containing `Backups / Environment / Site`; set the
+environment override to the site's folder so archives stay separated. If no
+environment override is set, Forge uses `GDRIVE_FOLDER_ID`.
+
+Google Drive configuration is optional for local backup creation. Check the
+backup job execution log and confirm the archive exists in the selected Drive
+folder before relying on an off-site copy.
 
 ---
 

@@ -195,7 +195,7 @@ migrations live in `prisma/migrations/`.
 | Model                 | Key Fields                                                                               |
 | --------------------- | ---------------------------------------------------------------------------------------- |
 | `Invoice`             | invoice_number (unique: INV-YYYY-NNN), amounts, status, period, client/project snapshots |
-| `NotificationChannel` | name, type (slack), slack_bot_token_enc, events[] (string array)                         |
+| `NotificationChannel` | name, type (slack/google_chat/webhook), encrypted channel credentials, events[] (string array) |
 | `NotificationLog`     | event_type, payload, status (sent/failed), error                                         |
 | `UserNotification`    | user_id, type, message, read_at                                                          |
 
@@ -267,6 +267,12 @@ status, elapsed time, progress, and structured log lines with timestamps.
 `GET /search` powers the global Cmd/K command palette. It returns typed links
 for pages, projects, environments, clients, servers, and project tabs.
 
+Monitor processing retries a failed HTTP probe after five seconds. If the
+stored state is down and the next probe succeeds, a second successful probe
+five seconds later is required before recovery is recorded or an up transition
+is announced. This confirmation reduces single-response false alerts but uses
+the same worker network path.
+
 ---
 
 ## Security Model
@@ -276,6 +282,7 @@ for pages, projects, environments, clients, servers, and project tabs.
 `EncryptionService` wraps every sensitive value using AES-256-GCM:
 
 - SSH private keys (and passphrases)
+- The global fallback SSH private key configured in Settings
 - CyberPanel auto-login passwords
 - WordPress DB credentials (`wp_db_credentials` table)
 - Slack bot tokens
@@ -283,6 +290,10 @@ for pages, projects, environments, clients, servers, and project tabs.
 The `ENCRYPTION_KEY` env var (32 bytes / 64 hex chars) is the only secret not
 stored in the database. It must be backed up separately. Data encrypted with a
 key is permanently unreadable without it.
+
+For SSH connection setup, the per-server key takes precedence. If a server has
+no key, the worker resolves the global encrypted key from Settings. A missing
+key at both levels is a connection configuration error.
 
 ### JWT Authentication
 
@@ -292,6 +303,10 @@ key is permanently unreadable without it.
   on every refresh.
 - **Login throttle:** 5 attempts per 15 minutes per IP (Redis counter)
 - **Refresh throttle:** 30 requests per minute
+
+The web API client shares one refresh request across concurrent calls. Protected
+route guards hold the route in a loading state while the refresh runs and
+redirect to login only if it fails.
 
 ### Role-Based Access Control
 

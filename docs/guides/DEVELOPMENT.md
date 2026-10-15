@@ -345,6 +345,11 @@ pnpm --filter @bedrock-forge/api test:cov
 Backend and worker tests use Jest. Frontend tests use Vitest. Test files live
 next to the code they cover using `*.spec.ts` or `*.spec.tsx`.
 
+Keep regression tests next to the feature for cross-cutting behavior. Current
+examples cover expired-session route guards, server/global SSH-key selection,
+monitor retry and recovery confirmation, and sync target-state preservation and
+remote cleanup.
+
 ---
 
 ## Linting & Type Checking

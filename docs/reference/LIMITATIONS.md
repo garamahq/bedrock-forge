@@ -78,3 +78,12 @@ SSH.
 
 - Lighthouse runs locally with Chromium in the Docker image by default.
 - Google PageSpeed API fallback is optional and quota-bound.
+
+## Monitoring
+
+- HTTP checks run from the Forge worker's network location; there is no
+  multi-region or independent third-party probe.
+- A failed first HTTP check is retried after five seconds. Recovery from a
+  previously down state requires another successful probe after five seconds.
+  This reduces one-off false state changes but cannot rule out a transient
+  response shared by both checks or a network path that differs from visitors'.

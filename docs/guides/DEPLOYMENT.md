@@ -27,29 +27,32 @@ the total size of all managed WordPress sites for comfortable headroom.
 Use `deploy.sh` to push the project to a remote server and run the install:
 
 ```bash
-# Review the target settings at the top of deploy.sh
-head -10 deploy.sh
+# Copy deployment target settings and edit the values
+cp .env.deploy.example .env.deploy
+${EDITOR:-vi} .env.deploy
 
-# Deploy (first run)
+# First deployment
 ./deploy.sh --install
 ```
 
-`deploy.sh` does:
+`deploy.sh` reads the target from `.env.deploy`, builds the `forge` and `web`
+images on the local machine, and streams them to the server over SSH. The
+server does not build the application and no container registry is required.
+It syncs only Compose, nginx, and runtime config files; application source code
+is included in the built images. On first install it creates `.env`, generates
+the encryption/JWT/database/Redis secrets, and starts the Compose stack.
+Use `--install` only for a genuinely new installation: it regenerates secrets
+and must not be run against an existing database.
 
-1. Tests SSH connectivity to the target server
-2. Rsyncs all project files to `SERVER_PATH` (default `/home/forge`) — excludes
-   `.git`, `node_modules`, `dist`, `.env`
-3. On first run (or `--install`): runs `install.sh` on the remote server
-4. On subsequent runs: runs `update.sh` on the remote server (incremental,
-   preserves data)
-5. After a healthy deploy: safely prunes unused Docker images and old build
-   cache to reduce disk usage
+Prerequisites on the local machine:
 
-**Prerequisites for `deploy.sh`:**
+- Docker Engine, `rsync`, and `ssh`
+- SSH key authentication to the deployment target
+- At least 3 GiB of free disk space on the target after safe image cleanup
 
-- `rsync` installed locally
-- SSH key auth to the target server (no password prompt)
-- Docker installed on the target server
+The target needs Docker Engine and Compose v2. The script checks SSH and disk
+capacity before sending images. After deployment it waits for the API health
+endpoint, reports the image tag, and safely prunes old images and builder cache.
 
 ---
 
@@ -69,19 +72,34 @@ docker compose version
 
 ## Incremental Updates
 
-After the initial install, deploy updates without downtime:
+After the initial install, use the same script to build and deploy an update:
 
 ```bash
 ./deploy.sh
 ```
 
-This rsyncs changed files and runs `update.sh` remotely, which:
+An incremental deploy:
 
-1. Rebuilds the `forge` Docker image
-2. Does a rolling restart of the `forge` container
-3. Automatically runs `prisma migrate deploy` in the new container
-4. Does **not** restart or touch `postgres` or `redis` — data remains intact
-5. Prunes unused Docker images and builder cache after the health check passes
+1. Builds and streams the two tagged images from the local machine.
+2. Creates a PostgreSQL pre-deploy snapshot under
+   `backups/pre-deploy/` before the migration unless `--skip-backup` is passed.
+3. Updates the image tag and recreates `forge` and `web`; PostgreSQL and Redis
+   stay on their existing volumes.
+4. Waits up to three minutes for `/health`. If the new API does not become
+   healthy, the script restores the previous image tag and attempts a rollback.
+5. Cleans unused images and old builder cache after health succeeds.
+
+The deployment database snapshot is stored on the target host. Copy it to
+separate storage for disaster recovery; image cleanup does not delete backup
+files or Docker volumes. Avoid `--skip-backup` for routine updates.
+
+Useful modes:
+
+```bash
+./deploy.sh --build-only  # Build images without SSH or deployment
+./deploy.sh --no-cache    # Rebuild without Docker layer cache
+./deploy.sh --cleanup-only # Safe remote image/cache cleanup only
+```
 
 Cleanup controls:
 
@@ -129,7 +147,7 @@ git pull
    certbot certonly --standalone -d forge.example.com
    ```
 4. Configure nginx as the HTTPS frontend (see
-   [INSTALLATION.md — Running Behind a Reverse Proxy](INSTALLATION.md#running-behind-a-reverse-proxy))
+   [Installation — Running Behind a Reverse Proxy](../getting-started/INSTALLATION.md#running-behind-a-reverse-proxy))
 5. Set `CORS_ORIGIN=https://forge.example.com` in `/home/forge/.env`
 6. Restart the forge container:
    ```bash
@@ -237,24 +255,30 @@ capacity:
 
 ## Rollback
 
-If an update causes problems:
+If health verification fails, `deploy.sh` attempts to restore the previous
+image tag automatically. For a manual rollback, inspect the retained image tags
+and the previous environment file on the server, then restore the previous
+`IMAGE_TAG` before recreating the app services:
 
 ```bash
 cd /home/forge
 
-# Find the previous image ID
-docker images | grep forge
+# Find available tagged images
+docker image ls 'bedrock-forge/forge'
+docker image ls 'bedrock-forge/web'
 
-# Roll back to it
-docker compose stop forge
-docker tag forge-previous:tag forge_forge:latest  # retag the old image
-docker compose up -d forge
+# Restore the previous IMAGE_TAG in .env, then recreate both app services.
+# The deployment script keeps the preceding environment file as .env.bak.
+cp .env.bak .env
+docker compose up -d --force-recreate forge web
+curl -fsS http://localhost:3001/health
 
 # If the migration needs reverting, restore from database backup
 ```
 
-> Prisma migrations are forward-only by default. Always take a database dump
-> before deploying migrations to production.
+> Prisma migrations are forward-only by default. Routine `deploy.sh` updates
+> create a pre-deploy PostgreSQL dump automatically. Preserve that dump before
+> attempting a database rollback.
 
 ---
 

@@ -59,6 +59,25 @@ docker compose stats forge --no-stream
 # Current cap: 768 MB (NODE_OPTIONS: '--max-old-space-size=768')
 ```
 
+## Monitor alert verification
+
+An uptime monitor retries a failed HTTP probe after five seconds. If a monitor
+was down, recovery requires two consecutive successful probes, five seconds
+apart, before the `monitor.up` transition is recorded. This avoids treating one
+transient response as recovery.
+
+When an alert looks false:
+
+1. Open **Monitors -> the monitor** and compare the latest rows in its response
+   history table, including probe times and HTTP status codes.
+2. Open **Activity** and inspect the monitor job execution log for messages
+   about the retry or recovery confirmation.
+3. Check DNS and reachability from the Forge worker's network path. A local
+   browser test can use a different route to the site.
+4. If the probes disagree or the problem repeats, keep the monitor enabled and
+   record the timestamps and statuses for investigation; do not infer recovery
+   from a single successful request.
+
 ---
 
 ## Escalation

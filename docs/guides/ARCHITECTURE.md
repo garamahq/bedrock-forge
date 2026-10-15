@@ -128,6 +128,9 @@ apps/web/src/
 - Zustand is limited to auth/session and UI-only state.
 - Shared UI primitives live under `components/ui`; page-specific components
   stay near their page folder.
+- Protected route guards try the shared refresh-token flow when an access token
+  expires. They keep the page in a loading state during refresh and redirect to
+  login only after refresh fails.
 - Realtime job updates use `lib/websocket.ts` and structured job execution
   panels for long-running work.
 
@@ -268,11 +271,31 @@ Remote execution primitives:
 
 ### Remote SSH Flow
 
-1. The worker resolves server credentials and environment paths.
+1. The worker resolves server credentials and environment paths. A server's
+   encrypted private key takes precedence; if absent, the SSH key configured in
+   Settings is used as the global fallback.
 2. Credentials are decrypted only inside the API/worker process.
 3. Commands and helper scripts run over SSH/SFTP.
 4. Remote temp helpers are cleaned up after execution where applicable.
 5. Results and logs are persisted to PostgreSQL.
+
+### Sync safeguards
+
+Database sync captures target search visibility, the active-plugin list, and
+selected Secure Guard options before import, then restores those target values
+afterward. If the target has existing tables but no readable WordPress options
+table, the operation stops rather than overwriting state it could not inspect.
+The worker tracks restoration and temporary-file cleanup as job steps so an
+operator can distinguish import failure from post-import repair failure.
+
+### Monitor transition checks
+
+The monitor worker waits five seconds and retries an initial failed HTTP probe
+before recording a down transition. When a monitor was down and the next probe
+succeeds, it makes a second successful probe five seconds later before
+recording recovery. A failed recovery confirmation keeps the last state down
+and suppresses the up transition event. These checks use the Forge worker's
+configured network path.
 
 ---
 

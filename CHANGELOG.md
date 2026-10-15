@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Bug Fixes
+
+* **auth:** refresh expired sessions in protected route guards before
+  redirecting to login
+* **monitors:** retry failed probes and confirm recovery before sending an up
+  alert
+* **servers:** fall back to the encrypted global SSH key when no per-server key
+  is configured
+
 ## [0.1.8] - 2026-10-14
 
 ### Bug Fixes
