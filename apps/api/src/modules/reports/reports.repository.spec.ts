@@ -69,8 +69,20 @@ describe("ReportsRepository", () => {
           slack_channel_id: "C12345",
           slack_bot_token_enc: "enc-token",
           google_chat_webhook_url_enc: null,
+          webhook_url_enc: null,
           active: true,
           events: ["report.weekly", "backup.success"],
+        },
+        {
+          id: BigInt(2),
+          name: "Ops Webhook",
+          type: "webhook",
+          slack_channel_id: null,
+          slack_bot_token_enc: null,
+          google_chat_webhook_url_enc: null,
+          webhook_url_enc: "enc-webhook-url",
+          active: true,
+          events: ["report.weekly"],
         },
       ]);
 
@@ -82,6 +94,18 @@ describe("ReportsRepository", () => {
         slack_channel_id: "C12345",
         has_token: true,
         has_webhook: false,
+        has_webhook_url: false,
+        active: true,
+        subscribed: true,
+      });
+      expect(res[1]).toEqual({
+        id: 2,
+        name: "Ops Webhook",
+        type: "webhook",
+        slack_channel_id: null,
+        has_token: false,
+        has_webhook: false,
+        has_webhook_url: true,
         active: true,
         subscribed: true,
       });

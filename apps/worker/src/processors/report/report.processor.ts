@@ -2,12 +2,13 @@ import { Processor, WorkerHost } from "@nestjs/bullmq";
 import { Logger } from "@nestjs/common";
 import { Job } from "bullmq";
 import { PrismaClient } from "@prisma/client";
+import { createHmac } from "crypto";
 import { mkdir, writeFile, unlink } from "fs/promises";
 import { join } from "path";
 import { PrismaService } from "../../prisma/prisma.service";
 import { EncryptionService } from "../../encryption/encryption.service";
 import { RcloneService } from "../../services/rclone.service";
-import { QUEUES, JOB_TYPES } from "@bedrock-forge/shared";
+import { QUEUES, JOB_TYPES, buildWebhookRequest } from "@bedrock-forge/shared";
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const PdfPrinter = require("pdfmake/js/Printer.js").default as new (
@@ -48,51 +49,108 @@ function fmtBytes(bytes: number): string {
   return `${(bytes / 1_073_741_824).toFixed(2)} GB`;
 }
 
-type ReportPeriod =
+export type ReportPeriod =
   | "last_7d"
   | "last_30d"
+  | "last_90d"
+  | "this_month"
+  | "last_month"
   | "current_month"
   | "previous_month";
 
-function computeDateRange(
-  period: ReportPeriod,
+export interface BackupPeriodSummary {
+  totalOperations: number;
+  completedOperations: number;
+  failedOperations: number;
+}
+
+export function summarizePeriodBackups(
+  backups: ReadonlyArray<{ status: string }>,
+): BackupPeriodSummary {
+  return {
+    totalOperations: backups.length,
+    completedOperations: backups.filter((b) => b.status === "completed").length,
+    failedOperations: backups.filter((b) => b.status === "failed").length,
+  };
+}
+
+export function computeDateRange(
+  period: string,
   now: Date,
-): { startDate: Date; dateRange: string; periodLabel: string } {
-  let startDate: Date;
-  let periodLabel: string;
+): {
+  startDate: Date;
+  endExclusive: Date;
+  dateRange: string;
+  periodLabel: string;
+} {
+  const year = now.getUTCFullYear();
+  const month = now.getUTCMonth();
 
   switch (period) {
-    case "last_30d":
-      startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-      periodLabel = "Last 30 Days";
-      break;
-    case "current_month":
-      startDate = new Date(now.getFullYear(), now.getMonth(), 1);
-      periodLabel = `${now.toLocaleString("default", { month: "long" })} ${now.getFullYear()}`;
-      break;
-    case "previous_month": {
-      const prevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-      startDate = prevMonth;
-      const endPrevMonth = new Date(now.getFullYear(), now.getMonth(), 0);
-      const label = `${prevMonth.toLocaleString("default", { month: "long" })} ${prevMonth.getFullYear()}`;
+    case "last_7d": {
+      const startDate = new Date(now.getTime() - 7 * 86_400_000);
+      const endExclusive = new Date(now.getTime() + 1);
       return {
         startDate,
-        dateRange: `${fmt(prevMonth)} to ${fmt(endPrevMonth)}`,
-        periodLabel: label,
+        endExclusive,
+        dateRange: `${fmt(startDate)} to ${fmt(now)}`,
+        periodLabel: "Weekly Report",
       };
     }
-    case "last_7d":
+    case "last_30d": {
+      const startDate = new Date(now.getTime() - 30 * 86_400_000);
+      const endExclusive = new Date(now.getTime() + 1);
+      return {
+        startDate,
+        endExclusive,
+        dateRange: `${fmt(startDate)} to ${fmt(now)}`,
+        periodLabel: "Last 30 Days",
+      };
+    }
+    case "last_90d": {
+      const startDate = new Date(now.getTime() - 90 * 86_400_000);
+      const endExclusive = new Date(now.getTime() + 1);
+      return {
+        startDate,
+        endExclusive,
+        dateRange: `${fmt(startDate)} to ${fmt(now)}`,
+        periodLabel: "Last 90 Days",
+      };
+    }
+    case "this_month":
+    case "current_month": {
+      const startDate = new Date(Date.UTC(year, month, 1));
+      const endExclusive = new Date(now.getTime() + 1);
+      const monthLabel = now.toLocaleString("en-US", {
+        month: "long",
+        timeZone: "UTC",
+      });
+      return {
+        startDate,
+        endExclusive,
+        dateRange: `${fmt(startDate)} to ${fmt(now)}`,
+        periodLabel: `${monthLabel} ${year}`,
+      };
+    }
+    case "last_month":
+    case "previous_month": {
+      const startDate = new Date(Date.UTC(year, month - 1, 1));
+      const endExclusive = new Date(Date.UTC(year, month, 1));
+      const endDisplay = new Date(endExclusive.getTime() - 1);
+      const monthLabel = startDate.toLocaleString("en-US", {
+        month: "long",
+        timeZone: "UTC",
+      });
+      return {
+        startDate,
+        endExclusive,
+        dateRange: `${fmt(startDate)} to ${fmt(endDisplay)}`,
+        periodLabel: `${monthLabel} ${startDate.getUTCFullYear()}`,
+      };
+    }
     default:
-      startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-      periodLabel = "Weekly Report";
-      break;
+      throw new Error(`Unsupported report period: ${period}`);
   }
-
-  return {
-    startDate,
-    dateRange: `${fmt(startDate)} to ${fmt(now)}`,
-    periodLabel,
-  };
 }
 
 function th(text: string) {
@@ -131,16 +189,18 @@ type MonitorRow = {
   upChecks: number;
 };
 
-function buildDocDef(
+export function buildDocDef(
   dateRange: string,
   periodLabel: string,
   generatedAt: Date,
   backups: BackupRow[],
   monitors: MonitorRow[],
   servers: ServerRow[] = [],
+  backupSummary: BackupPeriodSummary = summarizePeriodBackups(backups),
 ) {
-  const failedBackups = backups.filter((b) => b.status === "failed").length;
-  const okBackups = backups.filter((b) => b.status === "completed").length;
+  const failedBackups = backupSummary.failedOperations;
+  const okBackups = backupSummary.completedOperations;
+  const totalBackups = backupSummary.totalOperations;
   const downMonitors = monitors.filter(
     (m) => m.lastStatus !== null && (m.lastStatus === 0 || m.lastStatus >= 400),
   ).length;
@@ -282,8 +342,8 @@ function buildDocDef(
           ),
           summaryCard("Active Envs", String(totalEnvs || backups.length)),
           summaryCard(
-            "Backups OK",
-            `${okBackups} / ${backups.length}`,
+            "Backup Operations",
+            `${okBackups} / ${totalBackups}`,
             failedBackups > 0 ? "#b91c1c" : "#15803d",
           ),
           summaryCard(
@@ -313,7 +373,7 @@ function buildDocDef(
           ]
         : []),
       {
-        text: "Backup Status",
+        text: "Latest Backup per Environment",
         style: "sectionHeader",
         margin: [0, 0, 0, 4] as [number, number, number, number],
       },
@@ -694,9 +754,10 @@ export class ReportProcessor extends WorkerHost {
     if (job.name !== JOB_TYPES.REPORT_GENERATE) return;
 
     const now = new Date();
-    const period = (job.data?.period ?? "last_7d") as ReportPeriod;
+    const period = (job.data?.period ?? "last_7d") as string;
     const channelIds = job.data?.channelIds as number[] | null | undefined;
-    const { startDate, dateRange, periodLabel } = computeDateRange(period, now);
+    const { startDate, endExclusive, dateRange, periodLabel } =
+      computeDateRange(period, now);
 
     this.logger.log(`Generating report [${periodLabel}]: ${dateRange}`);
 
@@ -711,6 +772,13 @@ export class ReportProcessor extends WorkerHost {
         payload: { period, periodLabel, dateRange },
       },
     });
+
+    const executionLogs: Array<{
+      timestamp: string;
+      step: string;
+      level: "info" | "warn" | "error";
+      detail?: string;
+    }> = [];
 
     try {
       // ── 0. Server infrastructure data ──────────────────────────────────────
@@ -745,7 +813,7 @@ export class ReportProcessor extends WorkerHost {
       // ── 1. Backup data ─────────────────────────────────────────────────────
 
       const rawBackups = (await this.prisma.backup.findMany({
-        where: { created_at: { gte: startDate } },
+        where: { created_at: { gte: startDate, lt: endExclusive } },
         include: {
           environment: {
             include: {
@@ -757,7 +825,10 @@ export class ReportProcessor extends WorkerHost {
         orderBy: { created_at: "desc" },
       })) as PrismaBackup[];
 
-      // Latest backup per environment only
+      // Summarize ALL operations in the period independently of latest-per-env table
+      const backupSummary = summarizePeriodBackups(rawBackups);
+
+      // Latest backup per environment only for per-environment status table
       const seenEnv = new Set<string>();
       const backups: BackupRow[] = [];
       for (const b of rawBackups) {
@@ -782,7 +853,7 @@ export class ReportProcessor extends WorkerHost {
         include: {
           environment: { include: { project: { select: { name: true } } } },
           monitor_results: {
-            where: { checked_at: { gte: startDate } },
+            where: { checked_at: { gte: startDate, lt: endExclusive } },
             select: { is_up: true },
           },
         },
@@ -805,6 +876,7 @@ export class ReportProcessor extends WorkerHost {
         backups,
         monitors,
         servers,
+        backupSummary,
       );
 
       // ── 4. Upload to Google Drive (if configured) ───────────────────────────
@@ -826,18 +898,20 @@ export class ReportProcessor extends WorkerHost {
         where: channelWhere,
       });
 
+      let partialWarning: string | null = null;
       if (channels.length === 0) {
         this.logger.warn(
           "No active notification channels subscribed to report.weekly",
         );
+        executionLogs.push({
+          timestamp: new Date().toISOString(),
+          step: "No active notification channels subscribed to report.weekly",
+          level: "warn",
+        });
       } else {
-        const { WebClient } = await import("@slack/web-api");
-        const okBackups = backups.filter(
-          (b) => b.status === "completed",
-        ).length;
-        const failedBackups = backups.filter(
-          (b) => b.status === "failed",
-        ).length;
+        const okBackups = backupSummary.completedOperations;
+        const failedBackups = backupSummary.failedOperations;
+        const totalOps = backupSummary.totalOperations;
         const downMonitors = monitors.filter(
           (m) =>
             m.lastStatus !== null &&
@@ -855,7 +929,7 @@ export class ReportProcessor extends WorkerHost {
           `*Bedrock Forge — ${periodLabel}* (${dateRange})`,
           ``,
           `• Infrastructure: *${onlineServers}/${servers.length || 1} servers online* · *${totalEnvs} active environments*`,
-          `• Backups: *${okBackups} successful*, ${failedBackups > 0 ? `*${failedBackups} failed*` : "0 failed"} in period`,
+          `• Backups: *${okBackups} successful*, ${failedBackups > 0 ? `*${failedBackups} failed*` : "0 failed"} of ${totalOps} operation(s) in period`,
           `• Monitors: ${downMonitors > 0 ? `*${downMonitors} currently down*` : "all up"} of ${monitors.length} total`,
           ...(driveLink
             ? [``, `📁 *Google Drive Report:* <${driveLink}|Open PDF on Google Drive>`]
@@ -868,7 +942,7 @@ export class ReportProcessor extends WorkerHost {
           `*Bedrock Forge — ${periodLabel}* (${dateRange})`,
           ``,
           `• Infrastructure: ${onlineServers}/${servers.length || 1} servers online · ${totalEnvs} active environments`,
-          `• Backups: ${okBackups} successful, ${failedBackups} failed in period`,
+          `• Backups: ${okBackups} successful, ${failedBackups} failed (${totalOps} total in period)`,
           `• Monitors: ${downMonitors > 0 ? `${downMonitors} currently down` : "all up"} of ${monitors.length} total`,
           ...(driveLink
             ? [
@@ -879,40 +953,56 @@ export class ReportProcessor extends WorkerHost {
             : [``, `PDF report generated in Forge.`]),
         ].join("\n");
 
-        for (const channel of channels) {
-          try {
-            if (channel.type === "google_chat") {
-              await this.sendGoogleChatSummary(
-                channel.google_chat_webhook_url_enc,
-                googleChatSummary,
-              );
-            } else {
-              if (!channel.slack_bot_token_enc || !channel.slack_channel_id)
-                continue;
-              const token = this.encryption.decrypt(
-                channel.slack_bot_token_enc,
-              );
-              const slack = new WebClient(token);
-              await slack.filesUploadV2({
-                channel_id: channel.slack_channel_id,
-                file: pdfBuffer,
-                filename,
-                title: `${periodLabel} ${fmt(now)}`,
-                initial_comment: initialComment,
-              });
-            }
-            this.logger.log(`Report sent to channel "${channel.name}"`);
-          } catch (err) {
-            this.logger.error(
-              `Failed to send to channel "${channel.name}": ${err}`,
-            );
-          }
+        const delivery = await this.deliverReportToChannels({
+          channels,
+          eventType: "report.weekly",
+          filename,
+          title: `${periodLabel} ${fmt(now)}`,
+          pdfBuffer,
+          slackSummary: initialComment,
+          googleChatSummary,
+          webhookPayload: {
+            period,
+            periodLabel,
+            dateRange,
+            driveLink,
+            infrastructure: {
+              onlineServers,
+              totalServers: servers.length,
+              totalEnvs,
+            },
+            backups: {
+              totalOperations: totalOps,
+              completedOperations: okBackups,
+              failedOperations: failedBackups,
+            },
+            monitors: {
+              total: monitors.length,
+              down: downMonitors,
+            },
+          },
+          executionLogs,
+        });
+
+        if (delivery.sentCount === 0) {
+          throw new Error(
+            `Failed to deliver report to any channel: ${delivery.failures.join("; ")}`,
+          );
+        }
+        if (delivery.failures.length > 0) {
+          partialWarning = `Partial delivery (${delivery.sentCount}/${channels.length} sent); failed: ${delivery.failures.join("; ")}`;
         }
       }
 
       await this.prisma.jobExecution.update({
         where: { id: execution.id },
-        data: { status: "completed", progress: 100, completed_at: new Date() },
+        data: {
+          status: "completed",
+          progress: 100,
+          last_error: partialWarning,
+          execution_log: executionLogs as unknown as never,
+          completed_at: new Date(),
+        },
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -923,6 +1013,7 @@ export class ReportProcessor extends WorkerHost {
           data: {
             status: "failed",
             last_error: msg,
+            execution_log: executionLogs as unknown as never,
             progress: 0,
             completed_at: new Date(),
           },
@@ -958,6 +1049,13 @@ export class ReportProcessor extends WorkerHost {
             started_at: now,
           },
         });
+
+    const executionLogs: Array<{
+      timestamp: string;
+      step: string;
+      level: "info" | "warn" | "error";
+      detail?: string;
+    }> = [];
 
     try {
       this.logger.log("Generating security report PDF...");
@@ -1059,10 +1157,15 @@ export class ReportProcessor extends WorkerHost {
         where: channelWhere,
       });
 
+      let partialWarning: string | null = null;
       if (channels.length === 0) {
         this.logger.warn("No active notification channels for security report");
+        executionLogs.push({
+          timestamp: new Date().toISOString(),
+          step: "No active notification channels for security report",
+          level: "warn",
+        });
       } else {
-        const { WebClient } = await import("@slack/web-api");
         const criticalCount = scans.reduce(
           (s, r) => s + (r.summary?.critical ?? 0),
           0,
@@ -1104,42 +1207,47 @@ export class ReportProcessor extends WorkerHost {
             : [``, `PDF report generated in Forge.`]),
         ].join("\n");
 
-        for (const channel of channels) {
-          try {
-            if (channel.type === "google_chat") {
-              await this.sendGoogleChatSummary(
-                channel.google_chat_webhook_url_enc,
-                googleChatSummary,
-              );
-            } else {
-              if (!channel.slack_bot_token_enc || !channel.slack_channel_id)
-                continue;
-              const token = this.encryption.decrypt(
-                channel.slack_bot_token_enc,
-              );
-              const slack = new WebClient(token);
-              await slack.filesUploadV2({
-                channel_id: channel.slack_channel_id,
-                file: pdfBuffer,
-                filename,
-                title: `Security Report ${fmt(now)}`,
-                initial_comment: initialComment,
-              });
-            }
-            this.logger.log(
-              `Security report sent to channel "${channel.name}"`,
-            );
-          } catch (err) {
-            this.logger.error(
-              `Failed to send security report to "${channel.name}": ${err}`,
-            );
-          }
+        const delivery = await this.deliverReportToChannels({
+          channels,
+          eventType: "security.report",
+          filename,
+          title: `Security Report ${fmt(now)}`,
+          pdfBuffer,
+          slackSummary: initialComment,
+          googleChatSummary,
+          webhookPayload: {
+            scopeLabel,
+            driveLink,
+            scansIncluded: scans.length,
+            acknowledgedCount: ackCount,
+            findings: {
+              critical: criticalCount,
+              high: highCount,
+              medium: mediumCount,
+            },
+          },
+          executionLogs,
+        });
+
+        if (delivery.sentCount === 0) {
+          throw new Error(
+            `Failed to deliver security report to any channel: ${delivery.failures.join("; ")}`,
+          );
+        }
+        if (delivery.failures.length > 0) {
+          partialWarning = `Partial delivery (${delivery.sentCount}/${channels.length} sent); failed: ${delivery.failures.join("; ")}`;
         }
       }
 
       await this.prisma.jobExecution.update({
         where: { id: execution.id },
-        data: { status: "completed", progress: 100, completed_at: new Date() },
+        data: {
+          status: "completed",
+          progress: 100,
+          last_error: partialWarning,
+          execution_log: executionLogs as unknown as never,
+          completed_at: new Date(),
+        },
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -1150,6 +1258,7 @@ export class ReportProcessor extends WorkerHost {
           data: {
             status: "failed",
             last_error: msg,
+            execution_log: executionLogs as unknown as never,
             progress: 0,
             completed_at: new Date(),
           },
@@ -1204,6 +1313,153 @@ export class ReportProcessor extends WorkerHost {
     }
   }
 
+  private async deliverReportToChannels(opts: {
+    channels: Array<{
+      id: bigint;
+      name: string;
+      type: string;
+      slack_bot_token_enc: string | null;
+      slack_channel_id: string | null;
+      google_chat_webhook_url_enc: string | null;
+      webhook_url_enc?: string | null;
+      webhook_secret_enc?: string | null;
+    }>;
+    eventType: string;
+    filename: string;
+    title: string;
+    pdfBuffer: Buffer;
+    slackSummary: string;
+    googleChatSummary: string;
+    webhookPayload: Record<string, unknown>;
+    executionLogs: Array<{
+      timestamp: string;
+      step: string;
+      level: "info" | "warn" | "error";
+      detail?: string;
+    }>;
+  }): Promise<{ sentCount: number; failures: string[] }> {
+    const failures: string[] = [];
+    let sentCount = 0;
+    let slackClientCtor:
+      | (typeof import("@slack/web-api"))["WebClient"]
+      | undefined;
+
+    for (const channel of opts.channels) {
+      try {
+        if (channel.type === "google_chat") {
+          await this.sendGoogleChatSummary(
+            channel.google_chat_webhook_url_enc,
+            opts.googleChatSummary,
+          );
+        } else if (channel.type === "webhook") {
+          await this.sendWebhookSummary(
+            channel,
+            opts.eventType,
+            opts.webhookPayload,
+          );
+        } else {
+          if (!channel.slack_bot_token_enc || !channel.slack_channel_id) {
+            throw new Error("Missing Slack bot token or channel ID");
+          }
+          if (!slackClientCtor) {
+            ({ WebClient: slackClientCtor } = await import("@slack/web-api"));
+          }
+          const token = this.encryption.decrypt(channel.slack_bot_token_enc);
+          const slack = new slackClientCtor(token);
+          await slack.filesUploadV2({
+            channel_id: channel.slack_channel_id,
+            file: opts.pdfBuffer,
+            filename: opts.filename,
+            title: opts.title,
+            initial_comment: opts.slackSummary,
+          });
+        }
+
+        sentCount += 1;
+        this.logger.log(`Report sent to channel "${channel.name}"`);
+        opts.executionLogs.push({
+          timestamp: new Date().toISOString(),
+          step: `Delivered report to ${channel.type} channel "${channel.name}"`,
+          level: "info",
+        });
+
+        await this.prisma.notificationLog
+          ?.create({
+            data: {
+              channel_id: channel.id,
+              event_type: opts.eventType,
+              payload: opts.webhookPayload as Record<string, never>,
+              status: "sent",
+              error: null,
+            },
+          })
+          .catch(() => {});
+      } catch (err: unknown) {
+        const reason = err instanceof Error ? err.message : String(err);
+        failures.push(`${channel.name} (${channel.type}): ${reason}`);
+        this.logger.error(
+          `Failed to send report to "${channel.name}": ${reason}`,
+        );
+        opts.executionLogs.push({
+          timestamp: new Date().toISOString(),
+          step: `Delivery failed for ${channel.type} channel "${channel.name}"`,
+          level: "error",
+          detail: reason,
+        });
+
+        await this.prisma.notificationLog
+          ?.create({
+            data: {
+              channel_id: channel.id,
+              event_type: opts.eventType,
+              payload: opts.webhookPayload as Record<string, never>,
+              status: "failed",
+              error: reason,
+            },
+          })
+          .catch(() => {});
+      }
+    }
+
+    return { sentCount, failures };
+  }
+
+  private async sendWebhookSummary(
+    channel: {
+      webhook_url_enc?: string | null;
+      webhook_secret_enc?: string | null;
+    },
+    eventType: string,
+    payload: Record<string, unknown>,
+  ) {
+    if (!channel.webhook_url_enc) {
+      throw new Error("Missing webhook URL");
+    }
+
+    const webhookUrl = this.encryption.decrypt(channel.webhook_url_enc);
+    const secret = channel.webhook_secret_enc
+      ? this.encryption.decrypt(channel.webhook_secret_enc)
+      : null;
+
+    const { body, headers } = buildWebhookRequest({
+      event: eventType,
+      payload,
+      signBody: secret
+        ? (rawBody) => createHmac("sha256", secret).update(rawBody).digest("hex")
+        : undefined,
+    });
+
+    const res = await fetch(webhookUrl, {
+      method: "POST",
+      headers,
+      body,
+    });
+    if (!res.ok) {
+      const respBody = await res.text().catch(() => "");
+      throw new Error(`Webhook returned ${res.status}: ${respBody}`);
+    }
+  }
+
   private async sendGoogleChatSummary(
     webhookUrlEnc: string | null,
     text: string,
@@ -1230,6 +1486,7 @@ export class ReportProcessor extends WorkerHost {
     backups: BackupRow[],
     monitors: MonitorRow[],
     servers: ServerRow[] = [],
+    backupSummary?: BackupPeriodSummary,
   ): Promise<Buffer> {
     const printer = new PdfPrinter(FONTS, undefined, NOOP_RESOLVER);
     const docDef = buildDocDef(
@@ -1239,6 +1496,7 @@ export class ReportProcessor extends WorkerHost {
       backups,
       monitors,
       servers,
+      backupSummary,
     );
     const doc = await printer.createPdfKitDocument(docDef);
 

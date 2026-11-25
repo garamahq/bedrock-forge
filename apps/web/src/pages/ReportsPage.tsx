@@ -38,10 +38,11 @@ import {
 interface ReportChannel {
   id: number;
   name: string;
-  type: "slack" | "google_chat";
+  type: "slack" | "google_chat" | "webhook";
   slack_channel_id: string | null;
   has_token: boolean;
   has_webhook: boolean;
+  has_webhook_url?: boolean;
   active: boolean;
   subscribed: boolean;
 }
@@ -417,9 +418,11 @@ export function ReportsPage() {
                   <p className="text-xs text-muted-foreground">
                     {ch.type === "google_chat"
                       ? "Google Chat"
-                      : ch.slack_channel_id
-                        ? `#${ch.slack_channel_id}`
-                        : "Slack"}
+                      : ch.type === "webhook"
+                        ? "Webhook"
+                        : ch.slack_channel_id
+                          ? `#${ch.slack_channel_id}`
+                          : "Slack"}
                   </p>
                 </div>
                 {ch.type === "slack" && !ch.has_token && (
@@ -430,6 +433,11 @@ export function ReportsPage() {
                 {ch.type === "google_chat" && !ch.has_webhook && (
                   <Badge variant="warning" className="text-xs shrink-0">
                     No webhook
+                  </Badge>
+                )}
+                {ch.type === "webhook" && !ch.has_webhook_url && (
+                  <Badge variant="warning" className="text-xs shrink-0">
+                    No webhook URL
                   </Badge>
                 )}
               </div>
