@@ -202,10 +202,15 @@ export class MonitorProcessor extends WorkerHost {
     let keywordFound: boolean | null = null;
 
     try {
-      const hostname = new URL(url).hostname;
+      const parsedUrl = new URL(url);
+      const sslPort = parsedUrl.port ? Number(parsedUrl.port) : 443;
       const [ssl, dns_] = await Promise.all([
-        monitor.check_ssl ? this.checkSsl(hostname) : Promise.resolve(null),
-        monitor.check_dns ? this.checkDns(hostname) : Promise.resolve(null),
+        monitor.check_ssl && parsedUrl.protocol === "https:"
+          ? this.checkSsl(parsedUrl.hostname, sslPort)
+          : Promise.resolve(null),
+        monitor.check_dns
+          ? this.checkDns(parsedUrl.hostname)
+          : Promise.resolve(null),
       ]);
       sslResult = ssl;
       dnsResolves = dns_;
@@ -213,7 +218,7 @@ export class MonitorProcessor extends WorkerHost {
       this.logger.warn(`Monitor ${monitorId}: advanced check error: ${err}`);
     }
 
-    if (monitor.check_keyword && monitor.keyword && responseBody) {
+    if (monitor.check_keyword && monitor.keyword && isUp) {
       keywordFound = responseBody.includes(monitor.keyword);
     }
 
@@ -257,14 +262,14 @@ export class MonitorProcessor extends WorkerHost {
         last_status: statusCode,
         last_response_ms: responseTimeMs,
         uptime_pct: uptime,
-        // Cache latest advanced check results on the monitor
-        ...(sslResult !== null && {
-          ssl_expires_at: sslResult.expiresAt,
-          ssl_issuer: sslResult.issuer,
-          ssl_days_remaining: sslResult.daysRemaining,
+        // Cache latest advanced check results on the monitor (clear stale values when check fails)
+        ...(monitor.check_ssl && {
+          ssl_expires_at: sslResult ? sslResult.expiresAt : null,
+          ssl_issuer: sslResult ? sslResult.issuer : null,
+          ssl_days_remaining: sslResult ? sslResult.daysRemaining : null,
         }),
         ...(dnsResolves !== null && { dns_resolves: dnsResolves }),
-        ...(keywordFound !== null && { keyword_found: keywordFound }),
+        ...(monitor.check_keyword && { keyword_found: keywordFound }),
       },
     });
 
@@ -790,12 +795,15 @@ export class MonitorProcessor extends WorkerHost {
     });
   }
 
-  private checkSsl(hostname: string): Promise<SslCheckResult | null> {
+  private checkSsl(
+    hostname: string,
+    port = 443,
+  ): Promise<SslCheckResult | null> {
     return new Promise((resolve) => {
       const socket = tls.connect(
         {
           host: hostname,
-          port: 443,
+          port,
           servername: hostname,
           rejectUnauthorized: false,
         },
@@ -833,12 +841,13 @@ export class MonitorProcessor extends WorkerHost {
   }
 
   private async checkDns(hostname: string): Promise<boolean> {
-    try {
-      const addresses = await dns.promises.resolve4(hostname);
-      return addresses.length > 0;
-    } catch {
-      return false;
-    }
+    const [v4Result, v6Result] = await Promise.allSettled([
+      dns.promises.resolve4(hostname),
+      dns.promises.resolve6(hostname),
+    ]);
+    const hasV4 = v4Result.status === "fulfilled" && v4Result.value.length > 0;
+    const hasV6 = v6Result.status === "fulfilled" && v6Result.value.length > 0;
+    return hasV4 || hasV6;
   }
 
   private async dispatchNotification(

@@ -1,7 +1,18 @@
 import { Test } from "@nestjs/testing";
 import { getQueueToken } from "@nestjs/bullmq";
 import { ConfigService } from "@nestjs/config";
+import * as dns from "dns";
+import * as tls from "tls";
+import { EventEmitter } from "events";
 import { MonitorProcessor } from "./monitor.processor";
+
+jest.mock("tls", () => {
+  const actual = jest.requireActual("tls");
+  return {
+    ...actual,
+    connect: jest.fn(),
+  };
+});
 import { PrismaService } from "../../prisma/prisma.service";
 import { EncryptionService } from "../../encryption/encryption.service";
 import { JOB_TYPES, QUEUES } from "@bedrock-forge/shared";
@@ -584,5 +595,293 @@ describe("MonitorProcessor", () => {
         }),
       }),
     );
+  });
+
+  describe("DNS monitoring (#99)", () => {
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it.each([
+      {
+        label: "A records only",
+        v4: ["203.0.113.10"],
+        v6: new Error("ENODATA"),
+        expectedDns: true,
+      },
+      {
+        label: "AAAA records only (IPv6-only)",
+        v4: new Error("ENODATA"),
+        v6: ["2001:db8::1"],
+        expectedDns: true,
+      },
+      {
+        label: "both A and AAAA records",
+        v4: ["203.0.113.10"],
+        v6: ["2001:db8::1"],
+        expectedDns: true,
+      },
+      {
+        label: "neither A nor AAAA records",
+        v4: new Error("ENOTFOUND"),
+        v6: new Error("ENOTFOUND"),
+        expectedDns: false,
+      },
+    ])(
+      "evaluates $label as dns_resolves=$expectedDns",
+      async ({ v4, v6, expectedDns }) => {
+        const monitor = baseMonitor({
+          check_dns: true,
+          environment: { id: BigInt(5), url: "https://ipv6.example.test" },
+        });
+        prisma.monitor.findUnique.mockResolvedValue(monitor);
+        jest
+          .spyOn(processor as any, "checkHttp")
+          .mockResolvedValue({ statusCode: 200, body: "ok", responseMs: 50 });
+
+        const resolve4Spy = jest
+          .spyOn(dns.promises, "resolve4")
+          .mockImplementation(() =>
+            v4 instanceof Error ? Promise.reject(v4) : Promise.resolve(v4),
+          );
+        const resolve6Spy = jest
+          .spyOn(dns.promises, "resolve6")
+          .mockImplementation(() =>
+            v6 instanceof Error ? Promise.reject(v6) : Promise.resolve(v6),
+          );
+
+        await processor.process({
+          id: `dns-${expectedDns}`,
+          data: { monitorId: 1 },
+        } as any);
+
+        expect(resolve4Spy).toHaveBeenCalledWith("ipv6.example.test");
+        expect(resolve6Spy).toHaveBeenCalledWith("ipv6.example.test");
+        expect(prisma.monitorResult.create).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: expect.objectContaining({ dns_resolves: expectedDns }),
+          }),
+        );
+        expect(prisma.monitor.update).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: expect.objectContaining({ dns_resolves: expectedDns }),
+          }),
+        );
+        if (expectedDns) {
+          expect(notifQueue.add).not.toHaveBeenCalledWith(
+            expect.any(String),
+            expect.objectContaining({ eventType: "monitor.dns_failed" }),
+            expect.any(Object),
+          );
+        } else {
+          expect(notifQueue.add).toHaveBeenCalledWith(
+            expect.any(String),
+            expect.objectContaining({ eventType: "monitor.dns_failed" }),
+            expect.any(Object),
+          );
+        }
+      },
+    );
+  });
+
+  describe("SSL certificate monitoring (#98)", () => {
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    function mockTlsConnect(cert: Record<string, unknown> | null) {
+      const connectMock = tls.connect as unknown as jest.Mock;
+      connectMock.mockReset();
+      connectMock.mockImplementation((...args: unknown[]) => {
+        const cb = args.find((arg) => typeof arg === "function") as
+          | (() => void)
+          | undefined;
+        const socket = new EventEmitter() as unknown as tls.TLSSocket;
+        (socket as unknown as { destroy: jest.Mock }).destroy = jest.fn();
+        (socket as unknown as { setTimeout: jest.Mock }).setTimeout = jest.fn();
+        (socket as unknown as { getPeerCertificate: jest.Mock }).getPeerCertificate =
+          jest.fn().mockReturnValue(cert ?? {});
+        queueMicrotask(() => {
+          if (cert) {
+            cb?.();
+          } else {
+            socket.emit("error", new Error("ECONNREFUSED"));
+          }
+        });
+        return socket;
+      });
+      return connectMock;
+    }
+
+    it("uses default port 443 when HTTPS URL omits port", async () => {
+      const monitor = baseMonitor({
+        check_ssl: true,
+        environment: { id: BigInt(5), url: "https://ssl.example.test" },
+      });
+      prisma.monitor.findUnique.mockResolvedValue(monitor);
+      jest
+        .spyOn(processor as any, "checkHttp")
+        .mockResolvedValue({ statusCode: 200, body: "ok", responseMs: 25 });
+      const futureDate = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+      const tlsSpy = mockTlsConnect({
+        valid_to: futureDate.toUTCString(),
+        issuer: { O: "Let's Encrypt" },
+      });
+
+      await processor.process({
+        id: "ssl-default-port",
+        data: { monitorId: 1 },
+      } as any);
+
+      expect(tlsSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          host: "ssl.example.test",
+          port: 443,
+          servername: "ssl.example.test",
+        }),
+        expect.any(Function),
+      );
+      expect(prisma.monitor.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            ssl_issuer: "Let's Encrypt",
+            ssl_days_remaining: expect.any(Number),
+          }),
+        }),
+      );
+    });
+
+    it("uses custom port from HTTPS URL and clears stale SSL data on TLS failure", async () => {
+      const monitor = baseMonitor({
+        check_ssl: true,
+        ssl_days_remaining: 45,
+        ssl_issuer: "Old Issuer",
+        ssl_expires_at: new Date(),
+        environment: { id: BigInt(5), url: "https://ssl.example.test:8443" },
+      });
+      prisma.monitor.findUnique.mockResolvedValue(monitor);
+      jest
+        .spyOn(processor as any, "checkHttp")
+        .mockResolvedValue({ statusCode: 200, body: "ok", responseMs: 25 });
+      const tlsSpy = mockTlsConnect(null);
+
+      await processor.process({
+        id: "ssl-custom-port-fail",
+        data: { monitorId: 1 },
+      } as any);
+
+      expect(tlsSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          host: "ssl.example.test",
+          port: 8443,
+          servername: "ssl.example.test",
+        }),
+        expect.any(Function),
+      );
+      expect(prisma.monitor.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            ssl_expires_at: null,
+            ssl_issuer: null,
+            ssl_days_remaining: null,
+          }),
+        }),
+      );
+    });
+  });
+
+  describe("Keyword monitoring on empty HTTP 200 body (#97)", () => {
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it("marks keyword_found=false on empty HTTP 200, null on network error, and restores true when content returns", async () => {
+      jest.spyOn(global, "setTimeout").mockImplementation((fn: TimerHandler) => {
+        if (typeof fn === "function") fn();
+        return 0 as unknown as ReturnType<typeof setTimeout>;
+      });
+
+      const monitor = baseMonitor({
+        check_keyword: true,
+        keyword: "Bedrock Ready",
+        environment: { id: BigInt(5), url: "https://kw.example.test" },
+      });
+      prisma.monitor.findUnique.mockResolvedValue(monitor);
+
+      // 1. Page contains keyword
+      const checkHttpSpy = jest
+        .spyOn(processor as any, "checkHttp")
+        .mockResolvedValueOnce({
+          statusCode: 200,
+          body: "<html>Bedrock Ready</html>",
+          responseMs: 30,
+        });
+
+      await processor.process({ id: "kw-1", data: { monitorId: 1 } } as any);
+      expect(prisma.monitor.update).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ keyword_found: true }),
+        }),
+      );
+
+      // 2. HTTP 200 with empty body -> must mark keyword_found=false and alert
+      checkHttpSpy.mockResolvedValueOnce({
+        statusCode: 200,
+        body: "",
+        responseMs: 30,
+      });
+      await processor.process({ id: "kw-2", data: { monitorId: 1 } } as any);
+      expect(prisma.monitorResult.create).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            is_up: true,
+            status_code: 200,
+            keyword_found: false,
+          }),
+        }),
+      );
+      expect(prisma.monitor.update).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ keyword_found: false }),
+        }),
+      );
+      expect(notifQueue.add).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ eventType: "monitor.keyword_missing" }),
+        expect.any(Object),
+      );
+
+      // 3. Network failure -> keyword_found=null (not false)
+      checkHttpSpy
+        .mockRejectedValueOnce(new Error("ECONNREFUSED"))
+        .mockRejectedValueOnce(new Error("ECONNREFUSED"));
+      await processor.process({ id: "kw-3", data: { monitorId: 1 } } as any);
+      expect(prisma.monitorResult.create).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ is_up: false, status_code: 0 }),
+        }),
+      );
+      expect(
+        prisma.monitorResult.create.mock.calls.at(-1)[0].data.keyword_found,
+      ).toBeUndefined();
+      expect(prisma.monitor.update).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ keyword_found: null }),
+        }),
+      );
+
+      // 4. Content restored
+      checkHttpSpy.mockResolvedValueOnce({
+        statusCode: 200,
+        body: "<html>Bedrock Ready again</html>",
+        responseMs: 25,
+      });
+      await processor.process({ id: "kw-4", data: { monitorId: 1 } } as any);
+      expect(prisma.monitor.update).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ keyword_found: true }),
+        }),
+      );
+    });
   });
 });
