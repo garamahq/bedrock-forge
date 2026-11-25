@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { clearSessionQueryCache } from "@/lib/query-client";
 
 interface User {
   id: number;
@@ -41,12 +42,19 @@ try {
   // Ignored in non-browser environments
 }
 
-export const useAuthStore = create<AuthState>()((set) => ({
+export const useAuthStore = create<AuthState>()((set, get) => ({
   user: null,
   accessToken: null,
   setAccessToken: (accessToken) => set({ accessToken }),
-  setUser: (user) => set({ user }),
+  setUser: (user) => {
+    const prevUser = get().user;
+    if (prevUser !== null && prevUser.id !== user.id) {
+      clearSessionQueryCache();
+    }
+    set({ user });
+  },
   logout: () => {
     set({ user: null, accessToken: null });
+    clearSessionQueryCache();
   },
 }));

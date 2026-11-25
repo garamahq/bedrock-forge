@@ -151,18 +151,20 @@ interface InboxItem {
 
 function NotificationBell() {
   const queryClient = useQueryClient();
+  const userId = useAuthStore((s) => s.user?.id ?? null);
   const [open, setOpen] = useState(false);
 
   const { data: unreadData } = useQuery<{ count: number }>({
-    queryKey: ["notifications-unread"],
+    queryKey: ["notifications-unread", userId],
     queryFn: () => api.get("/notifications/inbox/unread-count"),
+    enabled: userId !== null,
     refetchInterval: 30_000,
   });
 
   const { data: inboxData } = useQuery<{ data: InboxItem[] }>({
-    queryKey: ["notifications-inbox-preview"],
+    queryKey: ["notifications-inbox-preview", userId],
     queryFn: () => api.get("/notifications/inbox?limit=10"),
-    enabled: open,
+    enabled: open && userId !== null,
     staleTime: 10_000,
   });
 
@@ -170,16 +172,16 @@ function NotificationBell() {
     mutationFn: () => api.post("/notifications/inbox/read-all", {}),
     onSuccess: () => {
       void queryClient.invalidateQueries({
-        queryKey: ["notifications-unread"],
+        queryKey: ["notifications-unread", userId],
       });
       void queryClient.invalidateQueries({
-        queryKey: ["notifications-inbox-preview"],
+        queryKey: ["notifications-inbox-preview", userId],
       });
     },
   });
 
-  const unread = unreadData?.count ?? 0;
-  const items = inboxData?.data ?? [];
+  const unread = userId !== null ? (unreadData?.count ?? 0) : 0;
+  const items = userId !== null ? (inboxData?.data ?? []) : [];
 
   const relTime = (iso: string) => {
     const diff = Date.now() - new Date(iso).getTime();

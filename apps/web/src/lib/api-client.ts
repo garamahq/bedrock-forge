@@ -1,35 +1,21 @@
 import { isTokenExpired, useAuthStore } from "@/store/auth.store";
+import { ApiError, type ApiErrorDetails } from "./api-error";
 import { updateSocketToken } from "./websocket";
+
+export { ApiError, type ApiErrorDetails };
 
 const BASE = "/api";
 
-export type ApiErrorDetails =
-  | Record<string, unknown>
-  | unknown[]
-  | string
-  | null;
+const NO_REFRESH_AUTH_PATHS = new Set([
+  "/auth/login",
+  "/auth/refresh",
+  "/auth/logout",
+]);
 
-export class ApiError extends Error {
-  readonly status: number;
-  readonly statusText: string;
-  readonly code?: string;
-  readonly details?: ApiErrorDetails;
-
-  constructor(params: {
-    message: string;
-    status: number;
-    statusText: string;
-    code?: string;
-    details?: ApiErrorDetails;
-  }) {
-    super(params.message);
-    this.name = "ApiError";
-    this.status = params.status;
-    this.statusText = params.statusText;
-    this.code = params.code;
-    this.details = params.details;
-  }
-}
+const CREDENTIAL_VERIFICATION_PATHS = new Set([
+  "/auth/mfa/disable",
+  "/auth/change-password",
+]);
 
 async function parseErrorResponse(res: Response): Promise<{
   message: string;
@@ -115,11 +101,17 @@ export async function apiFetch<T>(
 ): Promise<T> {
   let { accessToken } = useAuthStore.getState();
 
+  const basePath = path.split("?")[0];
+
   // Pre-flight: if we have an access token that is already expired, attempt a
   // silent refresh before the first network call to avoid an unnecessary 401
-  // round-trip. Skip this entirely when there is no token at all (e.g. the
-  // /auth/login request made by a logged-out user).
-  if (accessToken !== null && isTokenExpired(accessToken)) {
+  // round-trip. Skip this entirely for auth login/refresh/logout calls or when
+  // no access token exists on the client.
+  if (
+    !NO_REFRESH_AUTH_PATHS.has(basePath) &&
+    accessToken !== null &&
+    isTokenExpired(accessToken)
+  ) {
     const newToken = await refreshTokens();
     if (!newToken) {
       throw new ApiError({
@@ -145,7 +137,21 @@ export async function apiFetch<T>(
 
   let res = await doFetch(accessToken);
 
-  if (res.status === 401) {
+  if (res.status === 401 && !NO_REFRESH_AUTH_PATHS.has(basePath)) {
+    if (CREDENTIAL_VERIFICATION_PATHS.has(basePath)) {
+      const err = await parseErrorResponse(res);
+      const isGenericJwtRejection = err.message === "Unauthorized" && !err.code;
+      if (!isGenericJwtRejection) {
+        throw new ApiError({
+          message: err.message,
+          status: res.status,
+          statusText: res.statusText,
+          code: err.code,
+          details: err.details,
+        });
+      }
+    }
+
     const newToken = await refreshTokens();
     if (!newToken) {
       throw new ApiError({
