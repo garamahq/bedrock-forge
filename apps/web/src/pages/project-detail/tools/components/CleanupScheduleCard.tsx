@@ -113,7 +113,7 @@ export function CleanupScheduleCard({
                 </Select>
               </div>
               <div className="space-y-1">
-                <Label className="text-xs">Time (hour : minute)</Label>
+                <Label className="text-xs">Time (UTC, hour : minute)</Label>
                 <div className="flex items-center gap-1">
                   <Input
                     type="number"
@@ -227,10 +227,20 @@ export function CleanupScheduleCard({
               />
             </div>
 
+            {cleanupSchedule?.unsupported_frequency_reason && (
+              <p className="text-xs text-destructive">
+                {cleanupSchedule.unsupported_frequency_reason}
+              </p>
+            )}
+
             {cleanupSchedule?.last_run_at && (
               <p className="text-xs text-muted-foreground">
                 Last run:{" "}
-                {new Date(cleanupSchedule.last_run_at).toLocaleString()}
+                {new Date(cleanupSchedule.last_run_at)
+                  .toISOString()
+                  .replace("T", " ")
+                  .slice(0, 16)}{" "}
+                UTC
               </p>
             )}
 
