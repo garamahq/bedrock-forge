@@ -5,6 +5,7 @@ import {
 } from "@nestjs/common";
 import { InjectQueue } from "@nestjs/bullmq";
 import { Queue } from "bullmq";
+import { createHmac } from "crypto";
 import { NotificationsRepository } from "./notifications.repository";
 import { CreateChannelDto, UpdateChannelDto } from "./dto/notification.dto";
 import { EncryptionService } from "../../common/encryption/encryption.service";
@@ -12,6 +13,7 @@ import {
   QUEUES,
   JOB_TYPES,
   NotificationEventType,
+  buildWebhookRequest,
 } from "@bedrock-forge/shared";
 import { normalizePage, normalizePageSize } from "../../common/pagination";
 
@@ -188,14 +190,26 @@ export class NotificationsService {
           return { ok: false, error: "Missing webhook URL", message: "Missing webhook URL" };
         }
         const webhookUrl = this.encryption.decrypt(webhookUrlEnc);
+        const webhookSecretEnc = (ch as Record<string, unknown>)
+          .webhook_secret_enc as string | null | undefined;
+        const secret = webhookSecretEnc
+          ? this.encryption.decrypt(webhookSecretEnc)
+          : null;
+        const { body, headers } = buildWebhookRequest({
+          event: "test",
+          payload: { message: `Test from channel ${ch.name}` },
+          signBody: secret
+            ? (rawBody) => createHmac("sha256", secret).update(rawBody).digest("hex")
+            : undefined,
+        });
         const res = await fetch(webhookUrl, {
           method: "POST",
-          headers: { "Content-Type": "application/json", "X-Forge-Event": "test" },
-          body: JSON.stringify({ event: "test", payload: { message: `Test from channel ${ch.name}` }, timestamp: new Date().toISOString() }),
+          headers,
+          body,
         });
         if (!res.ok) {
-          const body = await res.text().catch(() => "");
-          throw new Error(`Webhook returned ${res.status}: ${body}`);
+          const respBody = await res.text().catch(() => "");
+          throw new Error(`Webhook returned ${res.status}: ${respBody}`);
         }
       } else {
         const { WebClient } = await import("@slack/web-api");
