@@ -87,6 +87,20 @@ export class CreateBedrockProcessor extends WorkerHost {
       await job.updateProgress({ value: 5, step: "Connected to server" });
 
       // ── 1. CyberPanel provisioning ───────────────────────────────────
+      let resolvedCyberpanelDbPassword = cyberpanel?.dbPassword;
+      if (cyberpanel && !resolvedCyberpanelDbPassword) {
+        const storedCreds = await this.prisma.wpDbCredentials.findUnique({
+          where: { environment_id: BigInt(environmentId) },
+        });
+        if (!storedCreds) {
+          throw new Error(
+            `Environment ${environmentId} has no stored DB credentials for provisioning`,
+          );
+        }
+        resolvedCyberpanelDbPassword = this.encryption.decrypt(
+          storedCreds.db_password_encrypted,
+        );
+      }
 
       if (cyberpanel) {
         domain = cyberpanel.domain;
@@ -135,7 +149,7 @@ export class CreateBedrockProcessor extends WorkerHost {
             databaseWebsite: domain,
             dbName: cyberpanel.dbName,
             dbUsername: cyberpanel.dbUser,
-            dbPassword: cyberpanel.dbPassword,
+            dbPassword: resolvedCyberpanelDbPassword ?? "",
           });
         } catch (dbApiErr) {
           this.logger.warn(
@@ -160,7 +174,7 @@ export class CreateBedrockProcessor extends WorkerHost {
 
           const dbName = cyberpanel.dbName; // validated above — safe for backtick quoting
           const dbUser = cyberpanel.dbUser; // validated above
-          const dbPassword = escapeMysql(cyberpanel.dbPassword);
+          const dbPassword = escapeMysql(resolvedCyberpanelDbPassword ?? "");
           const sqlQuery = `CREATE DATABASE IF NOT EXISTS \`${dbName}\`; ` +
             `CREATE USER IF NOT EXISTS '${dbUser}'@'localhost' IDENTIFIED BY '${dbPassword}'; ` +
             `GRANT ALL PRIVILEGES ON \`${dbName}\`.* TO '${dbUser}'@'localhost'; ` +
@@ -243,7 +257,7 @@ export class CreateBedrockProcessor extends WorkerHost {
 
         const dbName = cyberpanel?.dbName ?? srcCreds.dbName;
         const dbUser = cyberpanel?.dbUser ?? srcCreds.dbUser;
-        const dbPassword = cyberpanel?.dbPassword ?? srcCreds.dbPassword;
+        const dbPassword = resolvedCyberpanelDbPassword ?? srcCreds.dbPassword;
         const dbHost = "localhost";
 
         const tgtMycnf = await createRemoteMyCnf(
@@ -439,7 +453,7 @@ export class CreateBedrockProcessor extends WorkerHost {
 
         const dbName = cyberpanel?.dbName ?? "wordpress";
         const dbUser = cyberpanel?.dbUser ?? "wordpress";
-        const dbPassword = cyberpanel?.dbPassword ?? "";
+        const dbPassword = resolvedCyberpanelDbPassword ?? "";
         const dbHost = cyberpanel?.dbHost ?? "localhost";
 
         // Install Composer if missing

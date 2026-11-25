@@ -561,6 +561,12 @@ export class ProjectsRepository {
     jobType: string;
     notes?: string;
     links?: Prisma.InputJsonValue;
+    dbCredentials?: {
+      dbName: string;
+      dbUser: string;
+      dbPassword: string;
+      dbHost: string;
+    };
   }) {
     return this.prisma.$transaction(async (tx) => {
       const project = await tx.project.create({
@@ -583,6 +589,19 @@ export class ProjectsRepository {
           root_path: data.rootPath,
         },
       });
+      if (data.dbCredentials) {
+        await tx.wpDbCredentials.create({
+          data: {
+            environment_id: environment.id,
+            db_name_encrypted: this.enc.encrypt(data.dbCredentials.dbName),
+            db_user_encrypted: this.enc.encrypt(data.dbCredentials.dbUser),
+            db_password_encrypted: this.enc.encrypt(
+              data.dbCredentials.dbPassword,
+            ),
+            db_host_encrypted: this.enc.encrypt(data.dbCredentials.dbHost),
+          },
+        });
+      }
       const jobExecution = await tx.jobExecution.create({
         data: {
           queue_name: data.queueName,

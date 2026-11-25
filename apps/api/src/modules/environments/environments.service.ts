@@ -198,7 +198,15 @@ export class EnvironmentsService {
       root_path: rootPath,
     });
 
-    // 2. Create the Job Execution record
+    // Store encrypted DB credentials in WpDbCredentials so JobExecution logs and queue payloads never hold plaintext secrets.
+    await this.repo.upsertDbCredentials(env.id, {
+      dbName,
+      dbUser,
+      dbPassword,
+      dbHost,
+    });
+
+    // 2. Create the Job Execution record (omit dbPassword from operational log payload)
     const jobExecution = await this.repo.createJobExecution({
       queue_name: QUEUES.PROJECTS,
       bull_job_id: "0",
@@ -212,7 +220,6 @@ export class EnvironmentsService {
           domain,
           dbName,
           dbUser,
-          dbPassword,
           dbHost,
           phpVersion,
           adminEmail: admin_email,
@@ -221,7 +228,7 @@ export class EnvironmentsService {
       },
     });
 
-    // 3. Enqueue the provisioning job
+    // 3. Enqueue the provisioning job (worker decrypts password from WpDbCredentials)
     const job = await this.projectsQueue.add(
       JOB_TYPES.PROJECT_CREATE_BEDROCK,
       {
@@ -231,7 +238,6 @@ export class EnvironmentsService {
           domain,
           dbName,
           dbUser,
-          dbPassword,
           dbHost,
           phpVersion,
           adminEmail: admin_email,

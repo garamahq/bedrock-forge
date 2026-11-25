@@ -27,6 +27,7 @@ function makeRepo() {
     findByProject: jest.fn(),
     findById: jest.fn(),
     create: jest.fn(),
+    createEnvironment: jest.fn(),
     update: jest.fn(),
     delete: jest.fn(),
     getDbCredentials: jest.fn(),
@@ -680,6 +681,43 @@ describe("EnvironmentsService", () => {
 
       expect(res.publicKey).toContain("ssh-ed25519");
       expect(res.isGenerated).toBe(false);
+    });
+  });
+
+  describe("createFull credential hygiene (#108)", () => {
+    it("stores encrypted DB credentials and omits dbPassword from JobExecution log and queue payload", async () => {
+      const env = makeEnv({ id: BigInt(42) });
+      repo.createEnvironment.mockResolvedValue(env);
+      repo.upsertDbCredentials.mockResolvedValue({});
+      repo.createJobExecution.mockResolvedValue({ id: BigInt(99) });
+      const projectsQueue = (svc as unknown as { projectsQueue: { add: jest.Mock } }).projectsQueue;
+
+      const syntheticPass = "syntHetic-Db-Pass-98765!";
+      await svc.createFull(10, {
+        server_id: 5,
+        domain: "secure-app.example.test",
+        admin_email: "admin@example.test",
+        db_name: "wp_sec",
+        db_user: "u_sec",
+        db_password: syntheticPass,
+        db_host: "localhost",
+      } as any);
+
+      expect(repo.upsertDbCredentials).toHaveBeenCalledWith(BigInt(42), {
+        dbName: "wp_sec",
+        dbUser: "u_sec",
+        dbPassword: syntheticPass,
+        dbHost: "localhost",
+      });
+
+      const execCall = repo.createJobExecution.mock.calls[0][0];
+      const serializedPayload = JSON.stringify(execCall.payload);
+      expect(serializedPayload).not.toContain(syntheticPass);
+      expect(serializedPayload).not.toContain("dbPassword");
+
+      const queueCall = projectsQueue.add.mock.calls[0][1];
+      expect(JSON.stringify(queueCall)).not.toContain(syntheticPass);
+      expect(JSON.stringify(queueCall)).not.toContain("dbPassword");
     });
   });
 });
