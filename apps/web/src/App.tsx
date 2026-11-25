@@ -6,6 +6,7 @@ import {
   Navigate,
   useNavigate,
 } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import { useAuthStore, isTokenExpired } from "@/store/auth.store";
 import { api, getValidAccessToken } from "@/lib/api-client";
 import { destroySocket } from "@/lib/websocket";
@@ -287,6 +288,26 @@ function SessionGuard() {
   return null;
 }
 
+/**
+ * Cancels and clears all cached queries on logout or authenticated user switch
+ * so stale account data is never shown to another user (#103).
+ */
+export function QuerySessionSync() {
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    return useAuthStore.subscribe((state, prev) => {
+      const signedOut = !state.accessToken && Boolean(prev.accessToken);
+      const userSwitched =
+        prev.user !== null && state.user?.id !== prev.user.id;
+      if (signedOut || userSwitched) {
+        void queryClient.cancelQueries();
+        queryClient.clear();
+      }
+    });
+  }, [queryClient]);
+  return null;
+}
+
 export default function App() {
   const [authReady, setAuthReady] = useState(false);
 
@@ -342,6 +363,7 @@ export default function App() {
 
   return (
     <ErrorBoundary>
+      <QuerySessionSync />
       <BrowserRouter>
         <SessionGuard />
         <Suspense
