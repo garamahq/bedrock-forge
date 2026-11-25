@@ -14,6 +14,12 @@ function makePrisma() {
     notificationLog: {
       create: jest.fn().mockResolvedValue({}),
     },
+    user: {
+      findMany: jest.fn().mockResolvedValue([]),
+    },
+    userNotification: {
+      createMany: jest.fn().mockResolvedValue({ count: 0 }),
+    },
   };
 }
 
@@ -22,7 +28,14 @@ function makeEncryption() {
 }
 
 function makeJob(name: string, data: object) {
-  return { name, data } as any;
+  const job = {
+    name,
+    data: { ...data },
+    updateData: jest.fn().mockImplementation(async (nextData: object) => {
+      job.data = nextData;
+    }),
+  };
+  return job as any;
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -84,7 +97,7 @@ describe("NotificationProcessor", () => {
       eventType: "backup.completed",
       payload: { environmentId: 1 },
     });
-    await processor.process(job);
+    await expect(processor.process(job)).rejects.toThrow(/no-token-channel/);
 
     expect(prisma.notificationLog.create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -239,6 +252,121 @@ describe("NotificationProcessor", () => {
       expect(message).toContain("Added: 1 | Modified: 2 | Deleted: 3");
       expect(message).toContain("/etc/ssh/sshd_config");
       expect(message).toContain("/var/www/site/wp-config.php");
+    });
+  });
+
+  describe("retry handling and per-recipient idempotency (#95)", () => {
+    const originalFetch = global.fetch;
+
+    afterEach(() => {
+      global.fetch = originalFetch;
+      jest.restoreAllMocks();
+    });
+
+    it("throws on transient failure and retries only failed channels without duplicating in-app alerts", async () => {
+      prisma.user.findMany.mockResolvedValue([{ id: BigInt(1) }]);
+      prisma.notificationChannel.findMany.mockResolvedValue([
+        {
+          id: BigInt(10),
+          name: "gchat-ok",
+          type: "google_chat",
+          slack_bot_token_enc: null,
+          slack_channel_id: null,
+          google_chat_webhook_url_enc: "enc-gchat",
+          webhook_url_enc: null,
+          webhook_secret_enc: null,
+          active: true,
+          events: ["backup.failed"],
+        },
+        {
+          id: BigInt(20),
+          name: "hook-flaky",
+          type: "webhook",
+          slack_bot_token_enc: null,
+          slack_channel_id: null,
+          google_chat_webhook_url_enc: null,
+          webhook_url_enc: "enc-hook",
+          webhook_secret_enc: null,
+          active: true,
+          events: ["backup.failed"],
+        },
+      ]);
+
+      encryption.decrypt.mockImplementation((v: string) =>
+        v === "enc-gchat"
+          ? "https://chat.example.test/ok"
+          : "https://hook.example.test/flaky",
+      );
+
+      const fetchMock = jest
+        .fn()
+        // Attempt 1: gchat succeeds, webhook fails with 503
+        .mockResolvedValueOnce({ ok: true } as Response)
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 503,
+          text: async () => "Service Unavailable",
+        } as Response)
+        // Attempt 2: only webhook is retried and succeeds
+        .mockResolvedValueOnce({ ok: true } as Response);
+      global.fetch = fetchMock;
+
+      const job = makeJob(JOB_TYPES.NOTIFICATION_SEND, {
+        eventType: "backup.failed",
+        payload: { environmentId: 1, error: "disk full" },
+      });
+
+      // Attempt 1 throws so BullMQ schedules retry
+      await expect(processor.process(job)).rejects.toThrow(/hook-flaky/);
+      expect(prisma.userNotification.createMany).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(job.data.inAppCreated).toBe(true);
+      expect(job.data.deliveredChannelIds).toEqual(["10"]);
+
+      // Attempt 2 completes cleanly without duplicating gchat or in-app notifications
+      await expect(processor.process(job)).resolves.toBeUndefined();
+      expect(prisma.userNotification.createMany).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(fetchMock.mock.calls[2][0]).toBe("https://hook.example.test/flaky");
+      expect(job.data.deliveredChannelIds).toEqual(["10", "20"]);
+    });
+
+    it("surfaces permanent failure when all channels continue failing", async () => {
+      prisma.notificationChannel.findMany.mockResolvedValue([
+        {
+          id: BigInt(30),
+          name: "always-down",
+          type: "webhook",
+          slack_bot_token_enc: null,
+          slack_channel_id: null,
+          google_chat_webhook_url_enc: null,
+          webhook_url_enc: "enc-down",
+          webhook_secret_enc: null,
+          active: true,
+          events: ["backup.completed"],
+        },
+      ]);
+      encryption.decrypt.mockReturnValue("https://hook.example.test/down");
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+        text: async () => "Internal Error",
+      } as Response);
+
+      const job = makeJob(JOB_TYPES.NOTIFICATION_SEND, {
+        eventType: "backup.completed",
+        payload: { environmentId: 1 },
+      });
+
+      await expect(processor.process(job)).rejects.toThrow(/always-down/);
+      expect(prisma.notificationLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            channel_id: BigInt(30),
+            status: "failed",
+          }),
+        }),
+      );
     });
   });
 });

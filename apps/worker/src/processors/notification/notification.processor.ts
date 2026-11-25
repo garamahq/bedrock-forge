@@ -1,13 +1,23 @@
 import { Processor, WorkerHost } from "@nestjs/bullmq";
 import { Logger } from "@nestjs/common";
 import { Job } from "bullmq";
+import { createHmac } from "crypto";
 import { PrismaService } from "../../prisma/prisma.service";
 import { EncryptionService } from "../../encryption/encryption.service";
-import { QUEUES, JOB_TYPES } from "@bedrock-forge/shared";
+import { QUEUES, JOB_TYPES, buildWebhookRequest } from "@bedrock-forge/shared";
 
 interface NotificationJob {
   eventType: string;
   payload: Record<string, unknown>;
+  deliveredChannelIds?: string[];
+  inAppCreated?: boolean;
+}
+
+interface ChannelDeliveryOutcome {
+  channelId: string;
+  channelName: string;
+  ok: boolean;
+  error?: string;
 }
 
 type SecurityAttackNotification =
@@ -55,8 +65,13 @@ export class NotificationProcessor extends WorkerHost {
     const { eventType, payload } = job.data;
     this.logger.debug(`Dispatching notification for event: ${eventType}`);
 
-    // Always create in-app notifications for alert events, regardless of Slack config
-    await this.createInAppNotification(eventType, payload);
+    let inAppOk = Boolean(job.data.inAppCreated);
+    if (!inAppOk) {
+      inAppOk = await this.createInAppNotification(eventType, payload);
+      if (inAppOk && typeof job.updateData === "function") {
+        await job.updateData({ ...job.data, inAppCreated: true });
+      }
+    }
 
     const channels = await this.prisma.notificationChannel.findMany({
       where: {
@@ -65,13 +80,72 @@ export class NotificationProcessor extends WorkerHost {
       },
     });
 
-    if (channels.length === 0) return;
+    if (channels.length === 0) {
+      if (!inAppOk) {
+        throw new Error(`Failed to persist in-app notification for ${eventType}`);
+      }
+      return;
+    }
 
-    await Promise.allSettled(
-      channels.map((channel) =>
+    const deliveredSet = new Set(job.data.deliveredChannelIds ?? []);
+    const pendingChannels = channels.filter(
+      (channel) => !deliveredSet.has(String(channel.id)),
+    );
+    if (pendingChannels.length === 0) {
+      if (!inAppOk) {
+        throw new Error(`Failed to persist in-app notification for ${eventType}`);
+      }
+      return;
+    }
+
+    const settled = await Promise.allSettled(
+      pendingChannels.map((channel) =>
         this.sendToChannel(channel, eventType, payload),
       ),
     );
+
+    const newlyDelivered: string[] = [];
+    const failures: string[] = [];
+
+    settled.forEach((result, idx) => {
+      const ch = pendingChannels[idx];
+      if (result.status === "fulfilled") {
+        if (result.value.ok) {
+          newlyDelivered.push(result.value.channelId);
+        } else {
+          failures.push(
+            `${result.value.channelName}: ${result.value.error ?? "Delivery failed"}`,
+          );
+        }
+      } else {
+        const msg =
+          result.reason instanceof Error
+            ? result.reason.message
+            : String(result.reason);
+        failures.push(`${ch.name}: ${msg}`);
+      }
+    });
+
+    if (newlyDelivered.length > 0 && typeof job.updateData === "function") {
+      await job.updateData({
+        ...job.data,
+        inAppCreated: inAppOk,
+        deliveredChannelIds: [
+          ...(job.data.deliveredChannelIds ?? []),
+          ...newlyDelivered,
+        ],
+      });
+    }
+
+    if (!inAppOk || failures.length > 0) {
+      const details = [
+        ...(!inAppOk ? ["in-app notification persistence failed"] : []),
+        ...failures,
+      ];
+      throw new Error(
+        `Notification delivery failed for ${eventType}: ${details.join("; ")}`,
+      );
+    }
   }
 
   private async sendToChannel(
@@ -87,7 +161,7 @@ export class NotificationProcessor extends WorkerHost {
     },
     eventType: string,
     payload: Record<string, unknown>,
-  ): Promise<void> {
+  ): Promise<ChannelDeliveryOutcome> {
     let status: "sent" | "failed" = "failed";
     let error: string | undefined;
 
@@ -101,7 +175,6 @@ export class NotificationProcessor extends WorkerHost {
       } else {
         await this.sendSlack(channel, text);
       }
-
 
       status = "sent";
       this.logger.log(
@@ -126,6 +199,13 @@ export class NotificationProcessor extends WorkerHost {
         error: error ?? null,
       },
     });
+
+    return {
+      channelId: String(channel.id),
+      channelName: channel.name,
+      ok: status === "sent",
+      error,
+    };
   }
 
   private async sendSlack(
@@ -158,25 +238,16 @@ export class NotificationProcessor extends WorkerHost {
     }
 
     const webhookUrl = this.encryption.decrypt(channel.webhook_url_enc);
-    const body = JSON.stringify({
+    const secret = channel.webhook_secret_enc
+      ? this.encryption.decrypt(channel.webhook_secret_enc)
+      : null;
+    const { body, headers } = buildWebhookRequest({
       event: eventType,
       payload,
-      timestamp: new Date().toISOString(),
-      source: "bedrock-forge",
+      signBody: secret
+        ? (rawBody) => createHmac("sha256", secret).update(rawBody).digest("hex")
+        : undefined,
     });
-
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      "X-Forge-Event": eventType,
-    };
-
-    // Optional HMAC-SHA256 signature
-    if (channel.webhook_secret_enc) {
-      const secret = this.encryption.decrypt(channel.webhook_secret_enc);
-      const { createHmac } = await import("crypto");
-      const sig = createHmac("sha256", secret).update(body).digest("hex");
-      headers["X-Forge-Signature"] = `sha256=${sig}`;
-    }
 
     const res = await fetch(webhookUrl, { method: "POST", headers, body });
     if (!res.ok) {
@@ -218,7 +289,7 @@ export class NotificationProcessor extends WorkerHost {
   private async createInAppNotification(
     eventType: string,
     payload: Record<string, unknown>,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const ALERT_EVENTS = new Set([
       "backup.failed",
       "plugin-update.failed",
@@ -234,7 +305,7 @@ export class NotificationProcessor extends WorkerHost {
       "security.file_changes",
     ]);
 
-    if (!ALERT_EVENTS.has(eventType)) return;
+    if (!ALERT_EVENTS.has(eventType)) return true;
 
     try {
       const users = await this.prisma.user.findMany({
@@ -246,7 +317,7 @@ export class NotificationProcessor extends WorkerHost {
         select: { id: true },
       });
 
-      if (users.length === 0) return;
+      if (users.length === 0) return true;
 
       const { title, message } = this.buildInAppContent(eventType, payload);
 
@@ -259,10 +330,12 @@ export class NotificationProcessor extends WorkerHost {
           action_url: null,
         })),
       });
+      return true;
     } catch (err: unknown) {
       this.logger.error(
         `Failed to create in-app notification: ${err instanceof Error ? err.message : String(err)}`,
       );
+      return false;
     }
   }
 
