@@ -884,4 +884,144 @@ describe("MonitorProcessor", () => {
       );
     });
   });
+
+  describe("Project-level maintenance window suppression (#100)", () => {
+    it("checks project maintenance windows for environment project_id before queuing notifications", async () => {
+      jest.spyOn(global, "setTimeout").mockImplementation((fn: TimerHandler) => {
+        if (typeof fn === "function") fn();
+        return 0 as unknown as ReturnType<typeof setTimeout>;
+      });
+
+      const monitor = baseMonitor({
+        last_checked_at: new Date(Date.now() - 300_000),
+        last_status: 200,
+        environment: {
+          id: BigInt(5),
+          project_id: BigInt(42),
+          url: "https://proj.example.test",
+          project: { status: "active" },
+        },
+      });
+      prisma.monitor.findUnique.mockResolvedValue(monitor);
+      prisma.maintenanceWindow.count.mockResolvedValue(1);
+      jest
+        .spyOn(processor as any, "checkHttp")
+        .mockResolvedValue({ statusCode: 500, body: "", responseMs: 25 });
+
+      await processor.process({
+        id: "proj-maint-1",
+        data: { monitorId: 1 },
+      } as any);
+
+      expect(prisma.maintenanceWindow.count).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            OR: expect.arrayContaining([
+              expect.objectContaining({
+                resource_type: "project",
+                resource_id: BigInt(42),
+              }),
+            ]),
+          }),
+        }),
+      );
+      expect(notifQueue.add).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("Streaming bounded HTTP monitoring (#106)", () => {
+    it("destroys response stream immediately on availability-only checks without buffering body", async () => {
+      const http = require("http");
+      const mockRes = Object.assign(new EventEmitter(), {
+        statusCode: 200,
+        destroy: jest.fn(() => {
+          mockRes.emit("close");
+        }),
+      });
+      const mockReq = new EventEmitter();
+      const getSpy = jest
+        .spyOn(http, "get")
+        .mockImplementation((_url: any, _opts: any, cb: any) => {
+          queueMicrotask(() => cb(mockRes));
+          return mockReq;
+        });
+
+      const result = await (processor as any).checkHttp(
+        "http://stream.example.test",
+        5000,
+      );
+
+      expect(mockRes.destroy).toHaveBeenCalled();
+      expect(result.statusCode).toBe(200);
+      expect(result.body).toBe("");
+      getSpy.mockRestore();
+    });
+
+    it("detects keyword split across chunks while bounding retained memory", async () => {
+      const http = require("http");
+      const mockRes = Object.assign(new EventEmitter(), {
+        statusCode: 200,
+        destroy: jest.fn(() => {
+          mockRes.emit("close");
+        }),
+      });
+      const mockReq = new EventEmitter();
+      const getSpy = jest
+        .spyOn(http, "get")
+        .mockImplementation((_url: any, _opts: any, cb: any) => {
+          queueMicrotask(() => {
+            cb(mockRes);
+            mockRes.emit("data", Buffer.from("prefix noise --- Bed"));
+            mockRes.emit("data", Buffer.from("rock Ready --- trailing"));
+            mockRes.emit("end");
+          });
+          return mockReq;
+        });
+
+      const result = await (processor as any).checkHttp(
+        "http://stream.example.test",
+        5000,
+        { keyword: "Bedrock Ready", maxBodyBytes: 1024 },
+      );
+
+      expect(result.statusCode).toBe(200);
+      expect(result.keywordFound).toBe(true);
+      expect(mockRes.destroy).toHaveBeenCalled();
+      getSpy.mockRestore();
+    });
+
+    it("aborts keyword streaming cleanly when response exceeds maxBodyBytes limit", async () => {
+      const http = require("http");
+      const mockRes = Object.assign(new EventEmitter(), {
+        statusCode: 200,
+        destroy: jest.fn(() => {
+          mockRes.emit("close");
+        }),
+      });
+      const mockReq = new EventEmitter();
+      const getSpy = jest
+        .spyOn(http, "get")
+        .mockImplementation((_url: any, _opts: any, cb: any) => {
+          queueMicrotask(() => {
+            cb(mockRes);
+            mockRes.emit("data", Buffer.alloc(600, "a"));
+            mockRes.emit("data", Buffer.alloc(600, "b"));
+            mockRes.emit("end");
+          });
+          return mockReq;
+        });
+
+      const result = await (processor as any).checkHttp(
+        "http://stream.example.test",
+        5000,
+        { keyword: "MissingNeedle", maxBodyBytes: 1024 },
+      );
+
+      expect(result.statusCode).toBe(200);
+      expect(result.keywordFound).toBeNull();
+      expect(result.keywordTruncated).toBe(true);
+      expect(mockRes.destroy).toHaveBeenCalled();
+      getSpy.mockRestore();
+    });
+  });
 });

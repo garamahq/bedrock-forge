@@ -7,6 +7,7 @@ import * as https from "https";
 import * as http from "http";
 import * as tls from "tls";
 import * as dns from "dns";
+import { StringDecoder } from "string_decoder";
 import { PrismaService } from "../../prisma/prisma.service";
 import { EncryptionService } from "../../encryption/encryption.service";
 import {
@@ -19,10 +20,19 @@ import {
 } from "@bedrock-forge/shared";
 import { toPrismaJsonValue } from "../../utils/prisma-json";
 
+const DEFAULT_MAX_KEYWORD_BODY_BYTES = 2 * 1024 * 1024;
+
+interface HttpCheckOptions {
+  keyword?: string;
+  maxBodyBytes?: number;
+}
+
 interface HttpCheckResult {
   statusCode: number;
   body: string;
   responseMs: number;
+  keywordFound?: boolean | null;
+  keywordTruncated?: boolean;
 }
 
 interface SslCheckResult {
@@ -74,6 +84,8 @@ export class MonitorProcessor extends WorkerHost {
     let responseTimeMs: number | null = null;
     let isUp = false;
     let responseBody = "";
+    let httpKeywordFound: boolean | null | undefined = undefined;
+    let httpKeywordTruncated = false;
 
     const monitor = await this.prisma.monitor.findUnique({
       where: { id: BigInt(monitorId) },
@@ -81,6 +93,7 @@ export class MonitorProcessor extends WorkerHost {
         environment: {
           select: {
             id: true,
+            project_id: true,
             url: true,
             project: { select: { status: true } },
           },
@@ -122,19 +135,27 @@ export class MonitorProcessor extends WorkerHost {
         : null;
 
     const url = monitor.environment.url;
+    const httpOptions: HttpCheckOptions | undefined =
+      monitor.check_keyword && monitor.keyword
+        ? { keyword: monitor.keyword }
+        : undefined;
     const start = Date.now();
 
     try {
-      const result = await this.checkHttp(url, timeout);
+      const result = await this.checkHttp(url, timeout, httpOptions);
       statusCode = result.statusCode;
       responseTimeMs = result.responseMs;
       responseBody = result.body;
+      httpKeywordFound = result.keywordFound;
+      httpKeywordTruncated = Boolean(result.keywordTruncated);
       isUp = isHttpStatusWorking(result.statusCode);
     } catch {
       isUp = false;
       statusCode = 0;
       responseTimeMs = Date.now() - start;
       responseBody = "";
+      httpKeywordFound = undefined;
+      httpKeywordTruncated = false;
     }
 
     // Confirmation retry: if first check failed, wait 5 s then try once more
@@ -145,10 +166,12 @@ export class MonitorProcessor extends WorkerHost {
       await new Promise((resolve) => setTimeout(resolve, 5_000));
       const retryStart = Date.now();
       try {
-        const retryResult = await this.checkHttp(url, timeout);
+        const retryResult = await this.checkHttp(url, timeout, httpOptions);
         statusCode = retryResult.statusCode;
         responseTimeMs = retryResult.responseMs;
         responseBody = retryResult.body;
+        httpKeywordFound = retryResult.keywordFound;
+        httpKeywordTruncated = Boolean(retryResult.keywordTruncated);
         isUp = isHttpStatusWorking(retryResult.statusCode);
         if (isUp) {
           this.logger.log(
@@ -160,6 +183,8 @@ export class MonitorProcessor extends WorkerHost {
         statusCode = 0;
         responseTimeMs = Date.now() - retryStart;
         responseBody = "";
+        httpKeywordFound = undefined;
+        httpKeywordTruncated = false;
         this.logger.warn(
           `Monitor ${monitorId}: retry also failed — confirming down`,
         );
@@ -175,10 +200,12 @@ export class MonitorProcessor extends WorkerHost {
       await new Promise((resolve) => setTimeout(resolve, 5_000));
       const confirmationStart = Date.now();
       try {
-        const confirmation = await this.checkHttp(url, timeout);
+        const confirmation = await this.checkHttp(url, timeout, httpOptions);
         statusCode = confirmation.statusCode;
         responseTimeMs = confirmation.responseMs;
         responseBody = confirmation.body;
+        httpKeywordFound = confirmation.keywordFound;
+        httpKeywordTruncated = Boolean(confirmation.keywordTruncated);
         isUp = isHttpStatusWorking(confirmation.statusCode);
         if (!isUp) {
           this.logger.warn(
@@ -190,6 +217,8 @@ export class MonitorProcessor extends WorkerHost {
         statusCode = 0;
         responseTimeMs = Date.now() - confirmationStart;
         responseBody = "";
+        httpKeywordFound = undefined;
+        httpKeywordTruncated = false;
         this.logger.warn(
           `Monitor ${monitorId}: recovery confirmation failed — keeping monitor down`,
         );
@@ -219,7 +248,16 @@ export class MonitorProcessor extends WorkerHost {
     }
 
     if (monitor.check_keyword && monitor.keyword && isUp) {
-      keywordFound = responseBody.includes(monitor.keyword);
+      if (httpKeywordTruncated) {
+        this.logger.warn(
+          `Monitor ${monitorId}: HTTP body exceeded read limit during keyword scan — leaving keyword_found null`,
+        );
+        keywordFound = null;
+      } else if (httpKeywordFound !== undefined) {
+        keywordFound = httpKeywordFound;
+      } else {
+        keywordFound = responseBody.includes(monitor.keyword);
+      }
     }
 
     // ── Persist result ──────────────────────────────────────────────────────
@@ -273,6 +311,12 @@ export class MonitorProcessor extends WorkerHost {
       },
     });
 
+    const envProjectId =
+      monitor.environment.project_id !== undefined &&
+      monitor.environment.project_id !== null
+        ? Number(monitor.environment.project_id)
+        : undefined;
+
     // ── Notifications: advanced check failures ──────────────────────────────
     if (
       sslResult !== null &&
@@ -293,6 +337,7 @@ export class MonitorProcessor extends WorkerHost {
         await this.dispatchNotification("monitor.ssl_expiry", {
           monitorId: Number(monitorId),
           environmentId: Number(monitor.environment.id),
+          ...(envProjectId !== undefined && { projectId: envProjectId }),
           url,
           daysRemaining: sslResult.daysRemaining,
           expiresAt: sslResult.expiresAt.toISOString(),
@@ -315,6 +360,7 @@ export class MonitorProcessor extends WorkerHost {
       await this.dispatchNotification("monitor.dns_failed", {
         monitorId: Number(monitorId),
         environmentId: Number(monitor.environment.id),
+        ...(envProjectId !== undefined && { projectId: envProjectId }),
         url,
         checkedAt: checkedAt.toISOString(),
       });
@@ -334,6 +380,7 @@ export class MonitorProcessor extends WorkerHost {
       await this.dispatchNotification("monitor.keyword_missing", {
         monitorId: Number(monitorId),
         environmentId: Number(monitor.environment.id),
+        ...(envProjectId !== undefined && { projectId: envProjectId }),
         url,
         keyword: monitor.keyword,
         checkedAt: checkedAt.toISOString(),
@@ -358,6 +405,7 @@ export class MonitorProcessor extends WorkerHost {
       await this.dispatchNotification("monitor.degraded", {
         monitorId: Number(monitorId),
         environmentId: Number(monitor.environment.id),
+        ...(envProjectId !== undefined && { projectId: envProjectId }),
         url,
         statusCode: statusCode ?? 0,
         responseMs: responseTimeMs ?? 0,
@@ -420,6 +468,7 @@ export class MonitorProcessor extends WorkerHost {
       await this.dispatchNotification(eventType, {
         monitorId: Number(monitorId),
         environmentId: Number(monitor.environment.id),
+        ...(envProjectId !== undefined && { projectId: envProjectId }),
         url,
         statusCode: statusCode ?? 0,
         responseMs: responseTimeMs ?? 0,
@@ -772,25 +821,111 @@ export class MonitorProcessor extends WorkerHost {
     };
   }
 
-  private checkHttp(url: string, timeout: number): Promise<HttpCheckResult> {
+  private checkHttp(
+    url: string,
+    timeout: number,
+    options?: HttpCheckOptions,
+  ): Promise<HttpCheckResult> {
     return new Promise((resolve, reject) => {
       const mod = url.startsWith("https") ? https : http;
-      const chunks: Buffer[] = [];
+      const keyword = options?.keyword;
+      const maxBodyBytes =
+        options?.maxBodyBytes ?? DEFAULT_MAX_KEYWORD_BODY_BYTES;
       const start = Date.now();
+      let settled = false;
+
+      const finish = (result: HttpCheckResult) => {
+        if (settled) return;
+        settled = true;
+        resolve(result);
+      };
+
+      const fail = (err: unknown) => {
+        if (settled) return;
+        settled = true;
+        reject(err instanceof Error ? err : new Error(String(err)));
+      };
+
       const req = mod.get(url, { timeout }, (res) => {
-        res.on("data", (c: Buffer) => chunks.push(c));
-        res.on("end", () =>
-          resolve({
-            statusCode: res.statusCode ?? 0,
-            body: Buffer.concat(chunks).toString(),
+        const statusCode = res.statusCode ?? 0;
+
+        // Availability-only check (#106): do not buffer response body chunks.
+        if (!keyword) {
+          if (typeof res.destroy === "function") {
+            res.destroy();
+          } else {
+            res.resume();
+          }
+          finish({
+            statusCode,
+            body: "",
             responseMs: Date.now() - start,
-          }),
-        );
+            keywordFound: null,
+          });
+          return;
+        }
+
+        // Bounded streaming keyword matcher (#106): keep only an overlap tail
+        // of (keyword.length - 1) chars so arbitrarily large pages use O(1) RAM.
+        const decoder = new StringDecoder("utf8");
+        const overlapLen = Math.max(0, keyword.length - 1);
+        let tail = "";
+        let bytesRead = 0;
+
+        res.on("data", (chunk: Buffer) => {
+          if (settled) return;
+          bytesRead += chunk.length;
+          const combined = tail + decoder.write(chunk);
+
+          if (combined.includes(keyword)) {
+            if (typeof res.destroy === "function") {
+              res.destroy();
+            }
+            finish({
+              statusCode,
+              body: "",
+              responseMs: Date.now() - start,
+              keywordFound: true,
+              keywordTruncated: false,
+            });
+            return;
+          }
+
+          if (bytesRead > maxBodyBytes) {
+            if (typeof res.destroy === "function") {
+              res.destroy();
+            }
+            finish({
+              statusCode,
+              body: "",
+              responseMs: Date.now() - start,
+              keywordFound: null,
+              keywordTruncated: true,
+            });
+            return;
+          }
+
+          tail = overlapLen > 0 ? combined.slice(-overlapLen) : "";
+        });
+
+        res.on("end", () => {
+          if (settled) return;
+          const finalText = tail + decoder.end();
+          finish({
+            statusCode,
+            body: "",
+            responseMs: Date.now() - start,
+            keywordFound: finalText.includes(keyword),
+            keywordTruncated: false,
+          });
+        });
+
+        res.on("error", fail);
       });
-      req.on("error", reject);
+      req.on("error", fail);
       req.on("timeout", () => {
         req.destroy();
-        reject(new Error("Request timed out"));
+        fail(new Error("Request timed out"));
       });
     });
   }
@@ -857,6 +992,20 @@ export class MonitorProcessor extends WorkerHost {
     try {
       if (payload.environmentId) {
         const envId = BigInt(payload.environmentId as number);
+        let projectId: bigint | null =
+          payload.projectId !== undefined && payload.projectId !== null
+            ? BigInt(payload.projectId as number)
+            : null;
+        if (projectId === null && this.prisma.environment?.findUnique) {
+          const envRecord = await this.prisma.environment.findUnique({
+            where: { id: envId },
+            select: { project_id: true },
+          });
+          if (envRecord?.project_id !== undefined) {
+            projectId = envRecord.project_id;
+          }
+        }
+
         const now = new Date();
         const activeMaintenance = await this.prisma.maintenanceWindow.count({
           where: {
@@ -867,6 +1016,16 @@ export class MonitorProcessor extends WorkerHost {
                 starts_at: { lte: now },
                 ends_at: { gte: now },
               },
+              ...(projectId !== null
+                ? [
+                    {
+                      resource_type: "project",
+                      resource_id: projectId,
+                      starts_at: { lte: now },
+                      ends_at: { gte: now },
+                    },
+                  ]
+                : []),
               {
                 resource_type: "server",
                 server: {

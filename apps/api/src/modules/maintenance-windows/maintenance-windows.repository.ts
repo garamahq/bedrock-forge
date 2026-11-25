@@ -102,8 +102,8 @@ export class MaintenanceWindowsRepository {
     environmentId: number,
     at: Date = new Date(),
   ): Promise<boolean> {
-    // An environment is under maintenance if there is an active maintenance window
-    // specifically for this environment, OR if its parent server is under maintenance.
+    // An environment is under maintenance if there is an active window
+    // targeting this environment directly, its parent server, or its parent project (#100).
     const envWindowCount = await this.prisma.maintenanceWindow.count({
       where: {
         resource_type: "environment",
@@ -114,15 +114,34 @@ export class MaintenanceWindowsRepository {
     });
     if (envWindowCount > 0) return true;
 
-    // Check parent server
     const env = await this.prisma.environment.findUnique({
       where: { id: BigInt(environmentId) },
-      select: { server_id: true },
+      select: { server_id: true, project_id: true },
     });
-    if (env?.server_id) {
-      return this.isServerUnderMaintenance(Number(env.server_id), at);
-    }
+    if (!env) return false;
 
-    return false;
+    const parentFilters: Prisma.MaintenanceWindowWhereInput[] = [];
+    if (env.server_id !== null && env.server_id !== undefined) {
+      parentFilters.push({
+        resource_type: "server",
+        resource_id: env.server_id,
+      });
+    }
+    if (env.project_id !== null && env.project_id !== undefined) {
+      parentFilters.push({
+        resource_type: "project",
+        resource_id: env.project_id,
+      });
+    }
+    if (parentFilters.length === 0) return false;
+
+    const parentCount = await this.prisma.maintenanceWindow.count({
+      where: {
+        OR: parentFilters,
+        starts_at: { lte: at },
+        ends_at: { gte: at },
+      },
+    });
+    return parentCount > 0;
   }
 }

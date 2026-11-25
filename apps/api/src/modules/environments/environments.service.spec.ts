@@ -655,6 +655,76 @@ describe("EnvironmentsService", () => {
       ).rejects.toThrow("Invalid deploy webhook token or signature");
     });
 
+    it("triggerDeployWebhook skips tag pushes (#93)", async () => {
+      repo.findById.mockResolvedValue(mockEnvWithGit);
+      const deploySpy = jest.spyOn(svc, "deployGit");
+
+      const res = await svc.triggerDeployWebhook(1, {
+        token: "secret-token-123456",
+        event: "push",
+        body: {
+          ref: "refs/tags/v1.0.0",
+          after: "deadbeef00112233445566778899001122334455",
+        },
+      });
+
+      expect(res).toMatchObject({ status: "skipped" });
+      expect(deploySpy).not.toHaveBeenCalled();
+      expect(repo.createJobExecution).not.toHaveBeenCalled();
+    });
+
+    it("triggerDeployWebhook skips branch-deletion push events (#93)", async () => {
+      repo.findById.mockResolvedValue(mockEnvWithGit);
+      const deploySpy = jest.spyOn(svc, "deployGit");
+
+      const resDeleted = await svc.triggerDeployWebhook(1, {
+        token: "secret-token-123456",
+        event: "push",
+        body: {
+          ref: "refs/heads/main",
+          deleted: true,
+          after: "0000000000000000000000000000000000000000",
+        },
+      });
+      expect(resDeleted).toMatchObject({ status: "skipped" });
+
+      const resZeroAfter = await svc.triggerDeployWebhook(1, {
+        token: "secret-token-123456",
+        event: "push",
+        body: {
+          ref: "refs/heads/main",
+          after: "0000000000000000000000000000000000000000",
+        },
+      });
+      expect(resZeroAfter).toMatchObject({ status: "skipped" });
+      expect(deploySpy).not.toHaveBeenCalled();
+    });
+
+    it("triggerDeployWebhook skips non-push GitHub events such as delete/create (#93)", async () => {
+      repo.findById.mockResolvedValue(mockEnvWithGit);
+      const deploySpy = jest.spyOn(svc, "deployGit");
+
+      const res = await svc.triggerDeployWebhook(1, {
+        token: "secret-token-123456",
+        event: "delete",
+        body: { ref: "feature/old", ref_type: "branch" },
+      });
+
+      expect(res).toMatchObject({ status: "skipped" });
+      expect(deploySpy).not.toHaveBeenCalled();
+    });
+
+    it("triggerDeployWebhook still allows manual token-only triggers without x-github-event (#93)", async () => {
+      repo.findById.mockResolvedValue(mockEnvWithGit);
+
+      const res = await svc.triggerDeployWebhook(1, {
+        token: "secret-token-123456",
+        body: {},
+      });
+
+      expect(res).toHaveProperty("jobExecutionId");
+    });
+
     it("getServerDeployKey returns existing server public SSH key", async () => {
       repo.findById.mockResolvedValue(mockEnvWithGit);
       serversService.getServerSshConfig.mockResolvedValue({
