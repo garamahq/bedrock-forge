@@ -51,4 +51,5 @@ export interface CleanupScheduleData {
   day_of_month: number | null;
   keep_revisions: number;
   last_run_at?: string | null;
+  unsupported_frequency_reason?: string | null;
 }

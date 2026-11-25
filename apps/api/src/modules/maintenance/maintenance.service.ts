@@ -25,6 +25,7 @@ const ORPHAN_TTL_MS = 24 * 60 * 60 * 1_000;
 @Injectable()
 export class MaintenanceService implements OnApplicationBootstrap {
   private readonly logger = new Logger(MaintenanceService.name);
+  private readonly warnedInvalidFrequencies = new Set<string>();
 
   constructor(
     private readonly repo: MaintenanceRepository,
@@ -134,11 +135,11 @@ export class MaintenanceService implements OnApplicationBootstrap {
   }
 
   /**
-   * Runs every hour. For each enabled CleanupSchedule whose frequency/hour/day
-   * matches now (and whose last_run_at is far enough in the past), dispatches
-   * a wp:cleanup job and records the run timestamp.
+   * Runs every minute. For each enabled CleanupSchedule whose frequency/hour/minute/day
+   * matches the current UTC time (and whose last_run_at is far enough in the past),
+   * dispatches a wp:cleanup job and records the run timestamp.
    */
-  @Cron(CronExpression.EVERY_HOUR)
+  @Cron(CronExpression.EVERY_MINUTE)
   async runCleanupSchedules(): Promise<void> {
     const schedules = await this.cleanupRepo.findAllEnabled();
     if (schedules.length === 0) return;
@@ -155,7 +156,7 @@ export class MaintenanceService implements OnApplicationBootstrap {
         );
         await this.cleanupRepo.updateLastRun(schedule.environment_id, now);
         this.logger.log(
-          `CleanupSchedule: dispatched wp:cleanup for env ${envId} (keep_revisions=${schedule.keep_revisions})`,
+          `CleanupSchedule: dispatched wp:cleanup for env ${envId} at ${now.toISOString()} UTC (keep_revisions=${schedule.keep_revisions})`,
         );
       } catch (e) {
         this.logger.error(
@@ -250,6 +251,7 @@ export class MaintenanceService implements OnApplicationBootstrap {
 
   private shouldFire(
     schedule: {
+      environment_id?: bigint;
       frequency: string;
       hour: number;
       minute: number;
@@ -259,6 +261,21 @@ export class MaintenanceService implements OnApplicationBootstrap {
     },
     now: Date,
   ): boolean {
+    if (
+      schedule.frequency !== "daily" &&
+      schedule.frequency !== "weekly" &&
+      schedule.frequency !== "monthly"
+    ) {
+      const key = `${schedule.environment_id ?? "unknown"}:${schedule.frequency}`;
+      if (!this.warnedInvalidFrequencies.has(key)) {
+        this.warnedInvalidFrequencies.add(key);
+        this.logger.warn(
+          `CleanupSchedule for env ${schedule.environment_id ?? "unknown"} has unsupported frequency "${schedule.frequency}" and will not run`,
+        );
+      }
+      return false;
+    }
+
     if (schedule.hour !== now.getUTCHours()) return false;
     if (schedule.minute !== now.getUTCMinutes()) return false;
 
