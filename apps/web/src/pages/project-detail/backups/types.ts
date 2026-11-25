@@ -10,6 +10,7 @@ export interface Backup {
   id: number;
   type: "full" | "db_only" | "files_only";
   status: "pending" | "running" | "completed" | "failed";
+  file_path?: string | null;
   size_bytes: number | null;
   error_message: string | null;
   created_at: string;

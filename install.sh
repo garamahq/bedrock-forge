@@ -20,11 +20,15 @@ generate_env_file
 "$SCRIPT_DIR/doctor.sh"
 
 # ── Build & start services ────────────────────────────────────────────────────
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/tools/compose-helpers.sh"
+
 echo "Building Docker images…"
-docker compose build
+build_compose_images
 
 echo "Starting all Docker containers…"
 docker compose up -d
+
+verify_all_app_images
 
 # ── Wait for backend API to become ready ──────────────────────────────────────
 wait_for_api_healthy 3001 30

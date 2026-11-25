@@ -14,6 +14,7 @@ import {
   ExpandLogButton,
 } from "@/components/ui/execution-log-panel";
 import { Backup, Environment } from "../types";
+import { resolveGdriveFolderUrl } from "@/lib/backup-links";
 import { BACKUP_TYPE_LABELS, STATUS_VARIANT, formatBytes } from "../utils";
 
 export function BackupsList({
@@ -144,23 +145,26 @@ export function BackupsList({
                         >
                           <Download className="h-3.5 w-3.5" />
                         </Button>
-                        {selectedEnv?.google_drive_folder_id && (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7 text-muted-foreground hover:text-primary"
-                            title="Open in Google Drive"
-                            onClick={() =>
-                              window.open(
-                                `https://drive.google.com/drive/folders/${selectedEnv.google_drive_folder_id}`,
-                                "_blank",
-                                "noopener",
-                              )
-                            }
-                          >
-                            <ExternalLink className="h-3.5 w-3.5" />
-                          </Button>
-                        )}
+                        {(() => {
+                          const driveUrl = resolveGdriveFolderUrl(
+                            b.file_path,
+                            selectedEnv?.google_drive_folder_id,
+                          );
+                          if (!driveUrl) return null;
+                          return (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-7 w-7 text-muted-foreground hover:text-primary"
+                              title="Open in Google Drive"
+                              onClick={() =>
+                                window.open(driveUrl, "_blank", "noopener")
+                              }
+                            >
+                              <ExternalLink className="h-3.5 w-3.5" />
+                            </Button>
+                          );
+                        })()}
                       </>
                     )}
                     {canDelete && (
