@@ -101,7 +101,7 @@ export class GenerateClientInvoiceDto {
 export class UpdateInvoiceDto {
   @IsOptional()
   @IsEnum(["draft", "sent", "paid", "overdue", "cancelled"])
-  status?: string;
+  status?: "draft" | "sent" | "paid" | "overdue" | "cancelled";
 
   @IsOptional()
   @IsString()
