@@ -7,7 +7,8 @@ export const backupApi = {
     api.get<{ folder_id: string | null }>("/settings/system-backup-folder"),
   saveSystemBackupFolder: (value: string) =>
     api.put<void>("/settings/system-backup-folder", { value }),
-  getSystemBackups: () => api.get<SystemBackupList>("/system-backups"),
+  getSystemBackups: (page = 1, limit = 20) =>
+    api.get<SystemBackupList>(`/system-backups?page=${page}&limit=${limit}`),
   triggerBackup: () =>
     api.post<{ systemBackupId: number }>("/system-backups", {}),
   getBackupSchedule: () =>

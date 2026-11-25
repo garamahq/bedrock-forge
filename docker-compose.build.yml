@@ -1,0 +1,16 @@
+# Build overlay for installing or updating Bedrock Forge from a local checkout.
+# docker-compose.yml intentionally defines image tags only so prebuilt-image
+# deployments (such as ./deploy.sh) never invoke Docker builds on target hosts.
+
+services:
+  forge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: web

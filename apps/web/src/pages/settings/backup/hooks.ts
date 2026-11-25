@@ -31,10 +31,10 @@ export function useSaveBackupFolderMutation(onSuccessCallback?: () => void) {
   });
 }
 
-export function useSystemBackups() {
+export function useSystemBackups(page = 1, limit = 20) {
   return useQuery({
-    queryKey: ["system-backups"],
-    queryFn: backupApi.getSystemBackups,
+    queryKey: ["system-backups", page, limit],
+    queryFn: () => backupApi.getSystemBackups(page, limit),
     refetchInterval: (query) => {
       const d = query.state.data;
       if (!d) return 10_000;

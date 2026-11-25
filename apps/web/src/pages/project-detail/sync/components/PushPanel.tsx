@@ -148,9 +148,9 @@ export function PushPanel({
   return (
     <div className="space-y-5">
       <p className="text-sm text-muted-foreground">
-        Sync data from one environment to another — choose database, files
-        (wp-content/), or both. Uses rsync for fast file transfer with a tar
-        relay fallback.
+        Sync data from one environment to another — choose database, full site
+        files (excluding env/config/caches), or both. Uses rsync for fast file
+        transfer with a tar relay fallback.
       </p>
 
       {/* Scope selector */}
@@ -364,7 +364,13 @@ export function PushPanel({
         open={confirmOpen}
         onOpenChange={setConfirmOpen}
         title="Confirm Sync — This will overwrite data"
-        description={`The ${target?.type ?? ""} environment on ${target?.server.name ?? ""} will have its ${scope === "both" ? "database and files" : scope === "database" ? "database" : "wp-content files"} overwritten with data from ${source?.type ?? ""}.${skipSafetyBackup && needsGdrive ? " No backup will be taken." : ""}`}
+        description={`The ${target?.type ?? ""} environment on ${target?.server.name ?? ""} will have ${
+          scope === "database"
+            ? "its database overwritten"
+            : scope === "files"
+              ? "all non-excluded files across its site root overwritten, and stale non-excluded target files may be deleted (excludes .env, wp-config.php, .htaccess, storage, and caches)"
+              : "its database overwritten and all non-excluded files across its site root overwritten, and stale non-excluded target files may be deleted (excludes .env, wp-config.php, .htaccess, storage, and caches)"
+        } with data from ${source?.type ?? ""}.${skipSafetyBackup && needsGdrive ? " No backup will be taken." : ""}`}
         confirmLabel="Yes, start sync"
         confirmVariant="destructive"
         onConfirm={() => {

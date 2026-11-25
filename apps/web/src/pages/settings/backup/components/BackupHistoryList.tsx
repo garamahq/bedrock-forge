@@ -6,9 +6,21 @@ import { Badge } from "@/components/ui/badge";
 import { useSystemBackups, useSystemBackupFolder } from "../hooks";
 import { SystemBackupItem } from "../types";
 
+import { useState } from "react";
+import { ErrorState, Pagination } from "@/components/crud";
+import { resolveGdriveFolderUrl } from "@/lib/backup-links";
+
 export function BackupHistoryList() {
   const qc = useQueryClient();
-  const { data: systemBackups, isLoading: backupsLoading } = useSystemBackups();
+  const [page, setPage] = useState(1);
+  const limit = 20;
+  const {
+    data: systemBackups,
+    isLoading: backupsLoading,
+    isError: backupsError,
+    error: backupsErrorObj,
+    refetch: refetchBackups,
+  } = useSystemBackups(page, limit);
   const { data: systemBackupFolder } = useSystemBackupFolder();
 
   function formatBytes(bytes: string | null): string {
@@ -55,7 +67,19 @@ export function BackupHistoryList() {
         <p className="px-4 py-3 text-sm text-muted-foreground">Loading…</p>
       )}
 
-      {!backupsLoading && !systemBackups?.items?.length && (
+      {!backupsLoading && backupsError && (
+        <ErrorState
+          title="Could not load system backups"
+          description={
+            backupsErrorObj instanceof Error
+              ? backupsErrorObj.message
+              : "Failed to fetch system backup history."
+          }
+          onRetry={() => refetchBackups()}
+        />
+      )}
+
+      {!backupsLoading && !backupsError && systemBackups && !systemBackups.items.length && (
         <p className="px-4 py-3 text-sm text-muted-foreground">
           No backups yet. Click &quot;Backup Now&quot; to create your first
           system backup.
@@ -102,23 +126,24 @@ export function BackupHistoryList() {
                 >
                   <Download className="h-3.5 w-3.5" />
                 </Button>
-                {systemBackupFolder?.folder_id && (
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-7 w-7 text-muted-foreground hover:text-primary"
-                    title="Open Google Drive folder"
-                    onClick={() =>
-                      window.open(
-                        `https://drive.google.com/drive/folders/${systemBackupFolder.folder_id}`,
-                        "_blank",
-                        "noopener",
-                      )
-                    }
-                  >
-                    <ExternalLink className="h-3.5 w-3.5" />
-                  </Button>
-                )}
+                {(() => {
+                  const driveUrl = resolveGdriveFolderUrl(
+                    b.file_path,
+                    systemBackupFolder?.folder_id,
+                  );
+                  if (!driveUrl) return null;
+                  return (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 text-muted-foreground hover:text-primary"
+                      title="Open Google Drive folder"
+                      onClick={() => window.open(driveUrl, "_blank", "noopener")}
+                    >
+                      <ExternalLink className="h-3.5 w-3.5" />
+                    </Button>
+                  );
+                })()}
               </>
             )}
             <div className="text-xs text-muted-foreground tabular-nums text-right">
@@ -127,6 +152,18 @@ export function BackupHistoryList() {
           </div>
         </div>
       ))}
+      {!backupsLoading &&
+        !backupsError &&
+        systemBackups &&
+        Math.ceil(systemBackups.total / limit) > 1 && (
+          <div className="px-4 py-3 border-t">
+            <Pagination
+              page={page}
+              totalPages={Math.max(1, Math.ceil(systemBackups.total / limit))}
+              onPageChange={setPage}
+            />
+          </div>
+        )}
     </div>
   );
 }

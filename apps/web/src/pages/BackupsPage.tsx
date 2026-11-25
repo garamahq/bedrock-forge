@@ -34,6 +34,7 @@ import {
 } from "@/components/ui/dialog";
 import { AlertDialog } from "@/components/ui/alert-dialog";
 import { Pagination } from "@/components/crud";
+import { resolveGdriveFolderUrl } from "@/lib/backup-links";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -56,6 +57,7 @@ interface Backup {
   id: number;
   type: string;
   status: string;
+  file_path?: string | null;
   size_bytes: number | null;
   error_message: string | null;
   created_at: string;
@@ -665,23 +667,30 @@ export function BackupsPage() {
                                   >
                                     <Download className="h-3.5 w-3.5" />
                                   </Button>
-                                  {selectedEnv?.google_drive_folder_id && (
-                                    <Button
-                                      variant="ghost"
-                                      size="icon"
-                                      className="h-7 w-7 text-muted-foreground hover:text-primary"
-                                      title="Open Drive"
-                                      onClick={() =>
-                                        window.open(
-                                          `https://drive.google.com/drive/folders/${selectedEnv.google_drive_folder_id}`,
-                                          "_blank",
-                                          "noopener",
-                                        )
-                                      }
-                                    >
-                                      <ExternalLink className="h-3.5 w-3.5" />
-                                    </Button>
-                                  )}
+                                  {(() => {
+                                    const driveUrl = resolveGdriveFolderUrl(
+                                      b.file_path,
+                                      selectedEnv?.google_drive_folder_id,
+                                    );
+                                    if (!driveUrl) return null;
+                                    return (
+                                      <Button
+                                        variant="ghost"
+                                        size="icon"
+                                        className="h-7 w-7 text-muted-foreground hover:text-primary"
+                                        title="Open Drive"
+                                        onClick={() =>
+                                          window.open(
+                                            driveUrl,
+                                            "_blank",
+                                            "noopener",
+                                          )
+                                        }
+                                      >
+                                        <ExternalLink className="h-3.5 w-3.5" />
+                                      </Button>
+                                    );
+                                  })()}
                                 </>
                               )}
                               {isAdmin && (

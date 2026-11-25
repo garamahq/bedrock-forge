@@ -39,15 +39,23 @@ if [ ! -f .env ]; then
 fi
 
 # ── Rebuild forge + web images ───────────────────────────────────────────────
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/tools/compose-helpers.sh"
+
 echo "Building new images…"
-docker compose build forge web
+build_compose_images forge web
 
 # ── Rolling restart of forge + web (postgres + redis keep running) ───────────
 echo "Restarting forge and web services…"
 docker compose up -d --no-deps forge web
 
+echo "Verifying running container images…"
+verify_all_app_images
+
 # ── Wait for API to be healthy ───────────────────────────────────────────────
 wait_for_api_healthy 3001 30
+
+# Re-verify container identity after healthcheck settles
+verify_all_app_images
 
 echo ""
 echo "Update complete."
