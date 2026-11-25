@@ -18,6 +18,7 @@ function makeRepo() {
     findById: jest.fn(),
     findProjectHistory: jest.fn(),
     create: jest.fn(),
+    createFull: jest.fn(),
     update: jest.fn(),
     remove: jest.fn(),
     importFromServer: jest.fn(),
@@ -445,6 +446,46 @@ describe("ProjectsService", () => {
       );
       expect(result).toHaveProperty("message");
       expect(result.message).toContain("Decommissioning job queued");
+    });
+  });
+
+  describe("createFull credential hygiene (#108)", () => {
+    it("persists encrypted DB credentials inside createFull and omits dbPassword from BullMQ payload", async () => {
+      const project = makeProject(BigInt(12));
+      const environment = makeEnvironment(BigInt(34));
+      (repo as any).createFull.mockResolvedValue({
+        project,
+        environment,
+        jobExecution: { id: BigInt(77) },
+      });
+
+      const syntheticPass = "proj-Secr3t-Pass-4321!";
+      await svc.createFull({
+        name: "Secure Site",
+        client_id: 2,
+        server_id: 5,
+        domain: "secure-proj.example.test",
+        admin_email: "admin@example.test",
+        db_name: "wp_proj",
+        db_user: "u_proj",
+        db_password: syntheticPass,
+        db_host: "localhost",
+      } as any);
+
+      expect((repo as any).createFull).toHaveBeenCalledWith(
+        expect.objectContaining({
+          dbCredentials: {
+            dbName: "wp_proj",
+            dbUser: "u_proj",
+            dbPassword: syntheticPass,
+            dbHost: "localhost",
+          },
+        }),
+      );
+
+      const queuePayload = queue.add.mock.calls[0][1];
+      expect(JSON.stringify(queuePayload)).not.toContain(syntheticPass);
+      expect(JSON.stringify(queuePayload)).not.toContain("dbPassword");
     });
   });
 });

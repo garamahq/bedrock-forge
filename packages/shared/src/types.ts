@@ -185,7 +185,7 @@ export const CreateBedrockPayloadSchema = z.object({
       domain: z.string(),
       dbName: z.string(),
       dbUser: z.string(),
-      dbPassword: z.string(),
+      dbPassword: z.string().optional(),
       dbHost: z.string().default("localhost"),
       phpVersion: z.string().default("8.3"),
       adminEmail: z.string().optional(),

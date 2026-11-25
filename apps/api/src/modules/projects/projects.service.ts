@@ -431,7 +431,7 @@ export class ProjectsService {
       dto.db_password?.trim() || randomBytes(16).toString("base64url");
     const dbHost = dto.db_host?.trim() || "localhost";
 
-    // Create Project + Environment in a transaction
+    // Create Project + Environment + encrypted WpDbCredentials in a transaction
     const { project, environment, jobExecution } = await this.repo.createFull({
       name,
       client_id: BigInt(client_id),
@@ -446,9 +446,15 @@ export class ProjectsService {
       jobType: JOB_TYPES.PROJECT_CREATE_BEDROCK,
       notes: dto.notes,
       links: projectLinksJson(dto.links),
+      dbCredentials: {
+        dbName,
+        dbUser,
+        dbPassword,
+        dbHost,
+      },
     });
 
-    // Enqueue the provisioning job
+    // Enqueue the provisioning job without plaintext dbPassword
     const job = await this.projectsQueue.add(
       JOB_TYPES.PROJECT_CREATE_BEDROCK,
       {
@@ -458,7 +464,6 @@ export class ProjectsService {
           domain,
           dbName,
           dbUser,
-          dbPassword,
           dbHost,
           phpVersion,
           adminEmail: admin_email,
