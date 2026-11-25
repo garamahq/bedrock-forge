@@ -9,6 +9,7 @@ import {
   Plus,
   Server,
   Layout,
+  Folder,
   AlertCircle,
   Clock,
 } from "lucide-react";
@@ -43,7 +44,7 @@ import {
 
 interface MaintenanceWindow {
   id: number;
-  resource_type: "server" | "environment";
+  resource_type: "server" | "environment" | "project";
   resource_id: number;
   starts_at: string;
   ends_at: string;
@@ -65,9 +66,14 @@ interface EnvironmentOption {
   url: string;
 }
 
+interface ProjectOption {
+  id: number;
+  name: string;
+}
+
 const windowSchema = z
   .object({
-    resource_type: z.enum(["server", "environment"]),
+    resource_type: z.enum(["server", "environment", "project"]),
     resource_id: z.string().min(1, "Please select a resource"),
     starts_at: z.string().min(1, "Start date and time is required"),
     ends_at: z.string().min(1, "End date and time is required"),
@@ -91,10 +97,12 @@ function MaintenanceWindowFormDialog({
   open,
   onOpenChange,
   onSuccess,
+  projects,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
   onSuccess: () => void;
+  projects: ProjectOption[];
 }) {
   const { data: servers = [] } = useQuery<ServerOption[]>({
     queryKey: ["servers-options"],
@@ -164,9 +172,9 @@ function MaintenanceWindowFormDialog({
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
           <div className="space-y-1.5">
             <Label>Resource Type</Label>
-            <Select
+              <Select
               value={resourceType}
-              onValueChange={(val: "server" | "environment") => {
+              onValueChange={(val: "server" | "environment" | "project") => {
                 setValue("resource_type", val);
                 setValue("resource_id", "");
               }}
@@ -177,6 +185,7 @@ function MaintenanceWindowFormDialog({
               <SelectContent>
                 <SelectItem value="server">Server</SelectItem>
                 <SelectItem value="environment">Environment</SelectItem>
+                <SelectItem value="project">Project</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -192,7 +201,9 @@ function MaintenanceWindowFormDialog({
                   placeholder={
                     resourceType === "server"
                       ? "Select Server"
-                      : "Select Environment"
+                      : resourceType === "project"
+                        ? "Select Project"
+                        : "Select Environment"
                   }
                 />
               </SelectTrigger>
@@ -203,11 +214,17 @@ function MaintenanceWindowFormDialog({
                         {s.name}
                       </SelectItem>
                     ))
-                  : environments.map((e) => (
-                      <SelectItem key={e.id} value={e.id.toString()}>
-                        {e.type} ({e.url})
-                      </SelectItem>
-                    ))}
+                  : resourceType === "project"
+                    ? projects.map((p) => (
+                        <SelectItem key={p.id} value={p.id.toString()}>
+                          {p.name}
+                        </SelectItem>
+                      ))
+                    : environments.map((e) => (
+                        <SelectItem key={e.id} value={e.id.toString()}>
+                          {e.type} ({e.url})
+                        </SelectItem>
+                      ))}
               </SelectContent>
             </Select>
             {errors.resource_id && (
@@ -289,6 +306,20 @@ export function MaintenanceWindowsPage() {
   );
 
   const {
+    data: projects = [],
+  } = useQuery<ProjectOption[]>({
+    queryKey: ["projects-options"],
+    queryFn: async () => {
+      const res = await api.get<{ items: ProjectOption[] }>(
+        "/projects?limit=100",
+      );
+      return res.items || [];
+    },
+  });
+
+  const projectNameById = new Map(projects.map((p) => [p.id, p.name]));
+
+  const {
     data: response,
     isLoading,
     isError,
@@ -336,6 +367,8 @@ export function MaintenanceWindowsPage() {
         <div className="flex items-center gap-2">
           {w.resource_type === "server" ? (
             <Server className="h-4 w-4 text-muted-foreground" />
+          ) : w.resource_type === "project" ? (
+            <Folder className="h-4 w-4 text-muted-foreground" />
           ) : (
             <Layout className="h-4 w-4 text-muted-foreground" />
           )}
@@ -343,9 +376,12 @@ export function MaintenanceWindowsPage() {
             <span className="font-medium text-foreground">
               {w.resource_type === "server"
                 ? w.server?.name || `Server #${w.resource_id}`
-                : w.environment
-                  ? `${w.environment.type} (${w.environment.url})`
-                  : `Environment #${w.resource_id}`}
+                : w.resource_type === "project"
+                  ? projectNameById.get(w.resource_id) ||
+                    `Project #${w.resource_id}`
+                  : w.environment
+                    ? `${w.environment.type} (${w.environment.url})`
+                    : `Environment #${w.resource_id}`}
             </span>
             <span className="ml-1.5 text-xs text-muted-foreground capitalize">
               ({w.resource_type})
@@ -446,6 +482,7 @@ export function MaintenanceWindowsPage() {
       <MaintenanceWindowFormDialog
         open={createOpen}
         onOpenChange={setCreateOpen}
+        projects={projects}
         onSuccess={() =>
           qc.invalidateQueries({ queryKey: ["maintenance-windows"] })
         }

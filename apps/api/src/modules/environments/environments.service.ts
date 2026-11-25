@@ -809,12 +809,45 @@ export class EnvironmentsService {
       };
     }
 
-    // 3. Branch filtering: verify pushed ref matches configured branch
     const configuredBranch = env.git_branch || "main";
+
+    // Reject non-push GitHub events (e.g. delete, create, release) (#93)
+    if (options.event && options.event !== "push") {
+      return {
+        status: "skipped",
+        reason: `Ignoring GitHub event "${options.event}" — only "push" triggers deployment`,
+        event: options.event,
+        configuredBranch,
+      };
+    }
+
+    // Reject branch deletion pushes (#93)
+    const afterSha =
+      typeof options.body?.after === "string" ? options.body.after : undefined;
+    if (
+      options.body?.deleted === true ||
+      (afterSha !== undefined && /^0{40}$/.test(afterSha))
+    ) {
+      return {
+        status: "skipped",
+        reason: `Ignoring branch deletion event for "${configuredBranch}"`,
+        configuredBranch,
+      };
+    }
+
+    // 3. Branch filtering: allow only branch pushes to configured branch (#93)
     const ref =
       typeof options.body?.ref === "string" ? options.body.ref : undefined;
-    if (ref && ref.startsWith("refs/heads/")) {
-      const pushedBranch = ref.replace("refs/heads/", "");
+    if (ref !== undefined) {
+      if (!ref.startsWith("refs/heads/")) {
+        return {
+          status: "skipped",
+          reason: `Ref "${ref}" is not a branch push for configured branch "${configuredBranch}"`,
+          ref,
+          configuredBranch,
+        };
+      }
+      const pushedBranch = ref.slice("refs/heads/".length);
       if (pushedBranch !== configuredBranch) {
         return {
           status: "skipped",
@@ -823,14 +856,17 @@ export class EnvironmentsService {
           configuredBranch,
         };
       }
+    } else if (options.event === "push") {
+      return {
+        status: "skipped",
+        reason: "Missing Git ref on push webhook payload",
+        configuredBranch,
+      };
     }
 
     // 4. Extract commit SHA if present
     const commitSha =
-      typeof options.body?.after === "string" &&
-      options.body.after !== "0000000000000000000000000000000000000000"
-        ? options.body.after
-        : undefined;
+      afterSha && !/^0{40}$/.test(afterSha) ? afterSha : undefined;
 
     return this.deployGit(id, {
       branch: configuredBranch,
