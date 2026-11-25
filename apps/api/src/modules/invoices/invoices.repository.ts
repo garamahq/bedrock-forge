@@ -1,5 +1,24 @@
-import { Injectable } from "@nestjs/common";
+import { ConflictException, Injectable } from "@nestjs/common";
+import { Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
+
+const MAX_SERIALIZED_RETRIES = 5;
+
+function isOverlapConstraintError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message ?? "";
+  return (
+    msg.includes("23P01") ||
+    msg.includes("invoices_no_overlapping_project_period")
+  );
+}
+
+function isRetryableTxConflict(err: unknown): boolean {
+  if (err instanceof Prisma.PrismaClientKnownRequestError) {
+    return err.code === "P2034" || err.code === "P2002";
+  }
+  return false;
+}
 
 const PROJECT_WITH_PACKAGES_INCLUDE = {
   hosting_package: true,
@@ -64,32 +83,82 @@ export class InvoicesRepository {
   }
 
   /**
-   * Atomically allocate the next invoice number and create the invoice record.
-   * Runs inside a single serializable transaction so concurrent calls cannot
-   * read the same sequence value and produce duplicate invoice numbers.
+   * Atomically verify non-overlapping billing periods, allocate max(seq) + 1
+   * for the year (safe after mid-year deletions), and create the invoice row
+   * inside a Serializable transaction with conflict retries.
    */
-  createSerialized(
+  async createSerialized(
     data: Omit<
       Parameters<typeof this.prisma.invoice.create>[0]["data"],
       "invoice_number"
-    >,
+    > & {
+      project_id: bigint;
+      period_start: Date;
+      period_end: Date;
+    },
     year: number,
   ) {
     const prefix = `INV-${year}-`;
-    return this.prisma.$transaction(
-      async (tx) => {
-        const count = await tx.invoice.count({
-          where: { invoice_number: { startsWith: prefix } },
-        });
-        const invoiceNumber = `${prefix}${String(count + 1).padStart(3, "0")}`;
-        return tx.invoice.create({
-          data: { invoice_number: invoiceNumber, ...data } as Parameters<
-            typeof tx.invoice.create
-          >[0]["data"],
-          ...INVOICE_INCLUDE,
-        });
-      },
-      { isolationLevel: "Serializable" },
+
+    for (let attempt = 1; attempt <= MAX_SERIALIZED_RETRIES; attempt++) {
+      try {
+        return await this.prisma.$transaction(
+          async (tx) => {
+            const overlapping = await tx.invoice.findFirst({
+              where: {
+                project_id: data.project_id,
+                period_start: { lte: data.period_end },
+                period_end: { gte: data.period_start },
+              },
+              select: { id: true },
+            });
+            if (overlapping) {
+              throw new ConflictException(
+                `An invoice already exists for project #${data.project_id} that overlaps this period`,
+              );
+            }
+
+            const existing = await tx.invoice.findMany({
+              where: { invoice_number: { startsWith: prefix } },
+              select: { invoice_number: true },
+            });
+            let maxSeq = 0;
+            for (const row of existing) {
+              const suffix = Number.parseInt(
+                row.invoice_number.slice(prefix.length),
+                10,
+              );
+              if (Number.isFinite(suffix) && suffix > maxSeq) {
+                maxSeq = suffix;
+              }
+            }
+            const invoiceNumber = `${prefix}${String(maxSeq + 1).padStart(3, "0")}`;
+
+            return tx.invoice.create({
+              data: { invoice_number: invoiceNumber, ...data } as Parameters<
+                typeof tx.invoice.create
+              >[0]["data"],
+              ...INVOICE_INCLUDE,
+            });
+          },
+          { isolationLevel: "Serializable" },
+        );
+      } catch (err) {
+        if (err instanceof ConflictException) throw err;
+        if (isOverlapConstraintError(err)) {
+          throw new ConflictException(
+            `An invoice already exists for project #${data.project_id} that overlaps this period`,
+          );
+        }
+        if (isRetryableTxConflict(err) && attempt < MAX_SERIALIZED_RETRIES) {
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    throw new ConflictException(
+      "Unable to allocate invoice number due to concurrent updates; please retry.",
     );
   }
 
@@ -158,6 +227,22 @@ export class InvoicesRepository {
   }
 
   /**
+   * Conditionally move a still-unpaid invoice to overdue without overwriting
+   * concurrent payment transitions or paid_at timestamps.
+   */
+  async markAsOverdueIfEligible(id: number): Promise<boolean> {
+    const result = await this.prisma.invoice.updateMany({
+      where: {
+        id: BigInt(id),
+        status: { in: ["draft", "sent"] },
+        paid_at: null,
+      },
+      data: { status: "overdue" },
+    });
+    return result.count > 0;
+  }
+
+  /**
    * Returns invoices in draft or sent status whose due_date is before `now`.
    * Used by the daily overdue-detection cron.
    */
@@ -166,6 +251,7 @@ export class InvoicesRepository {
       where: {
         status: { in: ["draft", "sent"] },
         due_date: { lt: now },
+        paid_at: null,
       },
       include: {
         client: { select: { id: true, name: true } },

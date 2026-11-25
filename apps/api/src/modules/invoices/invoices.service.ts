@@ -8,8 +8,14 @@ import {
 } from "@nestjs/common";
 import { Cron, CronExpression } from "@nestjs/schedule";
 import { existsSync } from "fs";
+import {
+  type BillingCurrencySettings,
+  DEFAULT_BILLING_CURRENCY_SETTINGS,
+  formatBillingMoney,
+} from "@bedrock-forge/shared";
 import { InvoicesRepository } from "./invoices.repository";
 import { NotificationsService } from "../notifications/notifications.service";
+import { BillingSettingsService } from "../settings/services/billing-settings.service";
 import {
   GenerateInvoiceDto,
   GenerateBulkInvoiceDto,
@@ -17,6 +23,25 @@ import {
   UpdateInvoiceDto,
   QueryInvoicesDto,
 } from "./dto/invoice.dto";
+
+type InvoiceStatusValue = "draft" | "sent" | "paid" | "overdue" | "cancelled";
+
+function buildStatusTransitionData(
+  current: { status: string; paid_at: Date | null },
+  nextStatus: InvoiceStatusValue,
+  now = new Date(),
+): { status: InvoiceStatusValue; paid_at: Date | null } {
+  if (nextStatus === "paid") {
+    return {
+      status: "paid",
+      paid_at: current.paid_at ?? now,
+    };
+  }
+  return {
+    status: nextStatus,
+    paid_at: null,
+  };
+}
 
 function buildPeriodStart(year: number, month: number): Date {
   return new Date(Date.UTC(year, month - 1, 1));
@@ -73,6 +98,7 @@ export class InvoicesService {
   constructor(
     private readonly repo: InvoicesRepository,
     private readonly notifications: NotificationsService,
+    private readonly billingSettings: BillingSettingsService,
   ) {}
 
   async findAll(filters: QueryInvoicesDto) {
@@ -136,8 +162,11 @@ export class InvoicesService {
     });
 
     try {
+      const currencySettings = this.billingSettings
+        ? await this.billingSettings.getBillingSettings()
+        : DEFAULT_BILLING_CURRENCY_SETTINGS;
       const page = await browser.newPage();
-      const html = this.buildInvoiceHtml(inv);
+      const html = this.buildInvoiceHtml(inv, currencySettings);
       await page.setContent(html, { waitUntil: "domcontentloaded" });
       const pdf = await page.pdf({
         format: "A4",
@@ -157,12 +186,15 @@ export class InvoicesService {
 
   private buildInvoiceHtml(
     inv: ReturnType<InvoicesService["serialise"]>,
+    currencySettings: BillingCurrencySettings = DEFAULT_BILLING_CURRENCY_SETTINGS,
   ): string {
     const formatDate = (value: Date | null) => {
       if (!value) return "—";
       const date = new Date(value);
       return date.toISOString().slice(0, 10);
     };
+    const formatAmount = (amount: number) =>
+      escapeHtml(formatBillingMoney(amount, currencySettings));
 
     const hostingAmount = Number(inv.hosting_amount);
     const supportAmount = Number(inv.support_amount);
@@ -184,7 +216,7 @@ export class InvoicesService {
             <strong>Hosting Package: ${escapeHtml(inv.hosting_package_snapshot)}</strong>
             <div style="font-size: 12px; color: #6b7280; margin-top: 4px;">Monthly WordPress hosting plan.</div>
           </td>
-          <td style="text-align: right; vertical-align: middle;">€${hostingAmount.toFixed(2)}</td>
+          <td style="text-align: right; vertical-align: middle;">${formatAmount(hostingAmount)}</td>
         </tr>
       `;
     }
@@ -197,7 +229,7 @@ export class InvoicesService {
             <strong>Support & Maintenance: ${escapeHtml(inv.support_package_snapshot)}</strong>
             <div style="font-size: 12px; color: #6b7280; margin-top: 4px;">Updates, security scans, and operational support.</div>
           </td>
-          <td style="text-align: right; vertical-align: middle;">€${supportAmount.toFixed(2)}</td>
+          <td style="text-align: right; vertical-align: middle;">${formatAmount(supportAmount)}</td>
         </tr>
       `;
     }
@@ -372,11 +404,11 @@ export class InvoicesService {
         <tbody>
           <tr>
             <td style="color: #6b7280;">Subtotal</td>
-            <td style="text-align: right;">€${subtotal.toFixed(2)}</td>
+            <td style="text-align: right;">${formatAmount(subtotal)}</td>
           </tr>
           <tr class="grand-total">
             <td>Total Due</td>
-            <td style="text-align: right;">€${totalAmount.toFixed(2)}</td>
+            <td style="text-align: right;">${formatAmount(totalAmount)}</td>
           </tr>
         </tbody>
       </table>
@@ -392,6 +424,52 @@ export class InvoicesService {
 </body>
 </html>
     `;
+  }
+
+  private async issueProjectInvoice(
+    project: NonNullable<Awaited<ReturnType<InvoicesRepository["findProjectWithPackages"]>>>,
+    fromYear: number,
+    months: number,
+    periodStart: Date,
+    periodEnd: Date,
+    dueDate: Date,
+  ) {
+    const hostingAmount = project.hosting_package
+      ? Number(project.hosting_package.price_monthly) * months
+      : 0;
+    const supportAmount = project.support_package
+      ? Number(project.support_package.price_monthly) * months
+      : 0;
+    const totalAmount = hostingAmount + supportAmount;
+
+    const inv = await this.repo.createSerialized(
+      {
+        project_id: project.id,
+        client_id: project.client_id,
+        hosting_package_id: project.hosting_package_id ?? undefined,
+        support_package_id: project.support_package_id ?? undefined,
+        hosting_package_snapshot: project.hosting_package?.name ?? null,
+        support_package_snapshot: project.support_package?.name ?? null,
+        hosting_amount: hostingAmount,
+        support_amount: supportAmount,
+        total_amount: totalAmount,
+        period_start: periodStart,
+        period_end: periodEnd,
+        due_date: dueDate,
+        status: "draft",
+      },
+      fromYear,
+    );
+
+    this.notifications.dispatch("invoice.created", {
+      invoiceNumber: inv.invoice_number,
+      projectName: project.name,
+      clientName: project.client.name,
+      totalAmount,
+      year: fromYear,
+    });
+
+    return inv;
   }
 
   async generate(dto: GenerateInvoiceDto) {
@@ -428,42 +506,15 @@ export class InvoicesService {
       dto.toYear,
       dto.toMonth,
     );
-    const hostingAmount = project.hosting_package
-      ? Number(project.hosting_package.price_monthly) * months
-      : 0;
-    const supportAmount = project.support_package
-      ? Number(project.support_package.price_monthly) * months
-      : 0;
-    const totalAmount = hostingAmount + supportAmount;
-
     const dueDate = new Date(periodStart.getTime() + 30 * 24 * 60 * 60 * 1000);
-
-    const inv = await this.repo.createSerialized(
-      {
-        project_id: BigInt(dto.projectId),
-        client_id: project.client_id,
-        hosting_package_id: project.hosting_package_id ?? undefined,
-        support_package_id: project.support_package_id ?? undefined,
-        hosting_package_snapshot: project.hosting_package?.name ?? null,
-        support_package_snapshot: project.support_package?.name ?? null,
-        hosting_amount: hostingAmount,
-        support_amount: supportAmount,
-        total_amount: totalAmount,
-        period_start: periodStart,
-        period_end: periodEnd,
-        due_date: dueDate,
-        status: "draft",
-      },
+    const inv = await this.issueProjectInvoice(
+      project,
       dto.fromYear,
+      months,
+      periodStart,
+      periodEnd,
+      dueDate,
     );
-
-    this.notifications.dispatch("invoice.created", {
-      invoiceNumber: inv.invoice_number,
-      projectName: project.name,
-      clientName: project.client.name,
-      totalAmount,
-      year: dto.fromYear,
-    });
 
     return this.serialise(inv);
   }
@@ -472,79 +523,7 @@ export class InvoicesService {
     assertValidPeriod(dto.fromYear, dto.fromMonth, dto.toYear, dto.toMonth);
 
     const projects = await this.repo.findActiveProjectsWithPackages();
-
-    const results: {
-      projectId: number;
-      invoiceNumber?: string;
-      skipped?: string;
-    }[] = [];
-
-    const periodStart = buildPeriodStart(dto.fromYear, dto.fromMonth);
-    const periodEnd = buildPeriodEnd(dto.toYear, dto.toMonth);
-    const months = countMonths(
-      dto.fromYear,
-      dto.fromMonth,
-      dto.toYear,
-      dto.toMonth,
-    );
-    const dueDate = new Date(periodStart.getTime() + 30 * 24 * 60 * 60 * 1000);
-
-    for (const project of projects) {
-      const alreadyExists = await this.repo.existsForProjectAndPeriodOverlap(
-        Number(project.id),
-        periodStart,
-        periodEnd,
-      );
-      if (alreadyExists) {
-        results.push({
-          projectId: Number(project.id),
-          skipped: "already_exists",
-        });
-        continue;
-      }
-
-      const hostingAmount = project.hosting_package
-        ? Number(project.hosting_package.price_monthly) * months
-        : 0;
-      const supportAmount = project.support_package
-        ? Number(project.support_package.price_monthly) * months
-        : 0;
-      const totalAmount = hostingAmount + supportAmount;
-
-      const inv = await this.repo.createSerialized(
-        {
-          project_id: project.id,
-          client_id: project.client_id,
-          hosting_package_id: project.hosting_package_id ?? undefined,
-          support_package_id: project.support_package_id ?? undefined,
-          hosting_package_snapshot: project.hosting_package?.name ?? null,
-          support_package_snapshot: project.support_package?.name ?? null,
-          hosting_amount: hostingAmount,
-          support_amount: supportAmount,
-          total_amount: totalAmount,
-          period_start: periodStart,
-          period_end: periodEnd,
-          due_date: dueDate,
-          status: "draft",
-        },
-        dto.fromYear,
-      );
-
-      this.notifications.dispatch("invoice.created", {
-        invoiceNumber: inv.invoice_number,
-        projectName: project.name,
-        clientName: project.client.name,
-        totalAmount,
-        year: dto.fromYear,
-      });
-
-      results.push({
-        projectId: Number(project.id),
-        invoiceNumber: inv.invoice_number,
-      });
-    }
-
-    return results;
+    return this.issueBatchForProjects(projects, dto);
   }
 
   /**
@@ -570,6 +549,22 @@ export class InvoicesService {
       );
     }
 
+    return this.issueBatchForProjects(projects, dto);
+  }
+
+  private async issueBatchForProjects(
+    projects: Awaited<
+      ReturnType<InvoicesRepository["findActiveProjectsWithPackages"]>
+    >,
+    dto: {
+      fromYear: number;
+      fromMonth: number;
+      toYear: number;
+      toMonth: number;
+    },
+  ): Promise<
+    { projectId: number; invoiceNumber?: string; skipped?: string }[]
+  > {
     const results: {
       projectId: number;
       invoiceNumber?: string;
@@ -600,45 +595,29 @@ export class InvoicesService {
         continue;
       }
 
-      const hostingAmount = project.hosting_package
-        ? Number(project.hosting_package.price_monthly) * months
-        : 0;
-      const supportAmount = project.support_package
-        ? Number(project.support_package.price_monthly) * months
-        : 0;
-      const totalAmount = hostingAmount + supportAmount;
-
-      const inv = await this.repo.createSerialized(
-        {
-          project_id: project.id,
-          client_id: project.client_id,
-          hosting_package_id: project.hosting_package_id ?? undefined,
-          support_package_id: project.support_package_id ?? undefined,
-          hosting_package_snapshot: project.hosting_package?.name ?? null,
-          support_package_snapshot: project.support_package?.name ?? null,
-          hosting_amount: hostingAmount,
-          support_amount: supportAmount,
-          total_amount: totalAmount,
-          period_start: periodStart,
-          period_end: periodEnd,
-          due_date: dueDate,
-          status: "draft",
-        },
-        dto.fromYear,
-      );
-
-      this.notifications.dispatch("invoice.created", {
-        invoiceNumber: inv.invoice_number,
-        projectName: project.name,
-        clientName: project.client.name,
-        totalAmount,
-        year: dto.fromYear,
-      });
-
-      results.push({
-        projectId: Number(project.id),
-        invoiceNumber: inv.invoice_number,
-      });
+      try {
+        const inv = await this.issueProjectInvoice(
+          project,
+          dto.fromYear,
+          months,
+          periodStart,
+          periodEnd,
+          dueDate,
+        );
+        results.push({
+          projectId: Number(project.id),
+          invoiceNumber: inv.invoice_number,
+        });
+      } catch (err) {
+        if (err instanceof ConflictException) {
+          results.push({
+            projectId: Number(project.id),
+            skipped: "already_exists",
+          });
+          continue;
+        }
+        throw err;
+      }
     }
 
     return results;
@@ -649,7 +628,9 @@ export class InvoicesService {
     if (!inv) throw new NotFoundException(`Invoice #${id} not found`);
 
     const data: Record<string, unknown> = {};
-    if (dto.status) data.status = dto.status;
+    if (dto.status) {
+      Object.assign(data, buildStatusTransitionData(inv, dto.status));
+    }
     if (dto.notes !== undefined) data.notes = dto.notes;
     if (dto.due_date) data.due_date = new Date(dto.due_date);
 
@@ -661,10 +642,14 @@ export class InvoicesService {
     const inv = await this.repo.findById(id);
     if (!inv) throw new NotFoundException(`Invoice #${id} not found`);
 
-    const updated = await this.repo.update(id, {
-      status: "paid",
-      paid_at: new Date(),
-    });
+    if (inv.status === "paid" && inv.paid_at) {
+      return this.serialise(inv);
+    }
+
+    const updated = await this.repo.update(
+      id,
+      buildStatusTransitionData(inv, "paid"),
+    );
 
     return this.serialise(updated);
   }
@@ -701,9 +686,12 @@ export class InvoicesService {
 
     if (overdueList.length === 0) return;
 
+    let markedCount = 0;
     for (const inv of overdueList) {
       try {
-        await this.repo.update(Number(inv.id), { status: "overdue" });
+        const marked = await this.repo.markAsOverdueIfEligible(Number(inv.id));
+        if (!marked) continue;
+        markedCount += 1;
         this.notifications.dispatch("invoice.overdue", {
           invoiceNumber: inv.invoice_number,
           clientName: inv.client.name,
@@ -716,7 +704,9 @@ export class InvoicesService {
       }
     }
 
-    this.logger.log(`Marked ${overdueList.length} invoice(s) as overdue`);
+    if (markedCount > 0) {
+      this.logger.log(`Marked ${markedCount} invoice(s) as overdue`);
+    }
   }
 
   private serialise(
