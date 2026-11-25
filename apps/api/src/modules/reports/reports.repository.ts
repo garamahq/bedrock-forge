@@ -41,6 +41,7 @@ export class ReportsRepository {
       slack_channel_id: c.slack_channel_id,
       has_token: !!c.slack_bot_token_enc,
       has_webhook: !!c.google_chat_webhook_url_enc,
+      has_webhook_url: !!c.webhook_url_enc,
       active: c.active,
       subscribed: c.events.includes("report.weekly"),
     }));
