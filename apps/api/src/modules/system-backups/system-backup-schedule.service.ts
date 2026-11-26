@@ -4,6 +4,10 @@ import { Queue } from "bullmq";
 import { QUEUES, JOB_TYPES } from "@bedrock-forge/shared";
 import { SystemBackupsRepository } from "./system-backups.repository";
 import { UpsertSystemBackupScheduleDto } from "./system-backup-schedule.dto";
+import {
+  removeBullScheduler,
+  syncBullScheduler,
+} from "../../common/utils/bullmq-scheduler.util";
 
 @Injectable()
 export class SystemBackupScheduleService {
@@ -72,49 +76,36 @@ export class SystemBackupScheduleService {
     scheduleId: number,
     dto: UpsertSystemBackupScheduleDto,
   ) {
-    // Remove existing repeatable job first (idempotent)
-    await this.removeRepeatableJob(scheduleId);
-
+    const schedulerId = this.repeatableJobId(scheduleId);
+    const pattern = this.buildCronPattern(dto);
     if (!dto.enabled) {
+      await this.removeRepeatableJob(scheduleId);
       this.logger.log(
         `SystemBackupSchedule ${scheduleId} disabled — repeatable job removed`,
       );
       return;
     }
 
-    const pattern = this.buildCronPattern(dto);
-    const jobId = this.repeatableJobId(scheduleId);
-
     this.logger.log(
-      `Registering system-backup repeatable job ${jobId} with cron ${pattern}`,
+      `Registering system-backup scheduler ${schedulerId} with cron ${pattern}`,
     );
 
-    await this.queue.add(
-      JOB_TYPES.SYSTEM_BACKUP_SCHEDULED,
-      { scheduleId },
-      {
-        jobId,
-        repeat: { pattern },
+    await syncBullScheduler({
+      queue: this.queue,
+      schedulerId,
+      enabled: dto.enabled,
+      pattern,
+      jobName: JOB_TYPES.SYSTEM_BACKUP_SCHEDULED,
+      data: { scheduleId },
+      jobOpts: {
         removeOnComplete: 10,
         removeOnFail: 5,
       },
-    );
+    });
   }
 
   private async removeRepeatableJob(scheduleId: number) {
-    const jobId = this.repeatableJobId(scheduleId);
-    try {
-      const repeatableJobs = await this.queue.getRepeatableJobs();
-      for (const rj of repeatableJobs) {
-        if (rj.id === jobId) {
-          await this.queue.removeRepeatableByKey(rj.key);
-          this.logger.log(`Removed repeatable job key: ${rj.key}`);
-        }
-      }
-    } catch (err) {
-      this.logger.warn(
-        `Could not remove system-backup repeatable job for schedule ${scheduleId}: ${err}`,
-      );
-    }
+    const schedulerId = this.repeatableJobId(scheduleId);
+    await removeBullScheduler(this.queue, schedulerId);
   }
 }

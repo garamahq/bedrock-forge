@@ -297,6 +297,10 @@ export class JobExecutionsRepository {
       where: {
         bull_job_id: bullJobId,
         queue_name: queueName,
+        // Never allow fallback completion events to overwrite already-terminal executions
+        ...(status === "completed"
+          ? { status: { in: ["queued", "active"] } }
+          : {}),
       },
       data: {
         status,
@@ -316,6 +320,10 @@ export class JobExecutionsRepository {
       where: {
         bull_job_id: bullJobId,
         queue_name: queueName,
+        // Never allow fallback completion events to overwrite already-terminal executions
+        ...(status === "completed"
+          ? { status: { in: ["queued", "active"] } }
+          : {}),
       },
       data: {
         progress,

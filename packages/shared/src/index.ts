@@ -5,3 +5,4 @@ export * from "./security.types";
 export * from "./vulnerabilities";
 export * from "./navigation";
 export * from "./webhook";
+export * from "./backup-path";

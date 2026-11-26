@@ -4,7 +4,12 @@ import { QUEUES } from "@bedrock-forge/shared";
 import { PluginScanProcessor } from "./plugin-scan.processor";
 
 @Module({
-  imports: [BullModule.registerQueue({ name: QUEUES.PLUGIN_SCANS })],
+  imports: [
+    BullModule.registerQueue(
+      { name: QUEUES.PLUGIN_SCANS },
+      { name: QUEUES.BACKUPS },
+    ),
+  ],
   providers: [PluginScanProcessor],
 })
 export class PluginScanProcessorModule {}
