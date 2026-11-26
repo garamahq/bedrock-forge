@@ -20,13 +20,17 @@ import { callCpApi, CpCreds, escapeMysql } from "../../utils/cyberpanel-http";
 import { StepTracker } from "../../services/step-tracker";
 import {
   shellQuote,
-  flipProtocol,
   fixCyberPanelOwnership,
   createRemoteMyCnf,
   cleanupRemoteMyCnf,
   WpCliBuilder,
   detectSiteOwnerAndGroup,
 } from "../../utils/processor-utils";
+import {
+  detectContentDirectory,
+  replaceLiteralUrlInFiles,
+  runSerializedDbSearchReplace,
+} from "../../utils/url-replace.utils";
 
 // concurrency=1: Bedrock provisioning runs composer, git clone, SSH commands.
 @Processor(QUEUES.PROJECTS, { concurrency: 1 })
@@ -313,99 +317,49 @@ export class CreateBedrockProcessor extends WorkerHost {
         }
         await job.updateProgress({ value: 70, step: "Files synced" });
 
-        // ── URL search-replace (SQL — zero wp-cli per PROJECT.md) ─────────────
+        // ── URL search-replace (serialization-aware PHP script #111) ───────────
         const srcUrl = srcEnv.url ?? null;
         const tgtUrl = env.url ?? null;
 
         if (srcUrl && tgtUrl && srcUrl !== tgtUrl) {
-          const srMycnf = await createRemoteMyCnf(
+          await runSerializedDbSearchReplace({
             executor,
-            { dbUser, dbPassword, dbHost: "localhost" },
-            job.id ?? "default",
-            "cb_sr",
-          );
-          const srSqlFile = `/tmp/cb_sr_${job.id}.sql`;
-          try {
-            const pairs: Array<[string, string]> = [[srcUrl, tgtUrl]];
-            const alt = flipProtocol(srcUrl);
-            const altTgt = flipProtocol(tgtUrl);
-            if (alt && altTgt && alt !== tgtUrl) pairs.push([alt, altTgt]);
-
-            // Auto-detect WP table prefix; fallback 'wp_'
-            const prefixRes = await executor.execute(
-              `mysql --defaults-extra-file=${shellQuote(srMycnf)} ${shellQuote(dbName)} -sN -e ${shellQuote(
-                `SELECT REPLACE(table_name,'options','') FROM information_schema.tables WHERE table_schema='${escapeMysql(dbName)}' AND table_name LIKE '%options' LIMIT 1`,
-              )}`,
-            );
-            const p =
-              prefixRes.code === 0 && prefixRes.stdout.trim()
-                ? prefixRes.stdout.trim()
-                : "wp_";
-
-            const statements: string[] = [];
-            for (const [oldRaw, newRaw] of pairs) {
-              const o = escapeMysql(oldRaw);
-              const n = escapeMysql(newRaw);
-              statements.push(
-                `UPDATE \`${p}options\` SET option_value = REPLACE(option_value, '${o}', '${n}')`,
-                `UPDATE \`${p}posts\` SET post_content = REPLACE(post_content, '${o}', '${n}')`,
-                `UPDATE \`${p}posts\` SET post_excerpt = REPLACE(post_excerpt, '${o}', '${n}')`,
-                `UPDATE \`${p}postmeta\` SET meta_value = REPLACE(CAST(meta_value AS CHAR), '${o}', '${n}')`,
-                `UPDATE \`${p}usermeta\` SET meta_value = REPLACE(meta_value, '${o}', '${n}')`,
-                `UPDATE \`${p}comments\` SET comment_content = REPLACE(comment_content, '${o}', '${n}')`,
-                `UPDATE \`${p}comments\` SET comment_author_url = REPLACE(comment_author_url, '${o}', '${n}')`,
-                `UPDATE \`${p}commentmeta\` SET meta_value = REPLACE(meta_value, '${o}', '${n}')`,
-                `UPDATE \`${p}termmeta\` SET meta_value = REPLACE(meta_value, '${o}', '${n}')`,
-                `UPDATE \`${p}links\` SET link_url = REPLACE(link_url, '${o}', '${n}')`,
-                `UPDATE \`${p}links\` SET link_image = REPLACE(link_image, '${o}', '${n}')`,
-                `UPDATE \`${p}links\` SET link_rss = REPLACE(link_rss, '${o}', '${n}')`,
-              );
-            }
-            await executor.pushFile({
-              remotePath: srSqlFile,
-              content: Buffer.from(statements.join(";\n") + ";"),
-            });
-            const srResult = await executor.execute(
-              `mysql --defaults-extra-file=${shellQuote(srMycnf)} ${shellQuote(dbName)} < ${shellQuote(srSqlFile)}`,
-            );
-            if (srResult.code !== 0) {
-              this.logger.warn(
-                `URL search-replace SQL failed: ${srResult.stderr}`,
-              );
-            }
-          } finally {
-            await cleanupRemoteMyCnf(executor, srMycnf);
-            await executor.execute(`rm -f ${shellQuote(srSqlFile)}`).catch(() => {});
-          }
+            creds: { dbUser, dbPassword, dbHost },
+            dbName,
+            sourceUrl: srcUrl,
+            targetUrl: tgtUrl,
+            jobId: job.id ?? "default",
+            tmpTag: "clone",
+            onLog: (entry) => {
+              if (entry.level === "error") {
+                this.logger.error(`${entry.step}: ${entry.detail ?? ""}`);
+              } else {
+                this.logger.log(`${entry.step}: ${entry.detail ?? ""}`);
+              }
+            },
+          });
         }
         await job.updateProgress({
           value: 80,
           step: "URL search-replace done",
         });
 
-        // Replace hardcoded URLs in wp-content files (CSS, JS, PHP, etc.)
+        // Replace hardcoded literal URLs in detected content directory (#112)
         if (srcUrl && tgtUrl && srcUrl !== tgtUrl) {
-          const sedEscape = (s: string) =>
-            s.replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
-          const wpContent = `${tgtPath}/wp-content`;
-          const filePairs: Array<[string, string]> = [[srcUrl, tgtUrl]];
-          const altSrc = flipProtocol(srcUrl);
-          const altTgt = flipProtocol(tgtUrl);
-          if (altSrc && altTgt && altSrc !== tgtUrl)
-            filePairs.push([altSrc, altTgt]);
-          for (const [oldUrl, newUrl] of filePairs) {
-            await executor
-              .execute(
-                [
-                  `find ${shellQuote(wpContent)} -type f`,
-                  `\\( -name '*.css' -o -name '*.js' -o -name '*.json' -o -name '*.html'`,
-                  `-o -name '*.htm' -o -name '*.svg' -o -name '*.xml' -o -name '*.txt'`,
-                  `-o -name '*.php' \\)`,
-                  `-exec sed -i 's|${sedEscape(oldUrl)}|${sedEscape(newUrl)}|g' {} +`,
-                ].join(" "),
-              )
-              .catch(() => {});
-          }
+          const contentPath = await detectContentDirectory(executor, tgtPath);
+          await replaceLiteralUrlInFiles(
+            executor,
+            contentPath,
+            srcUrl,
+            tgtUrl,
+            (entry) => {
+              if (entry.level === "error") {
+                this.logger.error(`${entry.step}: ${entry.detail ?? ""}`);
+              } else if (entry.level === "warn") {
+                this.logger.warn(`${entry.step}: ${entry.detail ?? ""}`);
+              }
+            },
+          );
         }
 
         // Flush WordPress caches (WP-CLI preferred; disk cache fallback)

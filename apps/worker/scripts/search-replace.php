@@ -4,26 +4,312 @@
  * Serialization-aware search-replace for WordPress databases.
  *
  * Uses the `mysql` CLI binary for all database access — no PHP database
- * extensions required.  Works on CyberPanel/LiteSpeed servers where the
+ * extensions required. Works on CyberPanel/LiteSpeed servers where the
  * default PHP CLI has no mysqli or pdo_mysql module.
  *
- * Usage (preferred — pass a pre-built .my.cnf):
- *   php search-replace.php \
- *     --mycnf=/tmp/forge_sr.cnf --db-name=mydb \
- *     --search='https://old.example.com' --replace='https://new.example.com' \
- *     [--prefix=wp_] [--skip-tables=wp_posts,wp_ct_registrations] [--dry-run]
+ * Rewrites serialized PHP values via a pure byte-accurate stream scanner so
+ * custom plugin classes (which become __PHP_Incomplete_Class outside WordPress)
+ * keep their exact class names, visibility prefixes, and recalculated byte
+ * lengths without instantiating objects or coercing to stdClass (#64).
  *
- * Usage (backward-compat — script creates a temp .my.cnf internally):
- *   php search-replace.php \
- *     --db-host=localhost --db-user=x --db-pass=x --db-name=x \
- *     --search='https://old.example.com' --replace='https://new.example.com'
- *
- * Exit codes: 0 = success, 1 = error
- * Output: JSON { tables_scanned, rows_affected, errors }
+ * Exit codes: 0 = success (zero errors), 1 = error or partial failure (#60)
+ * Output: JSON { tables_scanned, rows_affected, skipped_serialized, errors }
  */
 
 error_reporting(E_ALL);
 set_time_limit(0);
+
+/**
+ * Quote a scalar PK value for safe use in a generated SQL literal.
+ */
+function sql_literal(string $val): string {
+    if (ctype_digit($val) || (strlen($val) > 1 && $val[0] === '-' && ctype_digit(substr($val, 1)))) {
+        return $val;
+    }
+    return "'" . str_replace(['\\', "'"], ['\\\\', "\\'"], $val) . "'";
+}
+
+/**
+ * Replace $search with $replace across raw, JSON-escaped (\/), and URL-encoded forms.
+ */
+function sr_replace_plain(string $data, string $search, string $replace): string {
+    $val = str_replace($search, $replace, $data);
+    $jsonSearch = str_replace('/', '\/', $search);
+    if ($jsonSearch !== $search) {
+        $jsonReplace = str_replace('/', '\/', $replace);
+        $val = str_replace($jsonSearch, $jsonReplace, $val);
+    }
+    $urlEncSearch = rawurlencode($search);
+    if ($urlEncSearch !== $search) {
+        $urlEncReplace = rawurlencode($replace);
+        $val = str_replace($urlEncSearch, $urlEncReplace, $val);
+    }
+    return $val;
+}
+
+function sr_contains_target(string $value, string $search): bool {
+    if (strpos($value, $search) !== false) return true;
+    $jsonSearch = str_replace('/', '\/', $search);
+    if ($jsonSearch !== $search && strpos($value, $jsonSearch) !== false) return true;
+    $urlEncSearch = rawurlencode($search);
+    if ($urlEncSearch !== $search && strpos($value, $urlEncSearch) !== false) return true;
+    return false;
+}
+
+/**
+ * Parse a `s:<len>:"<bytes>";` token starting at $pos.
+ * Returns raw decoded string bytes on success, or null on syntax mismatch.
+ */
+function sr_consume_string_token(string $str, int &$pos): ?string {
+    $lenAll = strlen($str);
+    if ($pos + 5 >= $lenAll || $str[$pos] !== 's' || $str[$pos + 1] !== ':') {
+        return null;
+    }
+    $colonPos = strpos($str, ':', $pos + 2);
+    if ($colonPos === false) return null;
+    $lenStr = substr($str, $pos + 2, $colonPos - ($pos + 2));
+    if ($lenStr === '' || !ctype_digit($lenStr)) return null;
+    if ($colonPos + 1 >= $lenAll || $str[$colonPos + 1] !== '"') return null;
+
+    $byteLen = (int) $lenStr;
+    $dataStart = $colonPos + 2;
+    $dataEnd = $dataStart + $byteLen;
+    if ($dataEnd + 2 > $lenAll) return null;
+    if ($str[$dataEnd] !== '"' || $str[$dataEnd + 1] !== ';') return null;
+
+    $rawBytes = substr($str, $dataStart, $byteLen);
+    $pos = $dataEnd + 2;
+    return $rawBytes;
+}
+
+/**
+ * Recursively rewrite serialized PHP stream without calling unserialize()/serialize()
+ * into stdClass (#64). Preserves custom class headers, property visibility prefixes,
+ * integers, doubles, booleans, nulls, enums, and references.
+ */
+function sr_rewrite_serialized(
+    string $str,
+    string $search,
+    string $replace,
+    int &$pos,
+    bool $allowStringRewrite,
+    bool &$skipped
+): ?string {
+    $lenAll = strlen($str);
+    if ($pos >= $lenAll) return null;
+
+    $type = $str[$pos];
+
+    // N;
+    if ($type === 'N') {
+        if ($pos + 1 >= $lenAll || $str[$pos + 1] !== ';') return null;
+        $pos += 2;
+        return 'N;';
+    }
+
+    // b:0; / b:1;
+    if ($type === 'b') {
+        if ($pos + 3 >= $lenAll || $str[$pos + 1] !== ':' || ($str[$pos + 2] !== '0' && $str[$pos + 2] !== '1') || $str[$pos + 3] !== ';') {
+            return null;
+        }
+        $tok = substr($str, $pos, 4);
+        $pos += 4;
+        return $tok;
+    }
+
+    // i:<n>; d:<n>; r:<n>; R:<n>;
+    if ($type === 'i' || $type === 'd' || $type === 'r' || $type === 'R') {
+        if ($pos + 1 >= $lenAll || $str[$pos + 1] !== ':') return null;
+        $semi = strpos($str, ';', $pos + 2);
+        if ($semi === false) return null;
+        $tok = substr($str, $pos, $semi - $pos + 1);
+        $pos = $semi + 1;
+        return $tok;
+    }
+
+    // E:<len>:"<Class::Case>"; (PHP 8.1+ backed/unit enum)
+    if ($type === 'E') {
+        if ($pos + 1 >= $lenAll || $str[$pos + 1] !== ':') return null;
+        $fake = 's' . substr($str, $pos + 1);
+        $fakePos = 0;
+        $raw = sr_consume_string_token($fake, $fakePos);
+        if ($raw === null) return null;
+        $tok = substr($str, $pos, $fakePos);
+        $pos += $fakePos;
+        return $tok;
+    }
+
+    // s:<len>:"<bytes>";
+    if ($type === 's') {
+        $raw = sr_consume_string_token($str, $pos);
+        if ($raw === null) return null;
+
+        if (!$allowStringRewrite || strncmp($raw, "\0", 1) === 0) {
+            return 's:' . strlen($raw) . ':"' . $raw . '";';
+        }
+
+        if (!sr_contains_target($raw, $search)) {
+            return 's:' . strlen($raw) . ':"' . $raw . '";';
+        }
+
+        // Handle double-serialized PHP payloads cleanly if inner value parses completely
+        if (preg_match('/^(?:s:\d+:|a:\d+:|O:\d+:|C:\d+:|r:\d+:|R:\d+:)/', $raw)) {
+            $innerPos = 0;
+            $innerSkipped = false;
+            $innerRewritten = sr_rewrite_serialized($raw, $search, $replace, $innerPos, true, $innerSkipped);
+            if ($innerRewritten !== null && $innerPos === strlen($raw) && !$innerSkipped) {
+                return 's:' . strlen($innerRewritten) . ':"' . $innerRewritten . '";';
+            }
+            if ($innerSkipped) {
+                $skipped = true;
+                return null;
+            }
+        }
+
+        $newRaw = sr_replace_plain($raw, $search, $replace);
+        return 's:' . strlen($newRaw) . ':"' . $newRaw . '";';
+    }
+
+    // a:<count>:{...}
+    if ($type === 'a') {
+        if ($pos + 1 >= $lenAll || $str[$pos + 1] !== ':') return null;
+        $colon2 = strpos($str, ':', $pos + 2);
+        if ($colon2 === false) return null;
+        $countStr = substr($str, $pos + 2, $colon2 - ($pos + 2));
+        if ($countStr === '' || !ctype_digit($countStr)) return null;
+        if ($colon2 + 1 >= $lenAll || $str[$colon2 + 1] !== '{') return null;
+
+        $count = (int) $countStr;
+        $pos = $colon2 + 2;
+        $out = 'a:' . $count . ':{';
+        for ($i = 0; $i < $count; $i++) {
+            $k = sr_rewrite_serialized($str, $search, $replace, $pos, true, $skipped);
+            if ($k === null) return null;
+            $v = sr_rewrite_serialized($str, $search, $replace, $pos, true, $skipped);
+            if ($v === null) return null;
+            $out .= $k . $v;
+        }
+        if ($pos >= $lenAll || $str[$pos] !== '}') return null;
+        $pos++;
+        return $out . '}';
+    }
+
+    // O:<clsLen>:"<clsName>":<propCount>:{...}
+    if ($type === 'O') {
+        if ($pos + 1 >= $lenAll || $str[$pos + 1] !== ':') return null;
+        $colonCls = strpos($str, ':', $pos + 2);
+        if ($colonCls === false) return null;
+        $clsLenStr = substr($str, $pos + 2, $colonCls - ($pos + 2));
+        if ($clsLenStr === '' || !ctype_digit($clsLenStr)) return null;
+        if ($colonCls + 1 >= $lenAll || $str[$colonCls + 1] !== '"') return null;
+
+        $clsLen = (int) $clsLenStr;
+        $clsStart = $colonCls + 2;
+        $clsEnd = $clsStart + $clsLen;
+        if ($clsEnd + 2 >= $lenAll || $str[$clsEnd] !== '"' || $str[$clsEnd + 1] !== ':') {
+            return null;
+        }
+        $clsName = substr($str, $clsStart, $clsLen);
+
+        $colonProp = strpos($str, ':', $clsEnd + 2);
+        if ($colonProp === false) return null;
+        $propCountStr = substr($str, $clsEnd + 2, $colonProp - ($clsEnd + 2));
+        if ($propCountStr === '' || !ctype_digit($propCountStr)) return null;
+        if ($colonProp + 1 >= $lenAll || $str[$colonProp + 1] !== '{') return null;
+
+        $propCount = (int) $propCountStr;
+        $pos = $colonProp + 2;
+        $out = 'O:' . $clsLen . ':"' . $clsName . '":' . $propCount . ':{';
+        for ($i = 0; $i < $propCount; $i++) {
+            // Preserve property names and visibility prefixes (\0Class\0prop / \0*\0prop)
+            $k = sr_rewrite_serialized($str, $search, $replace, $pos, false, $skipped);
+            if ($k === null) return null;
+            $v = sr_rewrite_serialized($str, $search, $replace, $pos, true, $skipped);
+            if ($v === null) return null;
+            $out .= $k . $v;
+        }
+        if ($pos >= $lenAll || $str[$pos] !== '}') return null;
+        $pos++;
+        return $out . '}';
+    }
+
+    // C:<clsLen>:"<clsName>":<payloadLen>:{<bytes>} (custom Serializable)
+    if ($type === 'C') {
+        if ($pos + 1 >= $lenAll || $str[$pos + 1] !== ':') return null;
+        $colonCls = strpos($str, ':', $pos + 2);
+        if ($colonCls === false) return null;
+        $clsLenStr = substr($str, $pos + 2, $colonCls - ($pos + 2));
+        if ($clsLenStr === '' || !ctype_digit($clsLenStr)) return null;
+        if ($colonCls + 1 >= $lenAll || $str[$colonCls + 1] !== '"') return null;
+
+        $clsLen = (int) $clsLenStr;
+        $clsStart = $colonCls + 2;
+        $clsEnd = $clsStart + $clsLen;
+        if ($clsEnd + 2 >= $lenAll || $str[$clsEnd] !== '"' || $str[$clsEnd + 1] !== ':') {
+            return null;
+        }
+        $clsName = substr($str, $clsStart, $clsLen);
+
+        $colonPayload = strpos($str, ':', $clsEnd + 2);
+        if ($colonPayload === false) return null;
+        $payloadLenStr = substr($str, $clsEnd + 2, $colonPayload - ($clsEnd + 2));
+        if ($payloadLenStr === '' || !ctype_digit($payloadLenStr)) return null;
+        if ($colonPayload + 1 >= $lenAll || $str[$colonPayload + 1] !== '{') return null;
+
+        $payloadLen = (int) $payloadPayload = (int) $payloadLenStr;
+        $payloadStart = $colonPayload + 2;
+        $payloadEnd = $payloadStart + $payloadLen;
+        if ($payloadEnd >= $lenAll || $str[$payloadEnd] !== '}') return null;
+
+        $payloadBytes = substr($str, $payloadStart, $payloadLen);
+        $pos = $payloadEnd + 1;
+
+        if (sr_contains_target($payloadBytes, $search)) {
+            // Custom Serializable payloads have class-owned binary/internal invariants;
+            // skip modifying them safely instead of risking corruption or class coercion.
+            $skipped = true;
+            return null;
+        }
+
+        return 'C:' . $clsLen . ':"' . $clsName . '":' . $payloadLen . ':{' . $payloadBytes . '}';
+    }
+
+    return null;
+}
+
+/**
+ * Perform search-replace on a single DB value, preserving serialized PHP structure
+ * without executing untrusted plugin classes or coercing objects into stdClass (#64).
+ *
+ * Returns [new_value, changed, skipped_serialized].
+ */
+function sr_replace_value(string $value, string $search, string $replace): array {
+    if (!sr_contains_target($value, $search)) {
+        return [$value, false, 0];
+    }
+
+    $looksSerialized = preg_match('/^(?:s:\d+:|a:\d+:|O:\d+:|C:\d+:|E:\d+:)/', $value) === 1;
+    if ($looksSerialized || @unserialize($value, ['allowed_classes' => false]) !== false || $value === 'b:0;') {
+        $pos = 0;
+        $skipped = false;
+        $rewritten = sr_rewrite_serialized($value, $search, $replace, $pos, true, $skipped);
+        if ($rewritten === null || $pos !== strlen($value) || $skipped) {
+            return [$value, false, 1];
+        }
+        $roundtripOk = $rewritten === 'b:0;' || @unserialize($rewritten, ['allowed_classes' => false]) !== false;
+        if (!$roundtripOk) {
+            return [$value, false, 1];
+        }
+        return [$rewritten, $rewritten !== $value, 0];
+    }
+
+    $newValue = sr_replace_plain($value, $search, $replace);
+    return [$newValue, $newValue !== $value, 0];
+}
+
+if (defined('SEARCH_REPLACE_LIB_ONLY')) {
+    return;
+}
 
 // ── Parse CLI arguments ─────────────────────────────────────────────────
 
@@ -37,14 +323,12 @@ foreach ($argv as $i => $arg) {
     }
 }
 
-// --db-name, --search, --replace always required
 foreach (['db-name', 'search', 'replace'] as $key) {
     if (!isset($opts[$key])) {
         fwrite(STDERR, "Missing required argument: --$key\n");
         exit(1);
     }
 }
-// Either --mycnf or all three of --db-host/--db-user/--db-pass
 if (!isset($opts['mycnf']) && (!isset($opts['db-host'], $opts['db-user'], $opts['db-pass']))) {
     fwrite(STDERR, "Provide either --mycnf=<path> or all of --db-host, --db-user, --db-pass\n");
     exit(1);
@@ -67,7 +351,7 @@ if (isset($opts['skip-tables']) && trim((string) $opts['skip-tables']) !== '') {
 
 // ── Credentials (.my.cnf) ────────────────────────────────────────────────
 
-$ownedMycnf = false; // did we create the temp file? must delete at end
+$ownedMycnf = false;
 if (isset($opts['mycnf'])) {
     $mycnf = $opts['mycnf'];
 } else {
@@ -81,10 +365,6 @@ if (isset($opts['mycnf'])) {
 
 // ── MySQL helpers ────────────────────────────────────────────────────────
 
-/**
- * Run a single SQL statement via the mysql CLI.
- * Returns array of output lines on success, false on failure.
- */
 function db_query(string $mycnf, string $dbName, string $sql): array|false {
     $cmd = sprintf(
         'mysql --defaults-extra-file=%s %s -sN -e %s 2>&1',
@@ -100,10 +380,6 @@ function db_query(string $mycnf, string $dbName, string $sql): array|false {
     return $output;
 }
 
-/**
- * Execute SQL from a file (avoids shell-quoting limits for large batches).
- * Returns true on success, false on failure.
- */
 function db_exec_file(string $mycnf, string $dbName, string $filePath): bool {
     $cmd = sprintf(
         'mysql --defaults-extra-file=%s %s < %s 2>&1',
@@ -117,20 +393,6 @@ function db_exec_file(string $mycnf, string $dbName, string $filePath): bool {
         return false;
     }
     return true;
-}
-
-/**
- * Quote a scalar PK value for safe use in a generated SQL literal.
- * Only call this on values read back from the database (trusted source).
- * For row data written back we always use UNHEX().
- */
-function sql_literal(string $val): string {
-    // Numeric (covers INT/BIGINT PKs — the vast majority of WP tables)
-    if (ctype_digit($val) || (strlen($val) > 1 && $val[0] === '-' && ctype_digit(substr($val, 1)))) {
-        return $val;
-    }
-    // String: escape backslashes and single quotes
-    return "'" . str_replace(['\\', "'"], ['\\\\', "\\'"], $val) . "'";
 }
 
 // ── Discover tables and text columns ────────────────────────────────────
@@ -165,72 +427,11 @@ foreach ($colRows as $line) {
     }
 }
 
-// ── Serialization-aware replacement ─────────────────────────────────────
-
-/**
- * Recursively walk a PHP value, replacing $search with $replace across raw,
- * JSON-escaped slashes (\/), and URL-encoded variants.
- */
-function sr_deep_replace($data, string $search, string $replace) {
-    if (is_string($data)) {
-        $val = str_replace($search, $replace, $data);
-        $jsonSearch = str_replace('/', '\/', $search);
-        if ($jsonSearch !== $search) {
-            $jsonReplace = str_replace('/', '\/', $replace);
-            $val = str_replace($jsonSearch, $jsonReplace, $val);
-        }
-        $urlEncSearch = rawurlencode($search);
-        if ($urlEncSearch !== $search) {
-            $urlEncReplace = rawurlencode($replace);
-            $val = str_replace($urlEncSearch, $urlEncReplace, $val);
-        }
-        return $val;
-    }
-    if (is_array($data)) {
-        $out = [];
-        foreach ($data as $key => $value) {
-            $newKey = is_string($key) ? sr_deep_replace($key, $search, $replace) : $key;
-            $out[$newKey] = sr_deep_replace($value, $search, $replace);
-        }
-        return $out;
-    }
-    if (is_object($data)) {
-        return (object) sr_deep_replace((array) $data, $search, $replace);
-    }
-    return $data;
-}
-
-/**
- * Perform search-replace on a single DB value, handling PHP serialized data.
- * Returns [new_value, changed].
- */
-function sr_replace_value(string $value, string $search, string $replace): array {
-    $jsonSearch = str_replace('/', '\/', $search);
-    $urlEncSearch = rawurlencode($search);
-
-    $hasMatch = (strpos($value, $search) !== false) ||
-                ($jsonSearch !== $search && strpos($value, $jsonSearch) !== false) ||
-                ($urlEncSearch !== $search && strpos($value, $urlEncSearch) !== false);
-
-    if (!$hasMatch) {
-        return [$value, false];
-    }
-
-    $unserialized = @unserialize($value);
-    if ($unserialized !== false || $value === 'b:0;') {
-        $replaced = sr_deep_replace($unserialized, $search, $replace);
-        $newValue = serialize($replaced);
-        return [$newValue, $newValue !== $value];
-    }
-
-    $newValue = sr_deep_replace($value, $search, $replace);
-    return [$newValue, $newValue !== $value];
-}
-
 // ── Process tables ──────────────────────────────────────────────────────
 
 $totalAffected = 0;
 $tablesScanned = 0;
+$totalSkippedSerialized = 0;
 $errors        = [];
 
 $searchVariants = array_values(array_unique(array_filter([
@@ -249,7 +450,6 @@ foreach ($tableColumns as $table => $columns) {
     $tablesScanned++;
     $tbl = str_replace(['\\', "'"], ['\\\\', "\\'"], $table);
 
-    // Discover primary key columns
     $pkRows = db_query($mycnf, $dbName,
         "SELECT COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE
          WHERE TABLE_SCHEMA = '$dbn'
@@ -257,38 +457,51 @@ foreach ($tableColumns as $table => $columns) {
            AND CONSTRAINT_NAME = 'PRIMARY'
          ORDER BY ORDINAL_POSITION"
     );
+    if ($pkRows === false) {
+        $errors[] = "PRIMARY KEY lookup on $table failed";
+        continue;
+    }
+
     $pkCols = [];
-    if ($pkRows !== false) {
-        foreach ($pkRows as $pk) {
-            $pk = trim($pk);
-            if ($pk !== '') $pkCols[] = $pk;
-        }
+    foreach ($pkRows as $pk) {
+        $pk = trim($pk);
+        if ($pk !== '') $pkCols[] = $pk;
     }
 
     if (empty($pkCols)) {
-        // No primary key — fall back to plain SQL REPLACE (no serialization fix)
+        // Keyless table: check every query result and count real ROW_COUNT() only on success (#60)
         foreach ($columns as $col) {
-            if (!$dryRun) {
-                foreach ($searchVariants as $idx => $sVar) {
-                    $rVar = $replaceVariants[$idx] ?? $replace;
-                    $sHex = bin2hex($sVar);
-                    $rHex = bin2hex($rVar);
-                    $sql = "UPDATE `$table` SET `$col` = REPLACE(`$col`, UNHEX('$sHex'), UNHEX('$rHex'))"
-                         . " WHERE LOCATE(UNHEX('$sHex'), `$col`) > 0";
-                    db_query($mycnf, $dbName, $sql);
+            if ($dryRun) {
+                $cntSql = "SELECT COUNT(*) FROM `$table` WHERE LOCATE(UNHEX('" . bin2hex($searchVariants[0]) . "'), `$col`) > 0";
+                $cntRes = db_query($mycnf, $dbName, $cntSql);
+                if ($cntRes === false) {
+                    $errors[] = "DRY-RUN count on $table.$col failed";
+                } elseif (!empty($cntRes)) {
+                    $totalAffected += (int) trim((string) end($cntRes));
+                }
+                continue;
+            }
+            foreach ($searchVariants as $idx => $sVar) {
+                $rVar = $replaceVariants[$idx] ?? $replace;
+                $sHex = bin2hex($sVar);
+                $rHex = bin2hex($rVar);
+                $sql = "UPDATE `$table` SET `$col` = REPLACE(`$col`, UNHEX('$sHex'), UNHEX('$rHex'))"
+                     . " WHERE LOCATE(UNHEX('$sHex'), `$col`) > 0; SELECT ROW_COUNT();";
+                $updRes = db_query($mycnf, $dbName, $sql);
+                if ($updRes === false) {
+                    $errors[] = "UPDATE on keyless table $table.$col failed";
+                } elseif (!empty($updRes)) {
+                    $totalAffected += max(0, (int) trim((string) end($updRes)));
                 }
             }
         }
         continue;
     }
 
-    // SELECT: PK cols as-is, text cols HEX()-encoded for safe transport of
-    // serialized PHP data (which may contain tabs, newlines, binary chars).
     $pkSelects  = array_map(fn($c) => "`$c`", $pkCols);
     $hexSelects = array_map(fn($c) => "HEX(`$c`) AS `$c`", $columns);
     $allSelects = array_merge($pkSelects, $hexSelects);
 
-    // LOCATE() avoids LIKE wildcard issues for search strings that contain % or _
     $locateClauses = [];
     foreach ($columns as $c) {
         foreach ($searchHexes as $sHex) {
@@ -307,11 +520,11 @@ foreach ($tableColumns as $table => $columns) {
     $pkCount  = count($pkCols);
     $colCount = count($columns);
     $updateStatements = [];
+    $tableAffected = 0;
 
     foreach ($rows as $line) {
         if (trim($line) === '') continue;
         $parts = explode("\t", $line);
-        // Pad to expected length (mysql outputs NULL as literal "NULL")
         while (count($parts) < $pkCount + $colCount) {
             $parts[] = 'NULL';
         }
@@ -325,13 +538,19 @@ foreach ($tableColumns as $table => $columns) {
             if ($hexVal === 'NULL' || $hexVal === '') continue;
             $rawVal = hex2bin($hexVal);
             if ($rawVal === false) continue;
-            [$newVal, $changed] = sr_replace_value($rawVal, $search, $replace);
+            [$newVal, $changed, $skippedRow] = sr_replace_value($rawVal, $search, $replace);
+            if ($skippedRow > 0) {
+                $totalSkippedSerialized += $skippedRow;
+                $errors[] = "Skipped unsupported serialized object in $table.$col to avoid class coercion";
+            }
             if ($changed) {
                 $setClauses[] = "`$col` = UNHEX('" . bin2hex($newVal) . "')";
             }
         }
         if (empty($setClauses)) continue;
-        if ($dryRun) { $totalAffected++; continue; }
+
+        $tableAffected++;
+        if ($dryRun) continue;
 
         $whereClauses = [];
         foreach ($pkCols as $j => $pk) {
@@ -339,24 +558,30 @@ foreach ($tableColumns as $table => $columns) {
         }
         $updateStatements[] = "UPDATE `$table` SET " . implode(', ', $setClauses)
                             . " WHERE " . implode(' AND ', $whereClauses) . " LIMIT 1;";
-        $totalAffected++;
     }
 
-    if (!empty($updateStatements)) {
+    if ($dryRun) {
+        $totalAffected += $tableAffected;
+    } elseif (!empty($updateStatements)) {
         $tmpSql = tempnam(sys_get_temp_dir(), 'forge_sr_upd_');
         file_put_contents($tmpSql, implode("\n", $updateStatements) . "\n");
-        if (!db_exec_file($mycnf, $dbName, $tmpSql)) {
-            $errors[] = "UPDATE batch on $table failed";
-        }
+        $batchOk = db_exec_file($mycnf, $dbName, $tmpSql);
         @unlink($tmpSql);
+        if (!$batchOk) {
+            $errors[] = "UPDATE batch on $table failed";
+        } else {
+            // Only count rows after SQL execution succeeds (#60)
+            $totalAffected += $tableAffected;
+        }
     }
 }
 
 if ($ownedMycnf) @unlink($mycnf);
 
 echo json_encode([
-    'tables_scanned' => $tablesScanned,
-    'rows_affected'  => $totalAffected,
-    'errors'         => $errors,
+    'tables_scanned'     => $tablesScanned,
+    'rows_affected'      => $totalAffected,
+    'skipped_serialized' => $totalSkippedSerialized,
+    'errors'             => $errors,
 ], JSON_UNESCAPED_SLASHES);
-exit(0);
+exit(!empty($errors) ? 1 : 0);
