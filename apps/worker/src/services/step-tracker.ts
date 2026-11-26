@@ -156,6 +156,25 @@ export class StepTracker {
     });
   }
 
+  /**
+   * Track a mandatory remote command and throw with stderr/exit context on failure.
+   */
+  async trackRequiredCommand(
+    step: string,
+    command: string,
+    result: ExecuteResult,
+    durationMs: number = 0,
+    errorPrefix?: string,
+  ): Promise<void> {
+    await this.trackCommand(step, command, result, durationMs);
+    if (result.code !== 0) {
+      const detail = result.stderr?.trim() || result.stdout?.trim() || "Unknown error";
+      throw new Error(
+        `${errorPrefix ?? step} (exit ${result.code}): ${detail}`,
+      );
+    }
+  }
+
   /** Update BullMQ progress and persist the same percentage for the API/UI. */
   async updateProgress(
     progress: number | { value: number; step?: string },

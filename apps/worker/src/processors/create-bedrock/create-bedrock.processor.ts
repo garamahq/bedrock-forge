@@ -15,6 +15,7 @@ import {
   EnvironmentDecommissionPayloadSchema,
   GitDeployPayloadSchema,
   BACKUP_JOB_OPTIONS,
+  isValidDbHost,
 } from "@bedrock-forge/shared";
 import { callCpApi, CpCreds, escapeMysql } from "../../utils/cyberpanel-http";
 import { StepTracker } from "../../services/step-tracker";
@@ -87,6 +88,13 @@ export class CreateBedrockProcessor extends WorkerHost {
       await job.updateProgress({ value: 5, step: "Connected to server" });
 
       // ── 1. CyberPanel provisioning ───────────────────────────────────
+      const requestedDbHost = cyberpanel?.dbHost?.trim() || "localhost";
+      if (!isValidDbHost(requestedDbHost)) {
+        throw new Error(
+          `Invalid database host "${requestedDbHost}": must be a valid hostname, IP, host:port, or socket path`,
+        );
+      }
+
       let resolvedCyberpanelDbPassword = cyberpanel?.dbPassword;
       if (cyberpanel && !resolvedCyberpanelDbPassword) {
         const storedCreds = await this.prisma.wpDbCredentials.findUnique({
@@ -101,6 +109,12 @@ export class CreateBedrockProcessor extends WorkerHost {
           storedCreds.db_password_encrypted,
         );
       }
+
+      const isLocalDbHost =
+        requestedDbHost === "localhost" ||
+        requestedDbHost === "127.0.0.1" ||
+        requestedDbHost === "::1" ||
+        requestedDbHost.startsWith("/");
 
       if (cyberpanel) {
         domain = cyberpanel.domain;
@@ -143,55 +157,93 @@ export class CreateBedrockProcessor extends WorkerHost {
           step: "CyberPanel website created",
         });
 
-        this.logger.log(`Creating database: ${cyberpanel.dbName}`);
-        try {
-          await callCpApi(cpCreds, "/api/submitDBCreation", {
-            databaseWebsite: domain,
-            dbName: cyberpanel.dbName,
-            dbUsername: cyberpanel.dbUser,
-            dbPassword: resolvedCyberpanelDbPassword ?? "",
-          });
-        } catch (dbApiErr) {
-          this.logger.warn(
-            `CyberPanel submitDBCreation failed (${dbApiErr instanceof Error ? dbApiErr.message : String(dbApiErr)}), falling back to MySQL CLI`,
+        this.logger.log(
+          `Creating/verifying database: ${cyberpanel.dbName} on host ${requestedDbHost}`,
+        );
+        if (!isLocalDbHost) {
+          const checkCnf = await createRemoteMyCnf(
+            executor,
+            {
+              dbUser: cyberpanel.dbUser,
+              dbPassword: resolvedCyberpanelDbPassword ?? "",
+              dbHost: requestedDbHost,
+            },
+            job.id ?? "default",
+            "cb_chk",
+            { includeDatabase: false },
           );
+          try {
+            const safeDbName = cyberpanel.dbName;
+            if (!/^[a-zA-Z0-9_-]{1,64}$/.test(safeDbName)) {
+              throw new Error(
+                `Database name '${safeDbName}' contains characters that are not safe for MySQL.`,
+              );
+            }
+            const extCheck = await executor.execute(
+              `mysql --defaults-extra-file=${shellQuote(checkCnf)} -e ${shellQuote(`CREATE DATABASE IF NOT EXISTS \`${safeDbName}\`; SELECT 1;`)}`,
+            );
+            if (extCheck.code !== 0) {
+              throw new Error(
+                `External database host "${requestedDbHost}" verification failed (exit ${extCheck.code}): ${extCheck.stderr || extCheck.stdout}`,
+              );
+            }
+          } finally {
+            await cleanupRemoteMyCnf(executor, checkCnf);
+          }
+        } else {
+          try {
+            await callCpApi(cpCreds, "/api/submitDBCreation", {
+              databaseWebsite: domain,
+              dbName: cyberpanel.dbName,
+              dbUsername: cyberpanel.dbUser,
+              dbPassword: resolvedCyberpanelDbPassword ?? "",
+            });
+          } catch (dbApiErr) {
+            this.logger.warn(
+              `CyberPanel submitDBCreation failed (${dbApiErr instanceof Error ? dbApiErr.message : String(dbApiErr)}), falling back to MySQL CLI`,
+            );
 
-          // Validate identifiers before embedding in backtick-quoted SQL.
-          // MySQL identifiers are restricted to alphanumeric, underscore, hyphen.
-          // This prevents backtick injection: escapeMysql() does not escape backticks.
-          const safeIdentifier = /^[a-zA-Z0-9_-]{1,64}$/;
-          if (!safeIdentifier.test(cyberpanel.dbName)) {
-            throw new Error(
-              `Database name '${cyberpanel.dbName}' contains characters that are not safe for MySQL CLI. ` +
-                `Allowed: letters, numbers, underscores, hyphens.`,
-            );
-          }
-          if (!safeIdentifier.test(cyberpanel.dbUser)) {
-            throw new Error(
-              `Database user '${cyberpanel.dbUser}' contains characters that are not safe for MySQL CLI.`,
-            );
-          }
+            // Validate identifiers before embedding in backtick-quoted SQL.
+            // MySQL identifiers are restricted to alphanumeric, underscore, hyphen.
+            // This prevents backtick injection: escapeMysql() does not escape backticks.
+            const safeIdentifier = /^[a-zA-Z0-9_-]{1,64}$/;
+            if (!safeIdentifier.test(cyberpanel.dbName)) {
+              throw new Error(
+                `Database name '${cyberpanel.dbName}' contains characters that are not safe for MySQL CLI. ` +
+                  `Allowed: letters, numbers, underscores, hyphens.`,
+              );
+            }
+            if (!safeIdentifier.test(cyberpanel.dbUser)) {
+              throw new Error(
+                `Database user '${cyberpanel.dbUser}' contains characters that are not safe for MySQL CLI.`,
+              );
+            }
 
-          const dbName = cyberpanel.dbName; // validated above — safe for backtick quoting
-          const dbUser = cyberpanel.dbUser; // validated above
-          const dbPassword = escapeMysql(resolvedCyberpanelDbPassword ?? "");
-          const sqlQuery = `CREATE DATABASE IF NOT EXISTS \`${dbName}\`; ` +
-            `CREATE USER IF NOT EXISTS '${dbUser}'@'localhost' IDENTIFIED BY '${dbPassword}'; ` +
-            `GRANT ALL PRIVILEGES ON \`${dbName}\`.* TO '${dbUser}'@'localhost'; ` +
-            `FLUSH PRIVILEGES;`;
-          const mysqlResult = await executor.execute(
-            `mysql -e ${shellQuote(sqlQuery)}`,
-          );
-          if (mysqlResult.code !== 0) {
-            throw new Error(
-              `Database creation failed via both CyberPanel API and MySQL CLI. ` +
-                `API error: ${dbApiErr instanceof Error ? dbApiErr.message : String(dbApiErr)}. ` +
-                `MySQL error: ${mysqlResult.stderr}`,
+            const dbName = cyberpanel.dbName; // validated above — safe for backtick quoting
+            const dbUser = cyberpanel.dbUser; // validated above
+            const dbPassword = escapeMysql(resolvedCyberpanelDbPassword ?? "");
+            const grantHost =
+              requestedDbHost === "127.0.0.1" || requestedDbHost === "::1"
+                ? requestedDbHost
+                : "localhost";
+            const sqlQuery = `CREATE DATABASE IF NOT EXISTS \`${dbName}\`; ` +
+              `CREATE USER IF NOT EXISTS '${dbUser}'@'${grantHost}' IDENTIFIED BY '${dbPassword}'; ` +
+              `GRANT ALL PRIVILEGES ON \`${dbName}\`.* TO '${dbUser}'@'${grantHost}'; ` +
+              `FLUSH PRIVILEGES;`;
+            const mysqlResult = await executor.execute(
+              `mysql -e ${shellQuote(sqlQuery)}`,
+            );
+            if (mysqlResult.code !== 0) {
+              throw new Error(
+                `Database creation failed via both CyberPanel API and MySQL CLI. ` +
+                  `API error: ${dbApiErr instanceof Error ? dbApiErr.message : String(dbApiErr)}. ` +
+                  `MySQL error: ${mysqlResult.stderr}`,
+              );
+            }
+            this.logger.log(
+              `Database ${cyberpanel.dbName} created via MySQL CLI`,
             );
           }
-          this.logger.log(
-            `Database ${cyberpanel.dbName} created via MySQL CLI`,
-          );
         }
         await job.updateProgress({ value: 30, step: "Database created" });
       }
@@ -258,7 +310,7 @@ export class CreateBedrockProcessor extends WorkerHost {
         const dbName = cyberpanel?.dbName ?? srcCreds.dbName;
         const dbUser = cyberpanel?.dbUser ?? srcCreds.dbUser;
         const dbPassword = resolvedCyberpanelDbPassword ?? srcCreds.dbPassword;
-        const dbHost = "localhost";
+        const dbHost = requestedDbHost;
 
         const tgtMycnf = await createRemoteMyCnf(
           executor,
@@ -285,33 +337,80 @@ export class CreateBedrockProcessor extends WorkerHost {
         // ── rsync files ──
         const srcPath = srcEnv.root_path?.replace(/\/+$/, "") ?? "";
         const tgtPath = env.root_path?.replace(/\/+$/, "") ?? "";
+        if (!srcPath || !tgtPath) {
+          throw new Error(
+            `Source or target environment root_path is missing (src="${srcPath}", tgt="${tgtPath}"); cannot copy files after DB import`,
+          );
+        }
 
-        if (srcPath && tgtPath && srcEnv.server.id === server.id) {
+        await executor.execute(
+          `chattr -R -i -a ${shellQuote(tgtPath)} 2>/dev/null || true; chmod -R u+w ${shellQuote(tgtPath)} 2>/dev/null || true; mkdir -p ${shellQuote(tgtPath)}`,
+        );
+
+        if (srcEnv.server.id === server.id) {
           // Same server — local rsync
-          await executor.execute(
+          const rsyncResult = await executor.execute(
             `rsync -a --delete ${shellQuote(srcPath + "/")} ${shellQuote(tgtPath + "/")}`,
           );
-        } else if (srcPath && tgtPath) {
+          if (rsyncResult.code !== 0) {
+            throw new Error(
+              `Same-server rsync failed during file copy after DB import (exit ${rsyncResult.code}): ${rsyncResult.stderr || rsyncResult.stdout}`,
+            );
+          }
+        } else {
           // Cross-server via tar pipe
           const srcKey = await this.sshKey.resolvePrivateKey(srcEnv.server);
+          const srcPort = Number(srcEnv.server.ssh_port ?? 22);
           const keyTmp = `/tmp/cb_key_${job.id}`;
           await executor.pushFile({ remotePath: keyTmp, content: srcKey });
           await executor.execute(`chmod 600 ${shellQuote(keyTmp)}`);
           try {
-            await executor.execute(
-              `chattr -R -i -a ${shellQuote(tgtPath)} 2>/dev/null || true; chmod -R u+w ${shellQuote(tgtPath)} 2>/dev/null || true; mkdir -p ${shellQuote(tgtPath)}`,
-            );
             const pullResult = await executor.execute(
-              `ssh -o StrictHostKeyChecking=no -i ${shellQuote(keyTmp)} ${shellQuote(srcEnv.server.ssh_user)}@${shellQuote(srcEnv.server.ip_address)} "tar -cz -C ${shellQuote(srcPath)} ." | tar -xz -C ${shellQuote(tgtPath)} --no-same-owner --no-same-permissions --touch --unlink-first --warning=no-timestamp`,
+              `ssh -o StrictHostKeyChecking=no -p ${srcPort} -i ${shellQuote(keyTmp)} ${shellQuote(srcEnv.server.ssh_user)}@${shellQuote(srcEnv.server.ip_address)} "tar -cz -C ${shellQuote(srcPath)} ." | tar -xz -C ${shellQuote(tgtPath)} --no-same-owner --no-same-permissions --touch --unlink-first --warning=no-timestamp`,
             );
             if (pullResult.code !== 0) {
-              throw new Error(`Failed to transfer files from source server: ${pullResult.stderr}`);
+              throw new Error(
+                `Failed to transfer files from source server (copy stage after DB import, exit ${pullResult.code}): ${pullResult.stderr}`,
+              );
             }
           } finally {
             await executor.execute(`rm -f ${shellQuote(keyTmp)}`).catch(() => {});
           }
         }
         await job.updateProgress({ value: 70, step: "Files synced" });
+
+        // Remove copied source .env files and write target DB identity/.env
+        // strictly BEFORE running any search-replace or WP-CLI commands (#113).
+        const rmEnvRes = await executor.execute(
+          `rm -f ${shellQuote(tgtPath + "/.env")} ${shellQuote(tgtPath + "/.env.local")} ${shellQuote(tgtPath + "/.env.production.local")} ${shellQuote(tgtPath + "/.env.staging.local")}`,
+        );
+        if (rmEnvRes.code !== 0) {
+          throw new Error(
+            `Failed to clear copied source .env before writing target configuration (exit ${rmEnvRes.code}): ${rmEnvRes.stderr}`,
+          );
+        }
+
+        await this.storeDbCredentials(
+          environmentId,
+          dbName,
+          dbUser,
+          dbPassword,
+          dbHost,
+        );
+
+        await this.writeEnvFile(
+          executor,
+          tgtPath,
+          dbName,
+          dbUser,
+          dbPassword,
+          dbHost,
+          env.type ?? "production",
+          env.url ?? "",
+        );
+        await executor.execute(
+          `chmod 600 ${shellQuote(tgtPath + "/.env")} 2>/dev/null || true`,
+        );
 
         // ── URL search-replace (SQL — zero wp-cli per PROJECT.md) ─────────────
         const srcUrl = srcEnv.url ?? null;
@@ -320,7 +419,7 @@ export class CreateBedrockProcessor extends WorkerHost {
         if (srcUrl && tgtUrl && srcUrl !== tgtUrl) {
           const srMycnf = await createRemoteMyCnf(
             executor,
-            { dbUser, dbPassword, dbHost: "localhost" },
+            { dbUser, dbPassword, dbHost },
             job.id ?? "default",
             "cb_sr",
           );
@@ -424,30 +523,6 @@ export class CreateBedrockProcessor extends WorkerHost {
             `rm -rf ${shellQuote(tgtPath)}/wp-content/cache ${shellQuote(tgtPath)}/wp-content/et-cache 2>/dev/null; true`,
           )
           .catch(() => {});
-
-        // Write .env with new DB + URL
-        const dbName2 = cyberpanel?.dbName ?? srcCreds.dbName;
-        const dbUser2 = cyberpanel?.dbUser ?? srcCreds.dbUser;
-        const dbPassword2 = cyberpanel?.dbPassword ?? srcCreds.dbPassword;
-        await this.writeEnvFile(
-          executor,
-          env.root_path ?? "",
-          dbName2,
-          dbUser2,
-          dbPassword2,
-          "localhost",
-          env.type ?? "production",
-          env.url ?? "",
-        );
-
-        // Store WpDbCredentials in Prisma
-        await this.storeDbCredentials(
-          environmentId,
-          dbName2,
-          dbUser2,
-          dbPassword2,
-          "localhost",
-        );
       } else {
         // ── 2b. Fresh Bedrock install ────────────────────────────────
 
@@ -1260,12 +1335,26 @@ export class CreateBedrockProcessor extends WorkerHost {
           level: "info",
           detail: `Setting remote origin to ${gitRemoteUrl}`,
         });
-        await executor.execute(
+        const initRes = await executor.execute(
           `cd ${shellQuote(rootPath)} && git init && git remote add origin ${shellQuote(gitRemoteUrl)}`,
         );
+        await tracker.trackRequiredCommand(
+          "Initialize Git repository",
+          `cd ${rootPath} && git init && git remote add origin ${gitRemoteUrl}`,
+          initRes,
+          0,
+          "Git repository initialization failed",
+        );
       } else if (gitRemoteUrl) {
-        await executor.execute(
-          `cd ${shellQuote(rootPath)} && git remote set-url origin ${shellQuote(gitRemoteUrl)} 2>/dev/null || git remote add origin ${shellQuote(gitRemoteUrl)} 2>/dev/null || true`,
+        const remoteRes = await executor.execute(
+          `cd ${shellQuote(rootPath)} && git remote set-url origin ${shellQuote(gitRemoteUrl)} 2>/dev/null || git remote add origin ${shellQuote(gitRemoteUrl)}`,
+        );
+        await tracker.trackRequiredCommand(
+          "Configure Git remote",
+          `git remote set-url origin ${gitRemoteUrl}`,
+          remoteRes,
+          0,
+          "Failed to configure Git remote",
         );
       }
 
@@ -1279,10 +1368,12 @@ export class CreateBedrockProcessor extends WorkerHost {
       const fetchRes = await executor.execute(
         `cd ${shellQuote(rootPath)} && git fetch origin ${shellQuote(targetBranch)}`,
       );
-      await tracker.trackCommand(
+      await tracker.trackRequiredCommand(
         "Fetch origin",
         `git fetch origin ${targetBranch}`,
         fetchRes,
+        0,
+        `Git fetch failed for origin/${targetBranch}`,
       );
 
       let checkoutCmd: string;
@@ -1293,13 +1384,54 @@ export class CreateBedrockProcessor extends WorkerHost {
       }
 
       const checkoutRes = await executor.execute(checkoutCmd);
-      await tracker.trackCommand("Checkout code", checkoutCmd, checkoutRes);
-
-      // Read current deployed commit SHA & message
-      const revRes = await executor.execute(
-        `cd ${shellQuote(rootPath)} && git rev-parse HEAD`,
+      await tracker.trackRequiredCommand(
+        "Checkout code",
+        checkoutCmd,
+        checkoutRes,
+        0,
+        `Git checkout failed for ${commitSha ?? targetBranch}`,
       );
-      const deployedSha = revRes.stdout.trim();
+
+      // Verify current HEAD matches requested revision BEFORE recording deployment
+      const expectedRef = commitSha || `origin/${targetBranch}`;
+      const revRes = await executor.execute(
+        `cd ${shellQuote(rootPath)} && git rev-parse HEAD && git rev-parse ${shellQuote(expectedRef)}`,
+      );
+      await tracker.trackRequiredCommand(
+        "Verify revision",
+        `git rev-parse HEAD && git rev-parse ${expectedRef}`,
+        revRes,
+        0,
+        `Failed to verify checked-out Git revision for ${expectedRef}`,
+      );
+
+      const revLines = revRes.stdout
+        .trim()
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+      const deployedSha = revLines[0] ?? "";
+      const expectedSha = revLines[1];
+
+      if (!deployedSha) {
+        throw new Error(
+          `Git revision verification returned an empty HEAD commit for ${expectedRef}`,
+        );
+      }
+      if (expectedSha && deployedSha !== expectedSha) {
+        throw new Error(
+          `Checked-out HEAD (${deployedSha}) does not match expected revision ${expectedRef} (${expectedSha})`,
+        );
+      }
+      if (commitSha) {
+        const headLower = deployedSha.toLowerCase();
+        const reqLower = commitSha.toLowerCase();
+        if (!headLower.startsWith(reqLower) && !reqLower.startsWith(headLower)) {
+          throw new Error(
+            `Checked-out HEAD (${deployedSha}) does not match requested commit (${commitSha})`,
+          );
+        }
+      }
 
       const logRes = await executor.execute(
         `cd ${shellQuote(rootPath)} && git log -1 --pretty=%B`,
@@ -1326,10 +1458,12 @@ export class CreateBedrockProcessor extends WorkerHost {
           const compRes = await executor.execute(
             `cd ${shellQuote(rootPath)} && composer install --no-dev --optimize-autoloader --no-interaction 2>&1`,
           );
-          await tracker.trackCommand(
+          await tracker.trackRequiredCommand(
             "Composer install",
             "composer install --no-dev",
             compRes,
+            0,
+            `Code checked out (${deployedSha.slice(0, 7)}), but composer install failed`,
           );
         }
       }
@@ -1345,7 +1479,13 @@ export class CreateBedrockProcessor extends WorkerHost {
         const dbRes = await executor.execute(
           wpCli.buildCommand("core update-db"),
         );
-        await tracker.trackCommand("WP DB update", "wp core update-db", dbRes);
+        await tracker.trackRequiredCommand(
+          "WP DB update",
+          "wp core update-db",
+          dbRes,
+          0,
+          `Code checked out (${deployedSha.slice(0, 7)}), but wp core update-db failed`,
+        );
       }
 
       if (flushCache) {

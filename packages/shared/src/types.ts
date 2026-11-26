@@ -175,6 +175,17 @@ export const DomainWhoisPayloadSchema = z.object({
 });
 export type DomainWhoisPayload = z.infer<typeof DomainWhoisPayloadSchema>;
 
+export const SAFE_DB_HOST_RE = /^[a-zA-Z0-9._:\-\[\]\/]+$/;
+
+export function isValidDbHost(host: string): boolean {
+  const trimmed = host.trim();
+  return (
+    trimmed.length > 0 &&
+    trimmed.length <= 255 &&
+    SAFE_DB_HOST_RE.test(trimmed)
+  );
+}
+
 // Workers fetch project/server/rootPath from Prisma using the environmentId.
 export const CreateBedrockPayloadSchema = z.object({
   environmentId: z.number().int().positive(),
@@ -186,7 +197,7 @@ export const CreateBedrockPayloadSchema = z.object({
       dbName: z.string(),
       dbUser: z.string(),
       dbPassword: z.string().optional(),
-      dbHost: z.string().default("localhost"),
+      dbHost: z.string().trim().min(1).max(255).default("localhost"),
       phpVersion: z.string().default("8.3"),
       adminEmail: z.string().optional(),
     })

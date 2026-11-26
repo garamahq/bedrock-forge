@@ -11,6 +11,7 @@ import {
 } from "class-validator";
 import { ArrayMaxSize, IsArray, ValidateNested } from "class-validator";
 import { Type } from "class-transformer";
+import { SAFE_DB_HOST_RE } from "@bedrock-forge/shared";
 import { ProjectLinkDto } from "./project.dto";
 
 const PHP_VERSIONS = ["8.1", "8.2", "8.3"] as const;
@@ -92,6 +93,9 @@ export class CreateProjectFullDto {
   @IsOptional()
   @IsString()
   @MaxLength(255)
+  @Matches(SAFE_DB_HOST_RE, {
+    message: "Database host contains invalid characters",
+  })
   db_host?: string;
 
   @IsOptional()
