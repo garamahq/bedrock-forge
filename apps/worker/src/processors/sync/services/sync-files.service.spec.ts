@@ -18,6 +18,11 @@ describe("SyncFilesService", () => {
         username: server.ssh_user,
         privateKey: "-----BEGIN PRIVATE KEY-----",
       })),
+      preparePeerKnownHosts: jest.fn().mockResolvedValue({
+        knownHostsPath: "/tmp/forge_known_hosts_test",
+        sshOptions:
+          "-o StrictHostKeyChecking=yes -o UserKnownHostsFile='/tmp/forge_known_hosts_test'",
+      }),
     } as any;
     service = new SyncFilesService(sshKey);
   });

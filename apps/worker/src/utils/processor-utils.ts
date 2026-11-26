@@ -141,12 +141,56 @@ export async function detectSiteOwnerAndGroup(
  *   - Sensitive configs          →  owner:webGroup  mode 440  (-r--r-----)
  *   - Uploads / Cache folders    →  owner:owner     mode 755  (drwxr-xr-x)
  */
+export interface ScopedOwnershipOptions {
+  excludePaths?: string[];
+  preserveExecutable?: boolean;
+  preservePrivateFiles?: boolean;
+}
+
+function buildFindPruneClause(root: string, excludePaths: string[]): string {
+  const cleaned = Array.from(
+    new Set(
+      excludePaths
+        .map((p) => p.trim().replace(/^\/+/, "").replace(/\/+$/, ""))
+        .filter((p) => p.length > 0 && !p.includes("..") && !p.includes("*")),
+    ),
+  );
+  if (cleaned.length === 0) return "";
+  const conditions = cleaned.map(
+    (rel) => `-path ${shellQuote(`${root}/${rel}`)}`,
+  );
+  return `\\( ${conditions.join(" -o ")} \\) -prune -o`;
+}
+
+function isSubPathExcluded(
+  candidatePath: string,
+  root: string,
+  excludePaths: string[],
+): boolean {
+  const rel = candidatePath.startsWith(`${root}/`)
+    ? candidatePath.slice(root.length + 1)
+    : candidatePath;
+  return excludePaths.some((rawRule) => {
+    const rule = rawRule.trim().replace(/^\/+/, "").replace(/\/+$/, "");
+    if (!rule) return false;
+    return rel === rule || rel.startsWith(`${rule}/`);
+  });
+}
+
 export async function fixCyberPanelOwnership(
   executor: RemoteExecutorService,
   rootPath: string,
   tracker?: StepTracker,
+  options?: ScopedOwnershipOptions,
 ): Promise<{ owner: string | null; webGroup: string }> {
   const root = rootPath.replace(/\/+$/, "");
+  const excludePaths = options?.excludePaths ?? [];
+  const isScoped =
+    excludePaths.length > 0 ||
+    Boolean(options?.preserveExecutable) ||
+    Boolean(options?.preservePrivateFiles);
+  const prunePrefix = buildFindPruneClause(root, excludePaths);
+  const scopedFilter = prunePrefix ? `${prunePrefix} ` : "";
 
   const log = async (
     step: string,
@@ -168,37 +212,52 @@ export async function fixCyberPanelOwnership(
     );
   } else {
     await log(
-      `Fixing ownership & permissions: ${owner}:${owner} (recursive), ${owner}:${webGroup} on docroot (750)`,
+      `Fixing ownership & permissions: ${owner}:${owner} (${isScoped ? "scoped" : "recursive"}), ${owner}:${webGroup} on docroot (750)`,
       "info",
       root,
     );
   }
 
   // Step 0 — unlock immutable attributes & make writable before changing perms
-  await executor
-    .execute(
-      `chattr -R -i -a ${shellQuote(root)} 2>/dev/null || true; chmod -R u+w ${shellQuote(root)} 2>/dev/null || true`,
-    )
-    .catch(() => {});
+  // When scoped exclusions are requested, never strip immutable bits or chmod excluded paths (#86).
+  if (!isScoped) {
+    await executor
+      .execute(
+        `chattr -R -i -a ${shellQuote(root)} 2>/dev/null || true; chmod -R u+w ${shellQuote(root)} 2>/dev/null || true`,
+      )
+      .catch(() => {});
+  }
 
-  // Step 1 — standard directory modes (755) and file modes (644)
-  await executor
-    .execute(
-      `find ${shellQuote(root)} -type d -exec chmod 755 {} + 2>/dev/null; find ${shellQuote(root)} -type f -exec chmod 644 {} + 2>/dev/null`,
-    )
-    .catch(() => {});
+  // Step 1 — standard directory modes (755) and file modes (preserving +x and private modes when scoped)
+  const dirCmd = `find ${shellQuote(root)} ${scopedFilter}-type d -exec chmod 755 {} + 2>/dev/null`;
+  let fileCmd: string;
+  if (options?.preserveExecutable && options?.preservePrivateFiles) {
+    fileCmd =
+      `find ${shellQuote(root)} ${scopedFilter}-type f -perm /111 -exec chmod 755 {} + 2>/dev/null; ` +
+      `find ${shellQuote(root)} ${scopedFilter}-type f ! -perm /111 -perm /077 -exec chmod 644 {} + 2>/dev/null`;
+  } else if (options?.preserveExecutable) {
+    fileCmd =
+      `find ${shellQuote(root)} ${scopedFilter}-type f -perm /111 -exec chmod 755 {} + 2>/dev/null; ` +
+      `find ${shellQuote(root)} ${scopedFilter}-type f ! -perm /111 -exec chmod 644 {} + 2>/dev/null`;
+  } else if (options?.preservePrivateFiles) {
+    fileCmd = `find ${shellQuote(root)} ${scopedFilter}-type f -perm /077 -exec chmod 644 {} + 2>/dev/null`;
+  } else {
+    fileCmd = `find ${shellQuote(root)} ${scopedFilter}-type f -exec chmod 644 {} + 2>/dev/null`;
+  }
+  await executor.execute(`${dirCmd}; ${fileCmd}`).catch(() => {});
 
   if (owner) {
-    // Step 2 — inner files & dirs: owner:owner (recursive)
-    await executor
-      .execute(`chown -R ${shellQuote(`${owner}:${owner}`)} ${shellQuote(root)}`)
-      .catch(async (e: unknown) => {
-        await log(
-          "chown -R failed — inner files may have wrong ownership",
-          "warn",
-          e instanceof Error ? e.message : String(e),
-        );
-      });
+    // Step 2 — inner files & dirs: owner:owner
+    const chownCmd = excludePaths.length > 0
+      ? `find ${shellQuote(root)} ${scopedFilter}-exec chown ${shellQuote(`${owner}:${owner}`)} {} +`
+      : `chown -R ${shellQuote(`${owner}:${owner}`)} ${shellQuote(root)}`;
+    await executor.execute(chownCmd).catch(async (e: unknown) => {
+      await log(
+        "chown failed — inner files may have wrong ownership",
+        "warn",
+        e instanceof Error ? e.message : String(e),
+      );
+    });
 
     // Step 3 — docroot folder itself: owner:webGroup (non-recursive override for OLS/Nginx traversal)
     await executor
@@ -223,7 +282,7 @@ export async function fixCyberPanelOwnership(
       );
     });
 
-  // Step 5 — secure sensitive configuration files (chmod 440, owner:webGroup)
+  // Step 5 — secure sensitive configuration files (chmod 440, owner:webGroup) unless excluded (#86)
   const sensitiveFiles = [
     `${root}/wp-config.php`,
     `${root}/web/wp-config.php`,
@@ -234,6 +293,9 @@ export async function fixCyberPanelOwnership(
     `${root}/config/application.php`,
   ];
   for (const file of sensitiveFiles) {
+    if (excludePaths.length > 0 && isSubPathExcluded(file, root, excludePaths)) {
+      continue;
+    }
     if (owner) {
       await executor
         .execute(
@@ -248,7 +310,7 @@ export async function fixCyberPanelOwnership(
       .catch(() => {});
   }
 
-  // Step 6 — ensure uploads & cache folders are writable (755, owner:owner)
+  // Step 6 — ensure uploads & cache folders are writable (755, owner:owner) unless excluded (#86)
   const writableDirs = [
     `${root}/wp-content/uploads`,
     `${root}/web/app/uploads`,
@@ -257,6 +319,9 @@ export async function fixCyberPanelOwnership(
     `${root}/storage`,
   ];
   for (const dir of writableDirs) {
+    if (excludePaths.length > 0 && isSubPathExcluded(dir, root, excludePaths)) {
+      continue;
+    }
     await executor
       .execute(
         `[ -d ${shellQuote(dir)} ] && chmod 755 ${shellQuote(dir)} 2>/dev/null || true`,

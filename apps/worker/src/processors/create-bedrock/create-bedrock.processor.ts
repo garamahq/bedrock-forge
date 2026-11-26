@@ -295,20 +295,44 @@ export class CreateBedrockProcessor extends WorkerHost {
           // Cross-server via tar pipe
           const srcKey = await this.sshKey.resolvePrivateKey(srcEnv.server);
           const keyTmp = `/tmp/cb_key_${job.id}`;
-          await executor.pushFile({ remotePath: keyTmp, content: srcKey });
-          await executor.execute(`chmod 600 ${shellQuote(keyTmp)}`);
+          const knownHostsTmp = `/tmp/cb_known_hosts_${job.id}`;
           try {
+            await executor.pushFile({ remotePath: keyTmp, content: srcKey });
+            await executor.execute(`chmod 600 ${shellQuote(keyTmp)}`);
+            const peerTrust = await this.sshKey.preparePeerKnownHosts(
+              executor,
+              {
+                name: srcEnv.server.name,
+                ip_address: srcEnv.server.ip_address,
+                ssh_port: srcEnv.server.ssh_port,
+                host_key_fingerprint: srcEnv.server.host_key_fingerprint ?? null,
+              },
+              knownHostsTmp,
+            );
             await executor.execute(
               `chattr -R -i -a ${shellQuote(tgtPath)} 2>/dev/null || true; chmod -R u+w ${shellQuote(tgtPath)} 2>/dev/null || true; mkdir -p ${shellQuote(tgtPath)}`,
             );
             const pullResult = await executor.execute(
-              `ssh -o StrictHostKeyChecking=no -i ${shellQuote(keyTmp)} ${shellQuote(srcEnv.server.ssh_user)}@${shellQuote(srcEnv.server.ip_address)} "tar -cz -C ${shellQuote(srcPath)} ." | tar -xz -C ${shellQuote(tgtPath)} --no-same-owner --no-same-permissions --touch --unlink-first --warning=no-timestamp`,
+              `ssh ${peerTrust.sshOptions} -i ${shellQuote(keyTmp)} ${shellQuote(srcEnv.server.ssh_user)}@${shellQuote(srcEnv.server.ip_address)} "tar -cz -C ${shellQuote(srcPath)} ." | tar -xz -C ${shellQuote(tgtPath)} --no-same-owner --no-same-permissions --touch --unlink-first --warning=no-timestamp`,
             );
             if (pullResult.code !== 0) {
               throw new Error(`Failed to transfer files from source server: ${pullResult.stderr}`);
             }
           } finally {
-            await executor.execute(`rm -f ${shellQuote(keyTmp)}`).catch(() => {});
+            try {
+              const rmRes = await executor.execute(
+                `rm -f ${shellQuote(keyTmp)} ${shellQuote(knownHostsTmp)}`,
+              );
+              if (rmRes.code !== 0) {
+                this.logger.warn(
+                  `Cleanup of temp clone SSH artifacts exited ${rmRes.code}: ${rmRes.stderr}`,
+                );
+              }
+            } catch (cleanupErr) {
+              this.logger.warn(
+                `Failed to clean up temp clone SSH artifacts: ${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)}`,
+              );
+            }
           }
         }
         await job.updateProgress({ value: 70, step: "Files synced" });
