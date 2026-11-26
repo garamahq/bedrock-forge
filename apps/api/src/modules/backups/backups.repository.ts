@@ -134,6 +134,86 @@ export class BackupsRepository {
     });
   }
 
+  /**
+   * Acquire a PostgreSQL transaction-scoped advisory lock keyed by environmentId,
+   * verify no active or queued BACKUPS / SYNC job exists for the environment,
+   * and atomically insert JobExecution + Backup rows.
+   *
+   * Returns null if another job is already queued or active for this environment.
+   */
+  async createJobExecutionAndBackupIfIdle(
+    execData: {
+      queue_name: string;
+      job_type?: string;
+      bull_job_id: string;
+      environment_id: bigint;
+      payload?: Prisma.InputJsonObject;
+    },
+    backupData: {
+      environment_id: bigint;
+      type: "full" | "db_only" | "files_only" | "incremental";
+      status: "pending" | "running" | "completed" | "failed";
+    },
+  ): Promise<{
+    exec: Awaited<ReturnType<PrismaService["jobExecution"]["create"]>>;
+    backup: Awaited<ReturnType<PrismaService["backup"]["create"]>>;
+  } | null> {
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${execData.environment_id})`;
+
+      const existing = await tx.jobExecution.findFirst({
+        where: {
+          environment_id: execData.environment_id,
+          queue_name: { in: [QUEUES.BACKUPS, QUEUES.SYNC] },
+          status: { in: ["queued", "active"] },
+        },
+        select: { id: true },
+      });
+      if (existing) {
+        return null;
+      }
+
+      const exec = await tx.jobExecution.create({ data: execData });
+      const backup = await tx.backup.create({
+        data: { ...backupData, job_execution_id: exec.id },
+      });
+      return { exec, backup };
+    });
+  }
+
+  /**
+   * Acquire a PostgreSQL transaction-scoped advisory lock keyed by environmentId,
+   * verify no active or queued BACKUPS / SYNC job exists for the environment,
+   * and atomically insert a JobExecution row (used by restore enqueue).
+   */
+  async createJobExecutionIfIdle(execData: {
+    queue_name: string;
+    job_type?: string;
+    bull_job_id: string;
+    environment_id: bigint;
+    payload?: Prisma.InputJsonObject;
+  }): Promise<Awaited<
+    ReturnType<PrismaService["jobExecution"]["create"]>
+  > | null> {
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${execData.environment_id})`;
+
+      const existing = await tx.jobExecution.findFirst({
+        where: {
+          environment_id: execData.environment_id,
+          queue_name: { in: [QUEUES.BACKUPS, QUEUES.SYNC] },
+          status: { in: ["queued", "active"] },
+        },
+        select: { id: true },
+      });
+      if (existing) {
+        return null;
+      }
+
+      return tx.jobExecution.create({ data: execData });
+    });
+  }
+
   findJobExecutionById(id: bigint) {
     return this.prisma.jobExecution.findUnique({ where: { id } });
   }
@@ -173,6 +253,52 @@ export class BackupsRepository {
       },
     });
     return result.count > 0;
+  }
+
+  /**
+   * Record that a user requested cancellation while keeping the execution
+   * status as 'active' until the worker actually acknowledges the signal and stops.
+   * Uses a status guard so terminal executions are never overwritten.
+   */
+  async markCancellationRequestedIfActive(
+    id: bigint,
+    message: string,
+  ): Promise<boolean> {
+    const result = await this.prisma.jobExecution.updateMany({
+      where: { id, status: "active" },
+      data: { last_error: message },
+    });
+    return result.count > 0;
+  }
+
+  /**
+   * Immediately mark a queued (not yet started) JobExecution and any linked
+   * pending Backup row as failed inside a transaction.
+   */
+  async cancelQueuedJobExecution(id: bigint, error: string): Promise<boolean> {
+    const now = new Date();
+    return this.prisma.$transaction(async (tx) => {
+      const result = await tx.jobExecution.updateMany({
+        where: { id, status: "queued" },
+        data: {
+          status: "failed",
+          last_error: error,
+          completed_at: now,
+        },
+      });
+      if (result.count === 0) {
+        return false;
+      }
+      await tx.backup.updateMany({
+        where: { job_execution_id: id, status: "pending" },
+        data: {
+          status: "failed",
+          error_message: error,
+          completed_at: now,
+        },
+      });
+      return true;
+    });
   }
 
   hasActiveJob(envId: bigint): Promise<boolean> {

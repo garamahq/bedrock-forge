@@ -1,7 +1,8 @@
 import { Processor, WorkerHost, InjectQueue } from "@nestjs/bullmq";
 import { Logger } from "@nestjs/common";
-import { Job, Queue } from "bullmq";
+import { DelayedError, Job, Queue } from "bullmq";
 import { mkdir, rm, mkdtemp, stat } from "fs/promises";
+import { acquireEnvLock, type EnvLockHandle } from "../../utils/env-lock";
 import { createReadStream } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -57,7 +58,32 @@ export class SyncProcessor extends WorkerHost {
   }
 
   async process(job: Job) {
-    const { jobExecutionId } = job.data;
+    const { jobExecutionId, targetEnvironmentId } = job.data as {
+      jobExecutionId: number;
+      targetEnvironmentId?: number;
+    };
+
+    let envLock: EnvLockHandle | null = null;
+    if (typeof targetEnvironmentId === "number") {
+      const client = (await this.syncQueue.client) as unknown as {
+        set?: unknown;
+      };
+      if (typeof client?.set === "function") {
+        envLock = await acquireEnvLock(
+          this.syncQueue,
+          targetEnvironmentId,
+          String(job.id ?? jobExecutionId),
+        );
+        if (!envLock) {
+          this.logger.warn(
+            `[${job.id}] Deferring ${job.name} — env lock already held (env=${targetEnvironmentId})`,
+          );
+          await job.moveToDelayed(Date.now() + 30 * 1_000, job.token);
+          throw new DelayedError();
+        }
+      }
+    }
+
     const tracker = await StepTracker.start(
       this.prisma,
       jobExecutionId,
@@ -74,8 +100,15 @@ export class SyncProcessor extends WorkerHost {
 
       await tracker.complete();
     } catch (err: unknown) {
+      if (err instanceof DelayedError) {
+        throw err;
+      }
       await tracker.fail(err, "Sync process");
       throw err;
+    } finally {
+      if (envLock) {
+        await envLock.release();
+      }
     }
   }
 

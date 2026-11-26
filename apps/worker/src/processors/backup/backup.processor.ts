@@ -1,6 +1,6 @@
 import { Processor, WorkerHost, InjectQueue } from "@nestjs/bullmq";
 import { Logger } from "@nestjs/common";
-import { Job, Queue } from "bullmq";
+import { DelayedError, Job, Queue, UnrecoverableError } from "bullmq";
 import { mkdir, rm, readFile, stat, statfs } from "fs/promises";
 import { StepTracker } from "../../services/step-tracker";
 import { join, dirname } from "path";
@@ -8,7 +8,10 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { RcloneService } from "../../services/rclone.service";
 import { SshKeyService } from "../../services/ssh-key.service";
 import { EncryptionService } from "../../encryption/encryption.service";
-import { createRemoteExecutor } from "@bedrock-forge/remote-executor";
+import {
+  createRemoteExecutor,
+  type ExecuteResult,
+} from "@bedrock-forge/remote-executor";
 import { escapeMysql } from "../../utils/cyberpanel-http";
 import {
   QUEUES,
@@ -20,6 +23,7 @@ import {
   BackupCreatePayloadSchema,
 } from "@bedrock-forge/shared";
 import { ConfigService } from "@nestjs/config";
+import { acquireEnvLock, isEnvLockHeld } from "../../utils/env-lock";
 import {
   fixCyberPanelOwnership,
   shellQuote,
@@ -31,6 +35,8 @@ import {
 } from "../../utils/processor-utils";
 
 const STAGING_DIR = "/tmp/forge-backups";
+const DEFAULT_BACKUP_EXEC_IDLE_TIMEOUT_MS = 15 * 60 * 1_000;
+const DEFAULT_BACKUP_EXEC_MAX_TIMEOUT_MS = 2 * 60 * 60 * 1_000;
 
 /** Lower-case, replace non-alphanumeric runs with hyphens, strip leading/trailing hyphens. */
 function slugify(s: string): string {
@@ -123,6 +129,9 @@ export class BackupProcessor extends WorkerHost {
         );
       }
     } catch (err: unknown) {
+      if (err instanceof DelayedError) {
+        throw err;
+      }
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.error(`Backup job ${job.id} failed: ${msg}`);
       // Mark the pre-created Backup row as failed so the UI reflects it
@@ -144,9 +153,111 @@ export class BackupProcessor extends WorkerHost {
 
   // ── Helpers ──────────────────────────────────────────────────────────────
 
+  private getExecTimeoutOptions(): {
+    idleTimeoutMs: number;
+    maxTimeoutMs: number;
+  } {
+    const rawIdle = this.config.get<unknown>("backup.execIdleTimeoutMs");
+    const rawMax = this.config.get<unknown>("backup.execMaxTimeoutMs");
+    return {
+      idleTimeoutMs:
+        typeof rawIdle === "number" && Number.isFinite(rawIdle) && rawIdle > 0
+          ? rawIdle
+          : DEFAULT_BACKUP_EXEC_IDLE_TIMEOUT_MS,
+      maxTimeoutMs:
+        typeof rawMax === "number" && Number.isFinite(rawMax) && rawMax > 0
+          ? rawMax
+          : DEFAULT_BACKUP_EXEC_MAX_TIMEOUT_MS,
+    };
+  }
+
+  private async checkCancelledOrThrow(tracker: StepTracker): Promise<void> {
+    if (await tracker.isCancelled(this.backupsQueue)) {
+      throw new UnrecoverableError("Cancelled by user");
+    }
+  }
+
+  private async deferJob(job: Job, delayMs: number, reason: string): Promise<never> {
+    this.logger.warn(`[${job.id}] ${reason}`);
+    await job.moveToDelayed(Date.now() + delayMs, job.token);
+    throw new DelayedError();
+  }
+
+  /**
+   * Clean up remote temporary files safely. When a remote script was
+   * interrupted by timeout or indeterminate SSH close, verify via `pgrep`
+   * whether backup.php is still running before deleting files it may be
+   * actively writing.
+   */
+  private async safeCleanupRemoteFiles(
+    executor: ReturnType<typeof createRemoteExecutor>,
+    jobId: string | number | undefined,
+    remoteScript: string,
+    remotePaths: string[],
+    scriptMayBeRunning: boolean,
+  ): Promise<void> {
+    if (scriptMayBeRunning) {
+      const probe = await executor
+        .execute(
+          `pgrep -f ${shellQuote(remoteScript)} >/dev/null 2>&1 && echo running || echo stopped`,
+          { timeout: 10_000 },
+        )
+        .catch(() => ({ code: 1, stdout: "unknown", stderr: "" }));
+      const state = probe.stdout.trim();
+      if (state === "running" || state === "unknown") {
+        this.logger.warn(
+          `[${jobId}] Remote script ${remoteScript} state is '${state}' after interruption — skipping temp file deletion to avoid racing active writes`,
+        );
+        return;
+      }
+    }
+
+    const rmArgs = remotePaths.map((p) => shellQuote(p)).join(" ");
+    await executor
+      .execute(`rm -f ${rmArgs}`)
+      .catch((e) =>
+        this.logger.warn(`[${jobId}] Remote cleanup on failure failed: ${e}`),
+      );
+  }
+
   // ── Create ────────────────────────────────────────────────────────────────
 
   private async handleCreate(
+    job: Job,
+    environmentId: number,
+    type: string,
+    jobExecutionId: number,
+    backupId: number,
+  ) {
+    // ── Redis environment lock (NX) ─────────────────────────────────────────
+    // Coordinates per-environment access across all backup/restore/sync workers.
+    const lockHandle = await acquireEnvLock(
+      this.backupsQueue,
+      environmentId,
+      String(job.id ?? jobExecutionId),
+    );
+    if (!lockHandle) {
+      return this.deferJob(
+        job,
+        30 * 1_000,
+        `Deferring backup:create — env lock already held (env=${environmentId})`,
+      );
+    }
+
+    try {
+      await this._runCreate(
+        job,
+        environmentId,
+        type,
+        jobExecutionId,
+        backupId,
+      );
+    } finally {
+      await lockHandle.release();
+    }
+  }
+
+  private async _runCreate(
     job: Job,
     environmentId: number,
     type: string,
@@ -195,7 +306,12 @@ export class BackupProcessor extends WorkerHost {
       data: { status: "running", started_at: new Date() },
     });
 
+    let scriptMayBeRunning = false;
+    const execTimeoutOpts = this.getExecTimeoutOptions();
+
     try {
+      await this.checkCancelledOrThrow(tracker);
+
       // ── Step A: Push backup.php to remote server ────────────────────────
       const pushStart = Date.now();
       await pushRemoteScript(
@@ -208,6 +324,8 @@ export class BackupProcessor extends WorkerHost {
         level: "info",
         durationMs: Date.now() - pushStart,
       });
+
+      await this.checkCancelledOrThrow(tracker);
 
       // ── Step B: Execute backup.php ──────────────────────────────────────
       // Attempt to retrieve stored DB credentials to pass as fallback CLI args.
@@ -252,15 +370,27 @@ export class BackupProcessor extends WorkerHost {
           command: maskedCmd,
         });
         const execStart = Date.now();
-        const result = await executor.execute(phpCmd, {
-          timeout: 20 * 60 * 1000,
-        });
+        let result: ExecuteResult;
+        try {
+          result = await executor.execute(phpCmd, execTimeoutOpts);
+        } catch (execErr) {
+          // Activity/max timeout or channel drop: remote php/tar may still be writing.
+          scriptMayBeRunning = true;
+          throw execErr;
+        }
         await tracker.trackCommand(
           "backup.php execution",
           maskedCmd,
           result,
           Date.now() - execStart,
         );
+
+        if (result.indeterminate) {
+          scriptMayBeRunning = true;
+          throw new Error(
+            `backup.php terminated by signal (${result.signal ?? "unknown"}) — remote outcome indeterminate`,
+          );
+        }
 
         if (result.code !== 0) {
           throw new Error(
@@ -279,6 +409,8 @@ export class BackupProcessor extends WorkerHost {
         value: 30,
         step: "Backup script executed on server",
       });
+
+      await this.checkCancelledOrThrow(tracker);
 
       // ── Step C: Pull backup via SFTP to local staging ───────────────────
       await tracker.track({
@@ -333,12 +465,17 @@ export class BackupProcessor extends WorkerHost {
       await mkdir(localStagingDir, { recursive: true });
       const pullStart = Date.now();
       let lastLoggedMb = 0;
+      let lastPullCancelCheckMb = 0;
       await executor.pullFileToPath(
         remoteOutput,
         localFile,
         undefined,
-        (bytes) => {
+        async (bytes) => {
           const mb = Math.floor(bytes / (1024 * 1024));
+          if (mb >= lastPullCancelCheckMb + 10) {
+            lastPullCancelCheckMb = mb;
+            await this.checkCancelledOrThrow(tracker);
+          }
           if (mb >= lastLoggedMb + 50) {
             lastLoggedMb = mb;
             this.logger.log(
@@ -360,6 +497,9 @@ export class BackupProcessor extends WorkerHost {
       });
 
       // ── Step D: Upload to Google Drive ────────────────────────────────────
+      // Check for user cancellation before committing to the GDrive upload.
+      await this.checkCancelledOrThrow(tracker);
+
       const configWritten = await this.rclone.writeConfig();
       if (!configWritten) {
         throw new Error(
@@ -377,6 +517,20 @@ export class BackupProcessor extends WorkerHost {
         env.google_drive_folder_id,
         backupFilename,
       );
+
+      // If cancellation was requested while upload was already in flight, clean
+      // up the uploaded object asynchronously and abort before marking complete.
+      if (await tracker.isCancelled(this.backupsQueue)) {
+        await this.backupsQueue
+          .add(
+            JOB_TYPES.BACKUP_DELETE_FILE,
+            { filePath: finalFilePath },
+            { ...DEFAULT_JOB_OPTIONS, attempts: 5 },
+          )
+          .catch(() => undefined);
+        throw new UnrecoverableError("Cancelled by user");
+      }
+
       await tracker.track({
         step: "Google Drive upload complete",
         level: "info",
@@ -429,14 +583,14 @@ export class BackupProcessor extends WorkerHost {
         (err as Error).message =
           "Backup failed: no space left on device on the Forge host. Free up disk space under /tmp and retry.";
       }
-      // Attempt remote cleanup even on failure so temp files do not accumulate
-      await executor
-        .execute(`rm -f ${shellQuote(remoteScript)} ${shellQuote(remoteOutput)}`)
-        .catch((e) =>
-          this.logger.warn(
-            `[${job.id}] Remote cleanup on failure failed: ${e}`,
-          ),
-        );
+      // Attempt remote cleanup only once remote backup.php is not still active
+      await this.safeCleanupRemoteFiles(
+        executor,
+        job.id,
+        remoteScript,
+        [remoteScript, remoteOutput],
+        scriptMayBeRunning,
+      );
       // Always remove local staging dir — prevents large .tar.gz files
       // accumulating in /tmp/forge-backups/ across failed or retried jobs.
       await rm(localFile, { force: true }).catch(() => undefined);
@@ -451,6 +605,32 @@ export class BackupProcessor extends WorkerHost {
   // ── Restore ───────────────────────────────────────────────────────────────
 
   private async handleRestore(
+    job: Job,
+    backupId: number,
+    environmentId: number,
+    jobExecutionId: number,
+  ) {
+    const lockHandle = await acquireEnvLock(
+      this.backupsQueue,
+      environmentId,
+      String(job.id ?? jobExecutionId),
+    );
+    if (!lockHandle) {
+      return this.deferJob(
+        job,
+        30 * 1_000,
+        `Deferring backup:restore — env lock already held (env=${environmentId})`,
+      );
+    }
+
+    try {
+      await this._runRestore(job, backupId, environmentId, jobExecutionId);
+    } finally {
+      await lockHandle.release();
+    }
+  }
+
+  private async _runRestore(
     job: Job,
     backupId: number,
     environmentId: number,
@@ -520,7 +700,12 @@ export class BackupProcessor extends WorkerHost {
       );
     }
 
+    let scriptMayBeRunning = false;
+    const execTimeoutOpts = this.getExecTimeoutOptions();
+
     try {
+      await this.checkCancelledOrThrow(tracker);
+
       // ── Step A: Configure rclone ────────────────────────────────────────
       const configWritten = await this.rclone.writeConfig();
       if (!configWritten) {
@@ -542,6 +727,8 @@ export class BackupProcessor extends WorkerHost {
         durationMs: Date.now() - pushStart,
       });
 
+      await this.checkCancelledOrThrow(tracker);
+
       // ── Step C: Stream archive directly from Google Drive → server ──────
       // Zero local temp files — rclone stdout is piped directly into SFTP.
       const totalBytes = backup.size_bytes ? Number(backup.size_bytes) : 0;
@@ -558,84 +745,149 @@ export class BackupProcessor extends WorkerHost {
       const { child: rcloneChild, stream: downloadStream } =
         this.rclone.downloadStream(backup.file_path);
 
-      // Collect rclone stderr for error reporting
+      // Attach all process + stream lifecycle listeners synchronously from start
+      // so immediate spawn errors, signal kills (where exitCode stays null),
+      // and early close events can never be missed or leak orphan processes.
       const rcloneStderrChunks: string[] = [];
-      rcloneChild.stderr?.on("data", (chunk: Buffer) => {
+      const onRcloneStderr = (chunk: Buffer) => {
         rcloneStderrChunks.push(chunk.toString());
+      };
+      rcloneChild.stderr?.on("data", onRcloneStderr);
+
+      // Guard downloadStream against ERR_UNHANDLED_ERROR if rclone fails or
+      // destroys the stream before sftpPutFromStream binds its own listener.
+      const onDownloadStreamError = () => undefined;
+      downloadStream.on("error", onDownloadStreamError);
+
+      let rcloneClosed = false;
+      let rejectRcloneFailure!: (err: Error) => void;
+      const rcloneFailurePromise = new Promise<never>((_, rej) => {
+        rejectRcloneFailure = rej;
       });
+      rcloneFailurePromise.catch(() => undefined);
 
-      const streamStart = Date.now();
-      await executor.pushFileFromStream(
-        remoteBackupPath,
-        downloadStream,
-        45 * 60 * 1000,
-        async (bytesTransferred) => {
-          const mb = Math.floor(bytesTransferred / (1024 * 1024));
-
-          // Check for user cancellation every ~10 MB — responsive but
-          // avoids a Redis round-trip on every SFTP chunk event.
-          if (mb >= lastCancelCheckMb + 10) {
-            lastCancelCheckMb = mb;
-            if (await tracker.isCancelled(this.backupsQueue)) {
-              rcloneChild.kill("SIGTERM");
-              throw new Error("Cancelled by user");
-            }
+      const destroyDownloadStream = (err?: Error) => {
+        const readable = downloadStream as { destroy?: (e?: Error) => void };
+        if (typeof readable.destroy === "function") {
+          try {
+            readable.destroy(err);
+          } catch (_) {
+            // ignore
           }
+        }
+      };
 
-          if (mb >= lastLoggedMb + 50) {
-            lastLoggedMb = mb;
-            const totalMb =
-              totalBytes > 0 ? Math.round(totalBytes / 1024 / 1024) : 0;
-            const pct =
-              totalBytes > 0
-                ? Math.min(
-                    75,
-                    Math.floor(5 + (bytesTransferred / totalBytes) * 70),
-                  )
-                : Math.min(75, 5 + Math.floor(mb / 10));
-
-            await tracker.track({
-              step: "Streaming archive to server",
-              level: "info",
-              detail: `${mb} MB transferred${totalMb > 0 ? ` / ${totalMb} MB` : ""}`,
-              durationMs: Date.now() - streamStart,
-            });
-            await job.updateProgress({
-              value: pct,
-              step: `Streaming: ${mb} MB${totalMb > 0 ? ` / ${totalMb} MB` : ""}`,
-            });
-          }
-        },
-      );
-
-      // Verify rclone exited cleanly after stdout closed
-      await new Promise<void>((resolve, reject) => {
-        if (rcloneChild.exitCode !== null) {
-          // Already exited
-          if (rcloneChild.exitCode !== 0) {
-            reject(
-              new Error(
-                `rclone cat failed (exit ${rcloneChild.exitCode}): ${rcloneStderrChunks.join("")}`,
-              ),
+      const rcloneExitPromise = new Promise<void>((resolve, reject) => {
+        if (rcloneChild.exitCode !== null || rcloneChild.signalCode) {
+          rcloneClosed = true;
+          if (rcloneChild.signalCode || (rcloneChild.exitCode !== null && rcloneChild.exitCode !== 0)) {
+            const earlyErr = new Error(
+              rcloneChild.signalCode
+                ? `rclone cat terminated by signal ${rcloneChild.signalCode}: ${rcloneStderrChunks.join("")}`
+                : `rclone cat failed (exit ${rcloneChild.exitCode}): ${rcloneStderrChunks.join("")}`,
             );
+            destroyDownloadStream(earlyErr);
+            rejectRcloneFailure(earlyErr);
+            reject(earlyErr);
           } else {
             resolve();
           }
           return;
         }
-        rcloneChild.on("close", (code) => {
-          if (code !== 0) {
-            reject(
-              new Error(
-                `rclone cat failed (exit ${code}): ${rcloneStderrChunks.join("")}`,
-              ),
+
+        const onError = (err: Error) => {
+          rcloneClosed = true;
+          rcloneChild.removeListener("close", onClose);
+          destroyDownloadStream(err);
+          rejectRcloneFailure(err);
+          reject(err);
+        };
+
+        const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
+          rcloneClosed = true;
+          rcloneChild.removeListener("error", onError);
+          const finalSignal = signal ?? rcloneChild.signalCode ?? null;
+          if (finalSignal || code !== 0) {
+            const failErr = new Error(
+              finalSignal
+                ? `rclone cat terminated by signal ${finalSignal}: ${rcloneStderrChunks.join("")}`
+                : `rclone cat failed (exit ${code}): ${rcloneStderrChunks.join("")}`,
             );
+            destroyDownloadStream(failErr);
+            rejectRcloneFailure(failErr);
+            reject(failErr);
           } else {
             resolve();
           }
-        });
-        rcloneChild.on("error", reject);
+        };
+
+        rcloneChild.once("error", onError);
+        rcloneChild.once("close", onClose);
       });
+      rcloneExitPromise.catch(() => undefined);
+
+      const streamStart = Date.now();
+      try {
+        await Promise.race([
+          executor.pushFileFromStream(
+            remoteBackupPath,
+            downloadStream,
+            45 * 60 * 1000,
+            async (bytesTransferred) => {
+              const mb = Math.floor(bytesTransferred / (1024 * 1024));
+
+              // Check for user cancellation every ~10 MB — responsive but
+              // avoids a Redis round-trip on every SFTP chunk event.
+              if (mb >= lastCancelCheckMb + 10) {
+                lastCancelCheckMb = mb;
+                if (await tracker.isCancelled(this.backupsQueue)) {
+                  rcloneChild.kill("SIGTERM");
+                  throw new UnrecoverableError("Cancelled by user");
+                }
+              }
+
+              if (mb >= lastLoggedMb + 50) {
+                lastLoggedMb = mb;
+                const totalMb =
+                  totalBytes > 0 ? Math.round(totalBytes / 1024 / 1024) : 0;
+                const pct =
+                  totalBytes > 0
+                    ? Math.min(
+                        75,
+                        Math.floor(5 + (bytesTransferred / totalBytes) * 70),
+                      )
+                    : Math.min(75, 5 + Math.floor(mb / 10));
+
+                await tracker.track({
+                  step: "Streaming archive to server",
+                  level: "info",
+                  detail: `${mb} MB transferred${totalMb > 0 ? ` / ${totalMb} MB` : ""}`,
+                  durationMs: Date.now() - streamStart,
+                });
+                await job.updateProgress({
+                  value: pct,
+                  step: `Streaming: ${mb} MB${totalMb > 0 ? ` / ${totalMb} MB` : ""}`,
+                });
+              }
+            },
+          ),
+          rcloneFailurePromise,
+        ]);
+
+        // Ensure rclone itself exited cleanly (no late signal/non-zero after EOF)
+        await rcloneExitPromise;
+      } finally {
+        rcloneChild.stderr?.removeListener("data", onRcloneStderr);
+        if (!rcloneClosed && !rcloneChild.killed && rcloneChild.exitCode === null) {
+          try {
+            rcloneChild.kill("SIGTERM");
+          } catch (_) {
+            // ignore
+          }
+          destroyDownloadStream();
+        }
+        downloadStream.removeListener("error", onDownloadStreamError);
+      }
 
       await tracker.track({
         step: "Archive transferred to server",
@@ -649,9 +901,7 @@ export class BackupProcessor extends WorkerHost {
       });
 
       // ── Step D: Execute restore script ──────────────────────────────────
-      if (await tracker.isCancelled(this.backupsQueue)) {
-        throw new Error("Cancelled by user");
-      }
+      await this.checkCancelledOrThrow(tracker);
 
       // Proactively unlock any immutable attributes and grant write permissions using root SSH
       await executor
@@ -674,9 +924,19 @@ export class BackupProcessor extends WorkerHost {
         detail: `docroot=${env.root_path}`,
       });
       const execStart = Date.now();
-      const result = await executor.execute(restoreCmd, {
-        timeout: 20 * 60 * 1000,
-      });
+      let result: ExecuteResult;
+      try {
+        result = await executor.execute(restoreCmd, execTimeoutOpts);
+      } catch (execErr) {
+        // SSH channel timeout or disconnect after restore started: the remote
+        // script may still be extracting or importing. Never retry blindly or
+        // delete the archive out from under a running restore process.
+        scriptMayBeRunning = true;
+        const msg = execErr instanceof Error ? execErr.message : String(execErr);
+        throw new UnrecoverableError(
+          `Restore script interrupted (${msg}) — state is indeterminate, manual verification required`,
+        );
+      }
       await tracker.trackCommand(
         "backup.php restore execution",
         maskedCmd,
@@ -684,29 +944,49 @@ export class BackupProcessor extends WorkerHost {
         Date.now() - execStart,
       );
 
+      if (result.indeterminate) {
+        // Channel closed with a signal (missing numeric exit code) — outcome unknown.
+        scriptMayBeRunning = true;
+        throw new UnrecoverableError(
+          `Restore script terminated by signal (${result.signal ?? "unknown"}) — state is indeterminate, manual verification required`,
+        );
+      }
+
       if (result.code !== 0) {
         throw new Error(
           `Restore failed (exit ${result.code}): ${result.stderr}`,
         );
       }
 
-      // Parse result to log db_imported status
+      // Require a valid structured JSON result from backup.php --restore (#59)
+      // before proceeding to post-restore actions or reporting success.
+      let parsedRestore: { status?: unknown; db_imported?: unknown } | null = null;
       try {
-        const parsed = JSON.parse(result.stdout) as { db_imported?: boolean };
-        await tracker.track({
-          step: parsed.db_imported
-            ? "Files + database restored"
-            : "Files restored (no DB dump found)",
-          level: "info",
-          detail: `db_imported=${String(parsed.db_imported ?? false)}`,
-        });
+        parsedRestore = JSON.parse(result.stdout) as {
+          status?: unknown;
+          db_imported?: unknown;
+        };
       } catch {
-        // Non-fatal — log raw output
-        await tracker.track({
-          step: "Restore script completed",
-          level: "info",
-        });
+        parsedRestore = null;
       }
+      if (
+        !parsedRestore ||
+        typeof parsedRestore !== "object" ||
+        parsedRestore.status !== "restored" ||
+        typeof parsedRestore.db_imported !== "boolean"
+      ) {
+        throw new UnrecoverableError(
+          `Restore script exited 0 without a valid structured result (stdout: ${result.stdout.slice(0, 200) || "<empty>"}) — restore outcome unverified`,
+        );
+      }
+
+      await tracker.track({
+        step: parsedRestore.db_imported
+          ? "Files + database restored"
+          : "Files restored (no DB dump found)",
+        level: "info",
+        detail: `db_imported=${String(parsedRestore.db_imported)}`,
+      });
 
       // ── Step D+: Fix file ownership ─────────────────────────────────────
       await fixCyberPanelOwnership(executor, env.root_path, tracker);
@@ -933,13 +1213,13 @@ export class BackupProcessor extends WorkerHost {
       if (myCnfPath) {
         await cleanupRemoteMyCnf(executor, myCnfPath).catch(() => {});
       }
-      await executor
-        .execute(`rm -f ${remoteScript} ${remoteBackupPath}`)
-        .catch((e) =>
-          this.logger.warn(
-            `[${job.id}] Remote cleanup on failure failed: ${e}`,
-          ),
-        );
+      await this.safeCleanupRemoteFiles(
+        executor,
+        job.id,
+        remoteScript,
+        [remoteScript, remoteBackupPath],
+        scriptMayBeRunning,
+      );
     }
   }
 
@@ -982,87 +1262,134 @@ export class BackupProcessor extends WorkerHost {
       return;
     }
 
-    // Create the Backup and JobExecution rows, then delegate to handleCreate
-    const bullJobId = job.id ?? String(scheduleId);
-
-    const exec = await this.prisma.jobExecution.create({
-      data: {
-        queue_name: QUEUES.BACKUPS,
-        bull_job_id: bullJobId,
+    // Guard: defer BEFORE creating Backup/JobExecution rows if another job or
+    // Redis environment lock is already active on this environment.
+    const activeJobCheck = await this.prisma.jobExecution.findFirst({
+      where: {
         environment_id: BigInt(environmentId),
-        status: "queued",
-        payload: { scheduleId, environmentId, type } as object,
+        queue_name: { in: [QUEUES.BACKUPS, QUEUES.SYNC] },
+        status: { in: ["queued", "active"] },
       },
+      select: { id: true, queue_name: true },
     });
-
-    const env = await this.prisma.environment.findUniqueOrThrow({
-      where: { id: BigInt(environmentId) },
-    });
-
-    if (!env.google_drive_folder_id) {
-      const tracker = await StepTracker.start(
-        this.prisma,
-        exec.id,
-        this.logger,
+    if (activeJobCheck || (await isEnvLockHeld(this.backupsQueue, environmentId))) {
+      return this.deferJob(
         job,
+        5 * 60 * 1_000,
+        activeJobCheck
+          ? `Deferring scheduled backup: active job found (execId=${activeJobCheck.id}, queue=${activeJobCheck.queue_name})`
+          : `Deferring scheduled backup: env lock held (env=${environmentId})`,
       );
-      await tracker.fail(
-        new Error(`Environment ${environmentId} has no google_drive_folder_id`),
-        "Scheduled backup pre-flight",
-      );
-      this.logger.error(
-        `[${job.id}] Scheduled backup aborted: no google_drive_folder_id on env ${environmentId}`,
-      );
-      return;
     }
 
-    const backup = await this.prisma.backup.create({
-      data: {
-        environment_id: BigInt(environmentId),
-        job_execution_id: exec.id,
-        type: type as "full" | "db_only" | "files_only",
-        status: "pending",
-      },
-    });
-
-    // Update schedule's last_run_at
-    await this.prisma.backupSchedule
-      .update({
-        where: { id: BigInt(scheduleId) },
-        data: { last_run_at: new Date() },
-      })
-      .catch((e) =>
-        this.logger.warn(`Could not update schedule last_run_at: ${e}`),
+    const lockHandle = await acquireEnvLock(
+      this.backupsQueue,
+      environmentId,
+      String(job.id ?? scheduleId),
+    );
+    if (!lockHandle) {
+      return this.deferJob(
+        job,
+        5 * 60 * 1_000,
+        `Deferring scheduled backup: env lock already held (env=${environmentId})`,
       );
+    }
 
-    // Delegate to the standard create flow
-    const jobExecutionId = Number(exec.id);
-    const backupId = Number(backup.id);
+    // Create the Backup and JobExecution rows while holding envLock
+    const bullJobId = job.id ?? String(scheduleId);
+    let backupId = 0;
 
     try {
-      await this.handleCreate(
+      const exec = await this.prisma.jobExecution.create({
+        data: {
+          queue_name: QUEUES.BACKUPS,
+          job_type: JOB_TYPES.BACKUP_SCHEDULED,
+          bull_job_id: bullJobId,
+          environment_id: BigInt(environmentId),
+          status: "queued",
+          payload: { scheduleId, environmentId, type } as object,
+        },
+      });
+
+      const env = await this.prisma.environment.findUniqueOrThrow({
+        where: { id: BigInt(environmentId) },
+      });
+
+      if (!env.google_drive_folder_id) {
+        const tracker = await StepTracker.start(
+          this.prisma,
+          exec.id,
+          this.logger,
+          job,
+        );
+        await tracker.fail(
+          new Error(`Environment ${environmentId} has no google_drive_folder_id`),
+          "Scheduled backup pre-flight",
+        );
+        this.logger.error(
+          `[${job.id}] Scheduled backup aborted: no google_drive_folder_id on env ${environmentId}`,
+        );
+        return;
+      }
+
+      const backup = await this.prisma.backup.create({
+        data: {
+          environment_id: BigInt(environmentId),
+          job_execution_id: exec.id,
+          type: type as "full" | "db_only" | "files_only",
+          status: "pending",
+        },
+      });
+      backupId = Number(backup.id);
+
+      // Update schedule's last_run_at
+      await this.prisma.backupSchedule
+        .update({
+          where: { id: BigInt(scheduleId) },
+          data: { last_run_at: new Date() },
+        })
+        .catch((e) =>
+          this.logger.warn(`Could not update schedule last_run_at: ${e}`),
+        );
+
+      const jobExecutionId = Number(exec.id);
+      await this._runCreate(
         job,
         environmentId,
         type,
         jobExecutionId,
         backupId,
       );
-    } catch (err) {
-      // handleCreate already marks backup + jobExecution as failed
-      throw err;
-    }
 
-    // Run retention cleanup after a successful scheduled backup (non-fatal)
-    await this.cleanupRetention(
-      environmentId,
-      backupId,
-      scheduleRecord.retention_count ?? null,
-      scheduleRecord.retention_days ?? null,
-    ).catch((err) =>
-      this.logger.warn(
-        `[${job.id}] Retention cleanup failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
-      ),
-    );
+      // Run retention cleanup after a successful scheduled backup (non-fatal)
+      await this.cleanupRetention(
+        environmentId,
+        backupId,
+        scheduleRecord.retention_count ?? null,
+        scheduleRecord.retention_days ?? null,
+      ).catch((err) =>
+        this.logger.warn(
+          `[${job.id}] Retention cleanup failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
+    } catch (err) {
+      if (!(err instanceof DelayedError) && backupId) {
+        const msg = err instanceof Error ? err.message : String(err);
+        await this.prisma.backup
+          .update({
+            where: { id: BigInt(backupId) },
+            data: {
+              status: "failed",
+              error_message: msg,
+              completed_at: new Date(),
+            },
+          })
+          .catch(() => undefined);
+      }
+      throw err;
+    } finally {
+      await lockHandle.release();
+    }
   }
 
   // ── Retention cleanup ─────────────────────────────────────────────────────

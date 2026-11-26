@@ -31,11 +31,12 @@ export const backupsApi = {
 
   cancelBackupExecution: async (
     execId: number,
-  ): Promise<{ cancelled: boolean }> => {
-    return api.post<{ cancelled: boolean }>(
-      `/backups/execution/${execId}/cancel`,
-      {},
-    );
+  ): Promise<{ cancelled: boolean; terminated?: boolean; status?: string }> => {
+    return api.post<{
+      cancelled: boolean;
+      terminated?: boolean;
+      status?: string;
+    }>(`/backups/execution/${execId}/cancel`, {});
   },
 
   deleteBackup: async (id: number): Promise<unknown> => {

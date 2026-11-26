@@ -15,6 +15,188 @@ if (PHP_VERSION_ID < 70000) {
 error_reporting(E_ALL);
 set_time_limit(0);
 
+/**
+ * Execute a shell command with streaming output / progress reporting on STDERR.
+ * Emits progress lines to STDERR only when real forward progress occurs
+ * (subcommand output, watched output file growth, or stdin SQL bytes consumed)
+ * so SSH activity timeouts stay alive during legitimate slow operations while
+ * genuinely hung commands still trigger idle timeout detection.
+ *
+ * @return array{code: int, output: string[]}
+ */
+function runTrackedCommand(
+    string $cmd,
+    ?string $watchFile = null,
+    ?string $stdinFile = null,
+    string $label = 'command'
+): array {
+    $descriptors = [
+        0 => $stdinFile !== null ? ['pipe', 'r'] : ['file', '/dev/null', 'r'],
+        1 => ['pipe', 'w'],
+        2 => ['pipe', 'w'],
+    ];
+
+    $proc = @proc_open($cmd, $descriptors, $pipes);
+    if (!is_resource($proc)) {
+        return ['code' => 1, 'output' => ["Failed to start process: {$label}"]];
+    }
+
+    $stdinHandle = null;
+    $stdinSize   = 0;
+    $stdinSent   = 0;
+    if ($stdinFile !== null) {
+        $stdinHandle = @fopen($stdinFile, 'rb');
+        if ($stdinHandle === false) {
+            @fclose($pipes[0]);
+            @fclose($pipes[1]);
+            @fclose($pipes[2]);
+            @proc_terminate($proc);
+            @proc_close($proc);
+            return ['code' => 1, 'output' => ["Failed to open stdin input file: {$stdinFile}"]];
+        }
+        $stdinSize = (int)(@filesize($stdinFile) ?: 0);
+        stream_set_blocking($pipes[0], false);
+    }
+
+    stream_set_blocking($pipes[1], false);
+    stream_set_blocking($pipes[2], false);
+
+    $tailLines       = [];
+    $pendingStdinBuf = '';
+    $lastWatchSize   = -1;
+    $lastReportAt    = time();
+    $startTime       = $lastReportAt;
+    $lastReportedPct = -1;
+
+    $appendLines = static function (string $chunk) use (&$tailLines): void {
+        foreach (preg_split('/\r\n|\r|\n/', $chunk) ?: [] as $line) {
+            $trimmed = trim($line);
+            if ($trimmed === '') {
+                continue;
+            }
+            $tailLines[] = $trimmed;
+            if (count($tailLines) > 200) {
+                array_shift($tailLines);
+            }
+        }
+    };
+
+    $outOpen = true;
+    $errOpen = true;
+
+    while ($outOpen || $errOpen) {
+        $read   = [];
+        $write  = [];
+        $except = null;
+
+        if ($outOpen) $read[] = $pipes[1];
+        if ($errOpen) $read[] = $pipes[2];
+        if ($stdinHandle !== null && isset($pipes[0])) $write[] = $pipes[0];
+
+        $ready = @stream_select($read, $write, $except, 5, 0);
+        if ($ready === false) {
+            usleep(100000);
+        }
+
+        $now = time();
+        $sawProgress = false;
+
+        foreach ($read as $r) {
+            $chunk = @fread($r, 8192);
+            if ($chunk === '' || $chunk === false) {
+                if (@feof($r)) {
+                    if ($r === $pipes[1]) {
+                        $outOpen = false;
+                        @fclose($pipes[1]);
+                    } else {
+                        $errOpen = false;
+                        @fclose($pipes[2]);
+                    }
+                }
+            } else {
+                $appendLines($chunk);
+                $sawProgress = true;
+                // Forward GNU tar checkpoint lines immediately to STDERR
+                if (strpos($chunk, '[progress]') !== false) {
+                    fwrite(STDERR, $chunk . (substr($chunk, -1) === "\n" ? '' : "\n"));
+                    $lastReportAt = $now;
+                    $sawProgress = false;
+                }
+            }
+        }
+
+        if (!empty($write) && $stdinHandle !== null && isset($pipes[0])) {
+            if ($pendingStdinBuf === '' && !feof($stdinHandle)) {
+                $readData = fread($stdinHandle, 262144);
+                $pendingStdinBuf = ($readData === false) ? '' : $readData;
+            }
+            if ($pendingStdinBuf !== '') {
+                $written = @fwrite($pipes[0], $pendingStdinBuf);
+                if ($written !== false && $written > 0) {
+                    $stdinSent += $written;
+                    $pendingStdinBuf = substr($pendingStdinBuf, $written);
+                    $sawProgress = true;
+                }
+            }
+            if ($pendingStdinBuf === '' && feof($stdinHandle)) {
+                @fclose($stdinHandle);
+                $stdinHandle = null;
+                @fclose($pipes[0]);
+                unset($pipes[0]);
+            }
+        }
+
+        if ($watchFile !== null && file_exists($watchFile)) {
+            clearstatcache(true, $watchFile);
+            $curSize = (int)(@filesize($watchFile) ?: 0);
+            if ($curSize > $lastWatchSize) {
+                $lastWatchSize = $curSize;
+                $sawProgress = true;
+            }
+        }
+
+        if ($sawProgress && ($now - $lastReportAt) >= 15) {
+            $elapsed = $now - $startTime;
+            if ($stdinFile !== null && $stdinSize > 0) {
+                $pct = (int)floor(($stdinSent / $stdinSize) * 100);
+                if ($pct > $lastReportedPct || ($now - $lastReportAt) >= 30) {
+                    $lastReportedPct = $pct;
+                    $sentMb = round($stdinSent / 1048576, 1);
+                    $totMb  = round($stdinSize / 1048576, 1);
+                    fwrite(STDERR, "[progress] {$label}: {$sentMb}/{$totMb} MB ({$pct}%, {$elapsed}s)\n");
+                    $lastReportAt = $now;
+                }
+            } elseif ($watchFile !== null && $lastWatchSize >= 0) {
+                $mb = round($lastWatchSize / 1048576, 1);
+                fwrite(STDERR, "[progress] {$label}: {$mb} MB written ({$elapsed}s)\n");
+                $lastReportAt = $now;
+            } else {
+                fwrite(STDERR, "[progress] {$label} active ({$elapsed}s)\n");
+                $lastReportAt = $now;
+            }
+        }
+    }
+
+    if ($stdinHandle !== null) {
+        @fclose($stdinHandle);
+    }
+    if (isset($pipes[0]) && is_resource($pipes[0])) {
+        @fclose($pipes[0]);
+    }
+
+    $exitCode = proc_close($proc);
+    return ['code' => $exitCode, 'output' => $tailLines];
+}
+
+function tarSupportsCheckpoint(): bool {
+    static $supported = null;
+    if ($supported === null) {
+        $ver = @shell_exec('tar --version 2>/dev/null') ?? '';
+        $supported = stripos($ver, 'GNU tar') !== false;
+    }
+    return $supported;
+}
+
 $opts = getopt('', ['docroot:', 'type:', 'output:', 'restore', 'file:', 'db-name:', 'db-user:', 'db-pass:', 'db-host:', 'site-url:', 'mycnf:']);
 
 $docroot = $opts['docroot'] ?? null;
@@ -101,8 +283,11 @@ if ($restore) {
     // --unlink-first: remove each existing file before writing to prevent EPERM/EACCES on 0440 files (mutually exclusive with --overwrite in tar)
     // --warning=no-timestamp: suppress timestamp warnings
     $tarFlags = '--no-same-owner --no-same-permissions --touch --unlink-first --warning=no-timestamp';
+    if (tarSupportsCheckpoint()) {
+        $tarFlags .= " --checkpoint=5000 --checkpoint-action=" . escapeshellarg("echo=[progress] tar extract record #%u");
+    }
     $cmd = "tar -xzf " . escapeshellarg($file) . " -C " . escapeshellarg($extractTo) . " " . $tarFlags . " 2>&1";
-    exec($cmd, $out, $code);
+    ['code' => $code, 'output' => $out] = runTrackedCommand($cmd, null, null, 'tar extract');
     if ($code > 0) {
         $nonFatal = true;
         foreach ($out as $line) {
@@ -199,13 +384,12 @@ if ($restore) {
             chmod($mycnfFile, 0600);
 
             $importCmd = sprintf(
-                'mysql --defaults-extra-file=%s%s %s < %s 2>&1',
+                'mysql --defaults-extra-file=%s%s %s 2>&1',
                 escapeshellarg($mycnfFile),
                 $dbPort,
-                escapeshellarg($creds['DB_NAME']),
-                escapeshellarg($sqlFile)
+                escapeshellarg($creds['DB_NAME'])
             );
-            exec($importCmd, $importOut, $importCode);
+            ['code' => $importCode, 'output' => $importOut] = runTrackedCommand($importCmd, null, $sqlFile, 'DB import');
             @unlink($mycnfFile);
 
             if ($importCode !== 0) {
@@ -500,7 +684,7 @@ if ($type === 'full' || $type === 'db_only' || $isIncremental) {
         escapeshellarg($dbDumpFile),
         escapeshellarg($stderrFile)
     );
-    exec($cmd, $out, $code);
+    ['code' => $code, 'output' => $out] = runTrackedCommand($cmd, $dbDumpFile, null, 'mysqldump');
     @unlink($mycnfFile);  // always clean up credentials file
     if ($code !== 0) {
         $errDetail = file_exists($stderrFile) ? trim(file_get_contents($stderrFile)) : implode("\n", $out);
@@ -538,7 +722,7 @@ if ($isIncremental) {
 
     $rsyncCmd = "rsync {$rsyncFlags} " . escapeshellarg($docroot . '/') . ' ' . escapeshellarg($currentDir . '/');
     fwrite(STDERR, "Executing incremental rsync: {$rsyncCmd}\n");
-    exec($rsyncCmd . ' 2>&1', $rsyncOut, $rsyncCode);
+    ['code' => $rsyncCode, 'output' => $rsyncOut] = runTrackedCommand($rsyncCmd . ' 2>&1', null, null, 'incremental rsync');
     if ($rsyncCode !== 0) {
         fwrite(STDERR, "ERROR: Incremental rsync failed (exit {$rsyncCode}): " . implode("\n", $rsyncOut) . "\n");
         exec('rm -rf ' . escapeshellarg($cacheDir . '/current'));
@@ -578,7 +762,7 @@ foreach ($parts as $part) {
     $tarCmd .= ' -C ' . escapeshellarg(dirname($part)) . ' ' . escapeshellarg(basename($part));
 }
 
-exec($tarCmd . ' 2>&1', $out, $code);
+['code' => $code, 'output' => $out] = runTrackedCommand($tarCmd . ' 2>&1', $output, null, 'tar compress');
 
 // Cleanup temp SQL dump
 if ($dbDumpFile && file_exists($dbDumpFile)) {
