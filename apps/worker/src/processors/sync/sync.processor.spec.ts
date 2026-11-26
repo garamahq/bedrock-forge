@@ -247,4 +247,245 @@ describe("SyncProcessor", () => {
       await expect(processor.process(job)).rejects.toBe(originalError);
     });
   });
+
+  describe("sync safeguards (#82, #83, #85)", () => {
+    it("rejects replayed clone or push payloads with identical source and target IDs before DB or SSH access (#82)", async () => {
+      const cloneJob = makeJob(JOB_TYPES.SYNC_CLONE, {
+        sourceEnvironmentId: 9,
+        targetEnvironmentId: 9,
+        jobExecutionId: 30,
+      });
+      await expect(processor.process(cloneJob)).rejects.toThrow();
+      expect(prisma.environment.findUniqueOrThrow).not.toHaveBeenCalled();
+
+      const pushJob = makeJob(JOB_TYPES.SYNC_PUSH, {
+        sourceEnvironmentId: 9,
+        targetEnvironmentId: 9,
+        scope: "both",
+        jobExecutionId: 31,
+      });
+      await expect(processor.process(pushJob)).rejects.toThrow();
+      expect(prisma.environment.findUniqueOrThrow).not.toHaveBeenCalled();
+    });
+
+    it("aborts files push on staging when protected upload enumeration fails, while preserving production promotion fallback (#83)", async () => {
+      const mockExecutor = {
+        execute: jest.fn().mockResolvedValue({ code: 0, stdout: "ok", stderr: "" }),
+        pushFile: jest.fn().mockResolvedValue(undefined),
+      };
+      const execSpy = jest
+        .spyOn(require("@bedrock-forge/remote-executor"), "createRemoteExecutor")
+        .mockReturnValue(mockExecutor);
+      try {
+        const module = await Test.createTestingModule({
+          providers: [
+            SyncProcessor,
+            { provide: PrismaService, useValue: prisma },
+            { provide: SshKeyService, useValue: makeSshKey() },
+            { provide: RcloneService, useValue: makeRclone() },
+            { provide: EncryptionService, useValue: makeEncryption() },
+            { provide: getQueueToken(QUEUES.SYNC), useValue: makeQueue() },
+            {
+              provide: LayoutDetectorService,
+              useValue: {
+                detectWpLayout: jest.fn().mockResolvedValue({
+                  isBedrock: false,
+                  corePath: "/var/www",
+                  contentPath: "/var/www/wp-content",
+                }),
+              },
+            },
+            {
+              provide: ProtectedCptService,
+              useValue: {
+                collectProtectedPostTypeUploadPaths: jest
+                  .fn()
+                  .mockRejectedValue(new Error("MySQL query failed")),
+                buildProtectedUploadFileExcludes: jest.fn().mockReturnValue([]),
+              },
+            },
+            {
+              provide: SyncDbService,
+              useValue: {
+                resolveCredentials: jest.fn().mockResolvedValue({
+                  dbHost: "localhost",
+                  dbUser: "u",
+                  dbPassword: "p",
+                  dbName: "db",
+                }),
+                resolveWpUrl: jest.fn().mockResolvedValue("https://env.test"),
+                ensureTargetEnvironmentConfig: jest.fn().mockResolvedValue(undefined),
+                flushWordPressCaches: jest.fn().mockResolvedValue(undefined),
+              },
+            },
+            {
+              provide: SyncFilesService,
+              useValue: {
+                assertSourceDirectoryExists: jest.fn().mockResolvedValue(undefined),
+                pushFiles: jest.fn().mockResolvedValue(undefined),
+                hasBroadUploadsProtection: jest
+                  .fn()
+                  .mockImplementation(
+                    (srcType?: string, tgtType?: string) =>
+                      tgtType === "production" && srcType !== "production",
+                  ),
+                replaceUrlsInFiles: jest.fn().mockResolvedValue(undefined),
+              },
+            },
+          ],
+        }).compile();
+
+        const guardedProcessor = module.get(SyncProcessor);
+        const syncFilesMock = module.get(SyncFilesService);
+
+        const server = {
+          id: BigInt(1),
+          name: "S1",
+          ip_address: "198.51.100.1",
+          ssh_port: 22,
+          ssh_user: "root",
+          ssh_private_key_encrypted: "enc",
+        };
+        prisma.environment.findUniqueOrThrow
+          .mockResolvedValueOnce({
+            id: BigInt(1),
+            type: "production",
+            root_path: "/src",
+            server,
+            project: { name: "P" },
+          })
+          .mockResolvedValueOnce({
+            id: BigInt(2),
+            type: "staging",
+            root_path: "/tgt",
+            protected_post_types: ["course"],
+            server,
+            project: { name: "P" },
+          });
+
+        await expect(
+          guardedProcessor.process(
+            makeJob(JOB_TYPES.SYNC_PUSH, {
+              sourceEnvironmentId: 1,
+              targetEnvironmentId: 2,
+              scope: "files",
+              jobExecutionId: 44,
+            }),
+          ),
+        ).rejects.toThrow(/MySQL query failed/);
+        expect(syncFilesMock.pushFiles).not.toHaveBeenCalled();
+
+        // Staging -> Production promotion already excludes all uploads/ broadly
+        prisma.environment.findUniqueOrThrow
+          .mockResolvedValueOnce({
+            id: BigInt(2),
+            type: "staging",
+            root_path: "/src",
+            server,
+            project: { name: "P" },
+          })
+          .mockResolvedValueOnce({
+            id: BigInt(1),
+            type: "production",
+            root_path: "/tgt",
+            protected_post_types: ["course"],
+            server,
+            project: { name: "P" },
+          });
+
+        await guardedProcessor.process(
+          makeJob(JOB_TYPES.SYNC_PUSH, {
+            sourceEnvironmentId: 2,
+            targetEnvironmentId: 1,
+            scope: "files",
+            jobExecutionId: 45,
+          }),
+        );
+        expect(syncFilesMock.pushFiles).toHaveBeenCalledTimes(1);
+      } finally {
+        execSpy.mockRestore();
+      }
+    });
+
+    it("fails push(scope='both') before mutating target DB when source directory is missing (#85)", async () => {
+      const syncDbMock = {
+        createSafetyBackup: jest.fn().mockResolvedValue(undefined),
+        resolveCredentials: jest.fn().mockResolvedValue({
+          dbHost: "localhost",
+          dbUser: "u",
+          dbPassword: "p",
+          dbName: "db",
+        }),
+      };
+      const syncFilesMock = {
+        assertSourceDirectoryExists: jest
+          .fn()
+          .mockRejectedValue(new Error("Source site directory not found: /missing")),
+        pushFiles: jest.fn(),
+        hasBroadUploadsProtection: jest.fn().mockReturnValue(false),
+      };
+
+      const module = await Test.createTestingModule({
+        providers: [
+          SyncProcessor,
+          { provide: PrismaService, useValue: prisma },
+          { provide: SshKeyService, useValue: makeSshKey() },
+          { provide: RcloneService, useValue: makeRclone() },
+          { provide: EncryptionService, useValue: makeEncryption() },
+          { provide: getQueueToken(QUEUES.SYNC), useValue: makeQueue() },
+          {
+            provide: LayoutDetectorService,
+            useValue: {
+              detectWpLayout: jest.fn().mockResolvedValue({
+                isBedrock: false,
+                corePath: "/var/www",
+                contentPath: "/var/www/wp-content",
+              }),
+            },
+          },
+          { provide: ProtectedCptService, useValue: {} },
+          { provide: SyncDbService, useValue: syncDbMock },
+          { provide: SyncFilesService, useValue: syncFilesMock },
+        ],
+      }).compile();
+
+      const guardedProcessor = module.get(SyncProcessor);
+      const server = {
+        id: BigInt(1),
+        name: "S1",
+        ip_address: "198.51.100.1",
+        ssh_port: 22,
+        ssh_user: "root",
+        ssh_private_key_encrypted: "enc",
+      };
+      prisma.environment.findUniqueOrThrow
+        .mockResolvedValueOnce({
+          id: BigInt(1),
+          type: "staging",
+          root_path: "/missing",
+          server,
+          project: { name: "P" },
+        })
+        .mockResolvedValueOnce({
+          id: BigInt(2),
+          type: "production",
+          root_path: "/tgt",
+          server,
+          project: { name: "P" },
+        });
+
+      await expect(
+        guardedProcessor.process(
+          makeJob(JOB_TYPES.SYNC_PUSH, {
+            sourceEnvironmentId: 1,
+            targetEnvironmentId: 2,
+            scope: "both",
+            jobExecutionId: 46,
+            skipSafetyBackup: true,
+          }),
+        ),
+      ).rejects.toThrow(/Source site directory not found/);
+      expect(syncDbMock.createSafetyBackup).not.toHaveBeenCalled();
+    });
+  });
 });

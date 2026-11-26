@@ -193,6 +193,13 @@ export class SyncProcessor extends WorkerHost {
 
     await tracker.updateProgress({ value: 20, step: "URLs resolved" });
 
+    // Validate source directory upfront before safety backup / DB mutation (#85)
+    await this.syncFiles.assertSourceDirectoryExists(
+      sourceExecutor,
+      sourceEnv.root_path,
+      tracker,
+    );
+
     // Safety backup of target (optional if skipSafetyBackup=true, mandatory otherwise)
     if (job.data.skipSafetyBackup) {
       await tracker.track({
@@ -687,6 +694,15 @@ export class SyncProcessor extends WorkerHost {
       ),
     ]);
 
+    // Pre-flight check before safety backup / DB mutation (#85)
+    if (scope === "files" || scope === "both") {
+      await this.syncFiles.assertSourceDirectoryExists(
+        sourceExecutor,
+        sourceEnv.root_path,
+        tracker,
+      );
+    }
+
     // Safety backup of target before overwrite
     if (scope !== "files") {
       if (skipSafetyBackup) {
@@ -736,6 +752,11 @@ export class SyncProcessor extends WorkerHost {
       targetEnv.protected_post_types &&
       targetEnv.protected_post_types.length > 0
     ) {
+      const hasBroaderUploadExcludes =
+        this.syncFiles.hasBroadUploadsProtection(
+          sourceEnv.type,
+          targetEnv.type,
+        );
       try {
         const targetCreds = await this.syncDb.resolveCredentials(
           targetExecutor,
@@ -769,8 +790,16 @@ export class SyncProcessor extends WorkerHost {
           await cleanupRemoteMyCnf(targetExecutor, tgtMycnf);
         }
       } catch (e) {
+        if (!hasBroaderUploadExcludes) {
+          await tracker.track({
+            step: "Protected Post Types — aborting file sync because protected media could not be enumerated",
+            level: "error",
+            detail: e instanceof Error ? e.message : String(e),
+          });
+          throw e;
+        }
         await tracker.track({
-          step: "Protected Post Types — upload file protection skipped",
+          step: "Protected Post Types — upload enumeration failed, preserved by broader production uploads exclusion",
           level: "warn",
           detail: e instanceof Error ? e.message : String(e),
         });

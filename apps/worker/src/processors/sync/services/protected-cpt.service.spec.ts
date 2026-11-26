@@ -312,4 +312,45 @@ describe("ProtectedCptService", () => {
       );
     });
   });
+
+  describe("collectProtectedPostTypeUploadPaths (#83)", () => {
+    it("returns an empty list when query succeeds with zero rows", async () => {
+      const executor = {
+        execute: jest.fn().mockResolvedValue({ code: 0, stdout: "", stderr: "" }),
+      } as any;
+      const tracker = makeTracker();
+
+      const res = await service.collectProtectedPostTypeUploadPaths(
+        executor,
+        creds,
+        tgtMycnf,
+        ["course"],
+        tracker,
+        "wp_",
+      );
+      expect(res).toEqual([]);
+    });
+
+    it("throws instead of returning [] when MySQL enumeration fails", async () => {
+      const executor = {
+        execute: jest.fn().mockResolvedValue({
+          code: 1,
+          stdout: "",
+          stderr: "ERROR 1045 (28000): Access denied",
+        }),
+      } as any;
+      const tracker = makeTracker();
+
+      await expect(
+        service.collectProtectedPostTypeUploadPaths(
+          executor,
+          creds,
+          tgtMycnf,
+          ["course"],
+          tracker,
+          "wp_",
+        ),
+      ).rejects.toThrow(/enumerate|collect|Access denied/i);
+    });
+  });
 });

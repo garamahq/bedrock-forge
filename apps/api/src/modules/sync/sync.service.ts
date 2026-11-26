@@ -18,7 +18,23 @@ export class SyncService {
     @InjectQueue(QUEUES.SYNC) private readonly queue: Queue,
   ) {}
 
+  private assertDistinctEnvironments(
+    sourceEnvironmentId: number,
+    targetEnvironmentId: number,
+  ): void {
+    if (sourceEnvironmentId === targetEnvironmentId) {
+      throw new BadRequestException(
+        "Source and target environments cannot be the same.",
+      );
+    }
+  }
+
   async enqueueClone(dto: SyncCloneDto) {
+    this.assertDistinctEnvironments(
+      dto.sourceEnvironmentId,
+      dto.targetEnvironmentId,
+    );
+
     const hasActive = await this.repo.hasActiveJob(
       BigInt(dto.targetEnvironmentId),
     );
@@ -55,6 +71,11 @@ export class SyncService {
   }
 
   async enqueuePush(dto: SyncPushDto) {
+    this.assertDistinctEnvironments(
+      dto.sourceEnvironmentId,
+      dto.targetEnvironmentId,
+    );
+
     const hasActive = await this.repo.hasActiveJob(
       BigInt(dto.targetEnvironmentId),
     );

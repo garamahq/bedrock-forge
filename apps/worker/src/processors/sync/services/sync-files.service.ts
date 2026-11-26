@@ -58,6 +58,43 @@ export class SyncFilesService {
 
   constructor(private readonly sshKey: SshKeyService) {}
 
+  hasBroadUploadsProtection(
+    sourceType?: string | null,
+    targetType?: string | null,
+  ): boolean {
+    return this.getProductionPromotionExcludes(sourceType, targetType).some(
+      (rule) => rule.endsWith("/uploads/"),
+    );
+  }
+
+  async assertSourceDirectoryExists(
+    sourceExecutor: Executor,
+    sourceSite: string,
+    tracker: StepTracker,
+  ): Promise<void> {
+    if (!sourceSite?.trim()) {
+      throw new Error("Source site root_path is empty or missing");
+    }
+
+    await tracker.track({
+      step: "Checking source site directory",
+      level: "info",
+      detail: sourceSite,
+    });
+
+    const checkResult = await sourceExecutor.execute(
+      `test -d ${shellQuote(sourceSite)} && echo ok || echo missing`,
+    );
+    if (checkResult.code !== 0 || checkResult.stdout.trim() !== "ok") {
+      await tracker.track({
+        step: "Source site directory not found",
+        level: "error",
+        detail: `${sourceSite} does not exist or is unreachable`,
+      });
+      throw new Error(`Source site directory not found: ${sourceSite}`);
+    }
+  }
+
   /**
    * Sync site files from source → target via rsync over SSH.
    */
@@ -100,24 +137,7 @@ export class SyncFilesService {
       });
     }
 
-    await tracker.track({
-      step: "Checking source site directory",
-      level: "info",
-      detail: sourceSite,
-    });
-
-    // Verify root_path exists on source
-    const checkResult = await sourceExecutor.execute(
-      `test -d ${shellQuote(sourceSite)} && echo ok || echo missing`,
-    );
-    if (checkResult.code !== 0 || checkResult.stdout.trim() === "missing") {
-      await tracker.track({
-        step: "Source site directory not found — skipping file sync",
-        level: "warn",
-        detail: `${sourceSite} does not exist`,
-      });
-      return;
-    }
+    await this.assertSourceDirectoryExists(sourceExecutor, sourceSite, tracker);
 
     // Pre-sync: proactively unlock permissions and immutable attributes on target
     await targetExecutor
@@ -214,7 +234,6 @@ export class SyncFilesService {
       "--no-owner",
       "--no-group",
       "--no-perms",
-      "--ignore-errors",
       "--timeout=300",
       `--exclude-from=${shellQuote(excludeFilePath)}`,
       "-e",
@@ -298,6 +317,15 @@ export class SyncFilesService {
   }
 
   private isRsyncPermissionOnlyPartial(output: string): boolean {
+    const contentFailurePattern =
+      /\b(?:send_files|failed to open|failed to read|read error|write error|mkstemp|stat\b|recv_generator|Input\/output error|Permission denied|No such file)/i;
+    if (contentFailurePattern.test(output)) {
+      return false;
+    }
+
+    const attrOnlyPattern =
+      /^(?:rsync(?:\s+\[[^\]]+\])?:\s+)?(?:failed to set (?:permissions|times)\b|(?:chown|chgrp|chmod|utimensat|chtimes|set_file_attrs)\s+.*(?:Operation not permitted|failed))/i;
+
     const meaningfulLines = output
       .split("\n")
       .map((line) => line.trim())
@@ -306,11 +334,7 @@ export class SyncFilesService {
 
     return (
       meaningfulLines.length > 0 &&
-      meaningfulLines.every(
-        (line) =>
-          line.includes("Operation not permitted") ||
-          line.includes("failed to set permissions"),
-      )
+      meaningfulLines.every((line) => attrOnlyPattern.test(line))
     );
   }
 
@@ -433,33 +457,151 @@ export class SyncFilesService {
 
     await targetExecutor.execute(`mkdir -p ${shellQuote(targetContent)}`);
     const extractCmd = `tar -xzf ${shellQuote(remoteTar)} -C ${shellQuote(targetContent)} --no-same-owner --no-same-permissions --touch --unlink-first --warning=no-timestamp`;
-    await tracker.track({
-      step: "Extracting site files on target",
-      level: "info",
-      command: extractCmd,
-    });
-    const extractStart = Date.now();
-    const extractResult = await targetExecutor.execute(extractCmd);
-    await targetExecutor
-      .execute(`rm -f ${shellQuote(remoteTar)}`)
-      .catch(() => {});
-    await tracker.trackCommand(
-      "tar extract on target",
-      extractCmd,
-      extractResult,
-      Date.now() - extractStart,
-    );
-
-    if (extractResult.code > 1) {
-      throw new Error(
-        `tar extract failed (exit ${extractResult.code}): ${extractResult.stderr}`,
+    try {
+      const manifestRes = await targetExecutor.execute(
+        `tar -tzf ${shellQuote(remoteTar)}`,
       );
+      if (manifestRes.code !== 0) {
+        throw new Error(
+          `tar manifest inspection failed (exit ${manifestRes.code}): ${manifestRes.stderr || manifestRes.stdout}`,
+        );
+      }
+
+      await tracker.track({
+        step: "Extracting site files on target",
+        level: "info",
+        command: extractCmd,
+      });
+      const extractStart = Date.now();
+      const extractResult = await targetExecutor.execute(extractCmd);
+      await tracker.trackCommand(
+        "tar extract on target",
+        extractCmd,
+        extractResult,
+        Date.now() - extractStart,
+      );
+
+      if (extractResult.code > 1) {
+        throw new Error(
+          `tar extract failed (exit ${extractResult.code}): ${extractResult.stderr}`,
+        );
+      }
+
+      // Reconcile stale target-only files cleanly while preserving exclusions (#88)
+      const targetFilesRes = await targetExecutor.execute(
+        `cd ${shellQuote(targetContent)} && find . -mindepth 1 \\( -type f -o -type l \\) | sed 's|^\\./||'`,
+      );
+      if (targetFilesRes.code !== 0) {
+        throw new Error(
+          `Failed to enumerate target files for stale cleanup (exit ${targetFilesRes.code}): ${targetFilesRes.stderr || targetFilesRes.stdout}`,
+        );
+      }
+      const staleFiles = this.computeStaleTargetFiles(
+        targetFilesRes.stdout.split(/\r?\n/),
+        manifestRes.stdout.split(/\r?\n/),
+        allExcludes,
+      );
+      if (staleFiles.length > 0) {
+        const pruneFile = `/tmp/forge_tar_prune_${job.id}.txt`;
+        await targetExecutor.pushFile({
+          remotePath: pruneFile,
+          content: Buffer.from(staleFiles.join("\n") + "\n", "utf8"),
+        });
+        try {
+          const pruneResult = await targetExecutor.execute(
+            `cd ${shellQuote(targetContent)} && xargs -d '\\n' rm -f < ${shellQuote(pruneFile)}`,
+          );
+          if (pruneResult.code !== 0) {
+            throw new Error(
+              `Failed to remove stale target files after tar extract (exit ${pruneResult.code}): ${pruneResult.stderr || pruneResult.stdout}`,
+            );
+          }
+          await tracker.track({
+            step: `Pruned ${staleFiles.length} stale target file(s) (tar relay)`,
+            level: "info",
+          });
+        } finally {
+          await targetExecutor
+            .execute(`rm -f ${shellQuote(pruneFile)}`)
+            .catch(() => {});
+        }
+      }
+    } finally {
+      await targetExecutor
+        .execute(`rm -f ${shellQuote(remoteTar)}`)
+        .catch(() => {});
     }
 
     await tracker.track({
       step: "File sync complete (tar relay)",
       level: "info",
     });
+  }
+
+  isPathExcludedByRules(rawPath: string, excludeRules: string[]): boolean {
+    const rel = rawPath
+      .trim()
+      .replace(/^\/+/, "")
+      .replace(/^\.\//, "");
+    if (!rel) return false;
+
+    for (const rawRule of excludeRules) {
+      const rule = rawRule
+        .trim()
+        .replace(/^\/+/, "")
+        .replace(/^\.\//, "");
+      if (!rule) continue;
+
+      if (rule.endsWith("/")) {
+        const dir = rule.slice(0, -1);
+        if (rel === dir || rel.startsWith(rule)) return true;
+        continue;
+      }
+
+      if (rule.includes("*")) {
+        const escaped = rule
+          .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+          .replace(/\*/g, "[^/]*");
+        if (new RegExp(`^${escaped}$`).test(rel)) return true;
+        continue;
+      }
+
+      if (rel === rule || rel.startsWith(`${rule}/`)) return true;
+    }
+
+    return false;
+  }
+
+  computeStaleTargetFiles(
+    targetRelPaths: string[],
+    archiveEntries: string[],
+    excludeRules: string[],
+  ): string[] {
+    const archiveSet = new Set(
+      archiveEntries
+        .map((entry) =>
+          entry
+            .trim()
+            .replace(/^\.\//, "")
+            .replace(/^\/+/, "")
+            .replace(/\/+$/, ""),
+        )
+        .filter((entry) => entry.length > 0 && entry !== "."),
+    );
+
+    const stale: string[] = [];
+    for (const rawTargetPath of targetRelPaths) {
+      const rel = rawTargetPath
+        .trim()
+        .replace(/^\.\//, "")
+        .replace(/^\/+/, "");
+      if (!rel || rel === "." || rel.includes("..")) continue;
+      if (archiveSet.has(rel)) continue;
+      if (this.isPathExcludedByRules(rel, excludeRules)) continue;
+      stale.push(rel);
+    }
+
+    return stale;
   }
 
   /**
