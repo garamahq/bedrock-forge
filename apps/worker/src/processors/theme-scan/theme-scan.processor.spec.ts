@@ -15,6 +15,7 @@ function makePrisma() {
   return {
     jobExecution: {
       update: jest.fn().mockResolvedValue({}),
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
     environment: {
       findUniqueOrThrow: jest.fn().mockResolvedValue({

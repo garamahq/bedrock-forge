@@ -219,9 +219,15 @@ export function DashboardPage() {
   });
 
   const cancelMutation = useMutation({
-    mutationFn: (url: string) => api.post(url, {}),
-    onSuccess: () => {
-      toast({ title: "Job cancelled" });
+    mutationFn: (url: string) =>
+      api.post<{ cancelled?: boolean; terminated?: boolean }>(url, {}),
+    onSuccess: (res) => {
+      toast({
+        title:
+          res?.terminated === false
+            ? "Cancellation requested — waiting for worker to stop"
+            : "Job cancelled",
+      });
       void queryClient.invalidateQueries({ queryKey: ["dashboard-summary"] });
     },
     onError: () => toast({ title: "Cancel failed", variant: "destructive" }),

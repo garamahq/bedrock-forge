@@ -1,5 +1,9 @@
 import { Test } from "@nestjs/testing";
-import { NotFoundException, BadRequestException } from "@nestjs/common";
+import {
+  NotFoundException,
+  BadRequestException,
+  ConflictException,
+} from "@nestjs/common";
 import { getQueueToken } from "@nestjs/bullmq";
 import { BackupsService } from "./backups.service";
 import { BackupsRepository } from "./backups.repository";
@@ -16,10 +20,14 @@ function makeRepo() {
     updateStatus: jest.fn(),
     delete: jest.fn(),
     createJobExecution: jest.fn(),
+    createJobExecutionIfIdle: jest.fn(),
     createJobExecutionAndBackup: jest.fn(),
+    createJobExecutionAndBackupIfIdle: jest.fn(),
     findJobExecutionById: jest.fn(),
     updateJobExecution: jest.fn(),
     cancelJobExecutionIfActive: jest.fn(),
+    markCancellationRequestedIfActive: jest.fn(),
+    cancelQueuedJobExecution: jest.fn(),
     findJobExecutionLog: jest.fn(),
     hasActiveJob: jest.fn(),
   };
@@ -28,6 +36,7 @@ function makeRepo() {
 function makeQueue() {
   return {
     add: jest.fn(),
+    getJob: jest.fn().mockResolvedValue(null),
     client: Promise.resolve({ set: jest.fn() }),
   };
 }
@@ -128,18 +137,18 @@ describe("BackupsService", () => {
       expect(repo.createJobExecutionAndBackup).not.toHaveBeenCalled();
     });
 
-    it("throws BadRequestException when there is already an active job for the environment", async () => {
+    it("throws ConflictException when there is already an active job for the environment", async () => {
       repo.findEnvironment.mockResolvedValue(makeEnv());
-      repo.hasActiveJob.mockResolvedValue(true);
+      repo.createJobExecutionAndBackupIfIdle.mockResolvedValue(null);
       await expect(
         svc.enqueueCreate({ environmentId: 1, type: "full" }),
-      ).rejects.toThrow(BadRequestException);
-      expect(repo.createJobExecutionAndBackup).not.toHaveBeenCalled();
+      ).rejects.toThrow(ConflictException);
+      expect(queue.add).not.toHaveBeenCalled();
     });
 
     it("creates job execution, backup row, and enqueues job on success", async () => {
       repo.findEnvironment.mockResolvedValue(makeEnv());
-      repo.createJobExecutionAndBackup.mockResolvedValue({
+      repo.createJobExecutionAndBackupIfIdle.mockResolvedValue({
         exec: { id: BigInt(55) },
         backup: { id: BigInt(20) },
       });
@@ -150,7 +159,7 @@ describe("BackupsService", () => {
         type: "db_only",
       });
 
-      expect(repo.createJobExecutionAndBackup).toHaveBeenCalledWith(
+      expect(repo.createJobExecutionAndBackupIfIdle).toHaveBeenCalledWith(
         expect.objectContaining({
           queue_name: QUEUES.BACKUPS,
           job_type: JOB_TYPES.BACKUP_CREATE,
@@ -215,13 +224,13 @@ describe("BackupsService", () => {
       expect(queue.add).not.toHaveBeenCalled();
     });
 
-    it("throws BadRequestException when target environment has an active job", async () => {
+    it("throws ConflictException when target environment has an active job", async () => {
       const backup = makeBackup({ id: BigInt(10), environment_id: BigInt(3) });
       repo.findById.mockResolvedValue(backup);
-      repo.hasActiveJob.mockResolvedValue(true);
+      repo.createJobExecutionIfIdle.mockResolvedValue(null);
 
       await expect(svc.enqueueRestore({ backupId: 10 })).rejects.toThrow(
-        BadRequestException,
+        ConflictException,
       );
       expect(queue.add).not.toHaveBeenCalled();
     });
@@ -229,12 +238,12 @@ describe("BackupsService", () => {
     it("creates job execution and enqueues restore job", async () => {
       const backup = makeBackup({ id: BigInt(10), environment_id: BigInt(3) });
       repo.findById.mockResolvedValue(backup);
-      repo.createJobExecution.mockResolvedValue({ id: BigInt(66) });
+      repo.createJobExecutionIfIdle.mockResolvedValue({ id: BigInt(66) });
       queue.add.mockResolvedValue({ id: "bull-restore-456" });
 
       const result = await svc.enqueueRestore({ backupId: 10 });
 
-      expect(repo.createJobExecution).toHaveBeenCalledWith(
+      expect(repo.createJobExecutionIfIdle).toHaveBeenCalledWith(
         expect.objectContaining({
           queue_name: QUEUES.BACKUPS,
           job_type: JOB_TYPES.BACKUP_RESTORE,
@@ -300,9 +309,11 @@ describe("BackupsService", () => {
       );
     });
 
-    it("throws BadRequestException when execution is not active", async () => {
+    it("throws BadRequestException when execution is not active or queued", async () => {
       repo.findJobExecutionById.mockResolvedValue({
         id: BigInt(1),
+        queue_name: QUEUES.BACKUPS,
+        job_type: JOB_TYPES.BACKUP_CREATE,
         status: "completed",
         bull_job_id: "some-id",
       });
@@ -311,27 +322,33 @@ describe("BackupsService", () => {
       );
     });
 
-    it("sets Redis cancellation key and marks execution as failed", async () => {
+    it("sets Redis cancellation key and marks cancellation requested while staying active", async () => {
       const redisSet = jest.fn().mockResolvedValue("OK");
       (queue as any).client = Promise.resolve({ set: redisSet });
 
       repo.findJobExecutionById.mockResolvedValue({
         id: BigInt(1),
+        queue_name: QUEUES.BACKUPS,
+        job_type: JOB_TYPES.BACKUP_CREATE,
         status: "active",
         bull_job_id: "some-bull-id",
       });
-      repo.cancelJobExecutionIfActive.mockResolvedValue(true);
+      repo.markCancellationRequestedIfActive.mockResolvedValue(true);
 
       const result = await svc.cancelJobExecution(1);
 
       expect(redisSet).toHaveBeenCalledWith("forge:cancel:some-bull-id", "1", {
         EX: 3600,
       });
-      expect(repo.cancelJobExecutionIfActive).toHaveBeenCalledWith(
+      expect(repo.markCancellationRequestedIfActive).toHaveBeenCalledWith(
         BigInt(1),
-        "Cancelled by user",
+        "Cancellation requested by user",
       );
-      expect(result).toEqual({ cancelled: true });
+      expect(result).toEqual({
+        cancelled: true,
+        terminated: false,
+        status: "cancellation_requested",
+      });
     });
   });
 

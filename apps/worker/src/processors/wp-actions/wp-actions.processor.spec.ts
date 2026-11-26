@@ -78,6 +78,7 @@ describe("WpActionsProcessor - processCoreCheck & processCoreUpdate", () => {
     prisma = {
       jobExecution: {
         update: jest.fn().mockResolvedValue({}),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
         create: jest.fn().mockResolvedValue({ id: BigInt(99) }),
       },
       environment: {
@@ -178,9 +179,9 @@ describe("WpActionsProcessor - processCoreCheck & processCoreUpdate", () => {
       current_version: "6.4.3",
       updates: [{ version: "6.5", update_type: "major" }],
     });
-    expect(prisma.jobExecution.update).toHaveBeenCalledWith(
+    expect(prisma.jobExecution.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: BigInt(101) },
+        where: { id: BigInt(101), status: { in: ["queued", "active"] } },
         data: expect.objectContaining({
           status: "completed",
         }),
@@ -204,9 +205,9 @@ describe("WpActionsProcessor - processCoreCheck & processCoreUpdate", () => {
       update_output: "WordPress updated successfully\n",
       db_update_output: "Database updated successfully\n",
     });
-    expect(prisma.jobExecution.update).toHaveBeenCalledWith(
+    expect(prisma.jobExecution.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: BigInt(102) },
+        where: { id: BigInt(102), status: { in: ["queued", "active"] } },
         data: expect.objectContaining({
           status: "completed",
         }),

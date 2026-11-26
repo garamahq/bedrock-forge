@@ -26,6 +26,7 @@ describe("SecurityHardeningService", () => {
       jobExecution: {
         create: jest.fn().mockResolvedValue({ id: 200n }),
         update: jest.fn().mockResolvedValue({}),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
       securityScan: {
         create: jest.fn().mockResolvedValue({ id: 300n }),
@@ -89,9 +90,9 @@ describe("SecurityHardeningService", () => {
         data: { status: "active", started_at: expect.any(Date) },
       });
       expect(hardeningActions.applyServerHardeningActions).toHaveBeenCalled();
-      expect(prismaMock.jobExecution.update).toHaveBeenCalledWith(
+      expect(prismaMock.jobExecution.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: BigInt(100) },
+          where: { id: BigInt(100), status: { in: ["queued", "active"] } },
           data: expect.objectContaining({
             status: "completed",
             completed_at: expect.any(Date),
@@ -124,9 +125,9 @@ describe("SecurityHardeningService", () => {
         "Server 1 not found",
       );
 
-      expect(prismaMock.jobExecution.update).toHaveBeenCalledWith(
+      expect(prismaMock.jobExecution.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: BigInt(100) },
+          where: { id: BigInt(100), status: { in: ["queued", "active"] } },
           data: expect.objectContaining({
             status: "failed",
             last_error: "Server 1 not found",
@@ -181,9 +182,9 @@ describe("SecurityHardeningService", () => {
       expect(
         hardeningActions.applyEnvironmentHardeningActions,
       ).toHaveBeenCalled();
-      expect(prismaMock.jobExecution.update).toHaveBeenCalledWith(
+      expect(prismaMock.jobExecution.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: BigInt(101) },
+          where: { id: BigInt(101), status: { in: ["queued", "active"] } },
           data: expect.objectContaining({
             status: "completed",
             completed_at: expect.any(Date),

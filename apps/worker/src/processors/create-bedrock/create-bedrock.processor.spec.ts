@@ -31,7 +31,7 @@ jest.mock("../../utils/processor-utils", () => {
 describe("CreateBedrockProcessor credential resolution (#108)", () => {
   let processor: CreateBedrockProcessor;
   let prisma: {
-    jobExecution: { update: jest.Mock };
+    jobExecution: { update: jest.Mock; updateMany: jest.Mock };
     environment: {
       findUnique: jest.Mock;
       findUniqueOrThrow: jest.Mock;
@@ -45,7 +45,10 @@ describe("CreateBedrockProcessor credential resolution (#108)", () => {
 
   beforeEach(async () => {
     prisma = {
-      jobExecution: { update: jest.fn().mockResolvedValue({}) },
+      jobExecution: {
+        update: jest.fn().mockResolvedValue({}),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
       environment: {
         findUnique: jest.fn().mockResolvedValue(null),
         findUniqueOrThrow: jest.fn().mockResolvedValue({

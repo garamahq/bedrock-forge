@@ -20,6 +20,37 @@ import {
  */
 const SFTP_STALL_TIMEOUT_MS = 5 * 60 * 1_000; // 5 minutes with no data = stall
 
+function toError(err: unknown): Error {
+  return err instanceof Error ? err : new Error(String(err));
+}
+
+/**
+ * Invoke an optional sync or async progress callback while binding any thrown
+ * error or returned promise rejection to the surrounding transfer lifecycle.
+ */
+function invokeProgressCallback(
+  onProgress: ((bytes: number) => Promise<void> | void) | undefined,
+  bytes: number,
+  pendingProgress: Set<Promise<void>>,
+  onFailure: (err: Error) => void,
+): void {
+  if (!onProgress) return;
+  try {
+    const result = onProgress(bytes);
+    if (result && typeof (result as PromiseLike<void>).then === "function") {
+      const tracked = Promise.resolve(result).catch((err: unknown) => {
+        onFailure(toError(err));
+      });
+      pendingProgress.add(tracked);
+      void tracked.finally(() => {
+        pendingProgress.delete(tracked);
+      });
+    }
+  } catch (err) {
+    onFailure(toError(err));
+  }
+}
+
 /**
  * Returns true when the SSH server rejects a channel or command request.
  * These failures happen before a command or SFTP stream starts, so the
@@ -36,7 +67,23 @@ function isRetryableChannelError(err: unknown): boolean {
 }
 
 export interface ExecuteOptions {
-  timeout?: number; // ms, default 30000
+  /**
+   * Flat wall-clock timeout (ms). Command is killed after this many ms
+   * regardless of output activity. Default: 30 000 ms.
+   */
+  timeout?: number;
+  /**
+   * Activity-based idle timeout (ms). The timer resets on every stdout/stderr
+   * chunk. If no output arrives for this long the command is considered stalled
+   * and is killed. Takes precedence over `timeout` when both are set.
+   */
+  idleTimeoutMs?: number;
+  /**
+   * Absolute wall-clock hard cap (ms) used together with `idleTimeoutMs`.
+   * When set, the command is killed after `maxTimeoutMs` even if output is
+   * still flowing. Prevents unbounded run time for very chatty commands.
+   */
+  maxTimeoutMs?: number;
   cwd?: string;
 }
 
@@ -44,6 +91,17 @@ export interface ExecuteResult {
   stdout: string;
   stderr: string;
   code: number;
+  /**
+   * True when the SSH channel closed without a numeric exit code (e.g. the
+   * process was killed by a signal). The remote state is unknown — retrying
+   * the operation blindly may cause data corruption.
+   */
+  indeterminate?: boolean;
+  /**
+   * The signal name that terminated the process (e.g. "SIGTERM"), when
+   * the channel closed due to a signal rather than a clean exit.
+   */
+  signal?: string;
 }
 
 export interface RemoteFile {
@@ -72,14 +130,24 @@ export class RemoteExecutorService {
   /**
    * Execute a shell command on the remote server.
    * Returns stdout, stderr, and exit code.
+   *
+   * Timeout strategy:
+   *   - If `opts.idleTimeoutMs` is set, an activity-based stall timer is used
+   *     (resets on every stdout/stderr chunk). `opts.maxTimeoutMs` can be set
+   *     alongside it as an absolute hard cap.
+   *   - Otherwise `opts.timeout` is used as a flat wall-clock timeout.
+   *
+   * When the SSH channel closes with a signal (null exit code), the result
+   * carries `indeterminate: true` and the `signal` name so callers can
+   * distinguish safe retries from dangerous ones.
    */
   async execute(
     command: string,
     opts: ExecuteOptions = {},
   ): Promise<ExecuteResult> {
-    const timeout = opts.timeout ?? 30_000;
+    const { idleTimeoutMs, maxTimeoutMs, timeout = 30_000 } = opts;
     return this.withConnection((client) =>
-      this.runCommand(client, command, timeout),
+      this.runCommand(client, command, timeout, idleTimeoutMs, maxTimeoutMs),
     );
   }
 
@@ -109,7 +177,7 @@ export class RemoteExecutorService {
     remotePath: string,
     localPath: string,
     timeoutMs: number = SFTP_STALL_TIMEOUT_MS,
-    onProgress?: (bytes: number) => void,
+    onProgress?: (bytes: number) => Promise<void> | void,
   ): Promise<void> {
     return this.withConnection((client) =>
       this.sftpGetToFile(client, remotePath, localPath, timeoutMs, onProgress),
@@ -121,12 +189,14 @@ export class RemoteExecutorService {
    * Never buffers the entire stream in memory — zero-copy streaming.
    *
    * @param onProgress  optional callback invoked with cumulative bytes sent
+   * @param fileMode    optional POSIX file mode (default 0o644)
    */
   async pushFileFromStream(
     remotePath: string,
     readable: Readable,
     timeoutMs: number = SFTP_STALL_TIMEOUT_MS,
-    onProgress?: (bytes: number) => void,
+    onProgress?: (bytes: number) => Promise<void> | void,
+    fileMode?: number,
   ): Promise<void> {
     return this.withConnection((client) =>
       this.sftpPutFromStream(
@@ -135,6 +205,7 @@ export class RemoteExecutorService {
         readable,
         timeoutMs,
         onProgress,
+        fileMode,
       ),
     );
   }
@@ -188,55 +259,132 @@ export class RemoteExecutorService {
     client: Client,
     command: string,
     timeout: number,
+    idleTimeoutMs?: number,
+    maxTimeoutMs?: number,
   ): Promise<ExecuteResult> {
     return new Promise((resolve, reject) => {
       let stdout = "";
       let stderr = "";
+      let settled = false;
       // Keep a reference so the timeout handler can close the channel.
       let channelRef: Parameters<Parameters<Client["exec"]>[1]>[1] | null =
         null;
 
-      const timer = setTimeout(() => {
-        // Destroy the SSH channel so it doesn't hold a MaxSessions slot.
+      const settle = (fn: () => void) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(flatTimer);
+          clearTimeout(idleTimer);
+          clearTimeout(maxTimer);
+          fn();
+        }
+      };
+
+      // ── Flat / max wall-clock timer ────────────────────────────────────────
+      let flatTimer: ReturnType<typeof setTimeout> | undefined;
+      let maxTimer: ReturnType<typeof setTimeout> | undefined;
+
+      const killChannel = () => {
         try {
           channelRef?.destroy();
         } catch (_) {
-          // ignore — channel may already be gone
+          // ignore
         }
-        reject(
-          new Error(
-            `Command timed out after ${timeout}ms: ${command.slice(0, 100)}`,
-          ),
-        );
-      }, timeout);
+      };
+
+      if (!idleTimeoutMs) {
+        // Classic flat timeout
+        flatTimer = setTimeout(() => {
+          killChannel();
+          settle(() =>
+            reject(
+              new Error(
+                `Command timed out after ${timeout}ms: ${command.slice(0, 100)}`,
+              ),
+            ),
+          );
+        }, timeout);
+      } else {
+        // Activity-based idle timeout — reset on every output chunk
+        if (maxTimeoutMs) {
+          maxTimer = setTimeout(() => {
+            killChannel();
+            settle(() =>
+              reject(
+                new Error(
+                  `Command exceeded max timeout of ${maxTimeoutMs}ms: ${command.slice(0, 100)}`,
+                ),
+              ),
+            );
+          }, maxTimeoutMs);
+        }
+      }
+
+      // ── Idle timer (activity-based) ────────────────────────────────────────
+      let idleTimer: ReturnType<typeof setTimeout> | undefined;
+
+      const resetIdle = () => {
+        if (!idleTimeoutMs) return;
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => {
+          killChannel();
+          settle(() =>
+            reject(
+              new Error(
+                `Command idle timeout after ${idleTimeoutMs}ms with no output: ${command.slice(0, 100)}`,
+              ),
+            ),
+          );
+        }, idleTimeoutMs);
+      };
+
+      if (idleTimeoutMs) resetIdle(); // start immediately
 
       client.exec(command, (err, stream) => {
         if (err) {
-          clearTimeout(timer);
-          return reject(err);
+          settle(() => reject(err));
+          return;
         }
         channelRef = stream;
 
         stream.on("data", (data: Buffer) => {
           stdout += data.toString();
+          resetIdle();
         });
 
         stream.stderr.on("data", (data: Buffer) => {
           stderr += data.toString();
+          resetIdle();
         });
 
-        stream.on("close", (code: number) => {
-          clearTimeout(timer);
-          resolve({
-            stdout: stdout.trim(),
-            stderr: stderr.trim(),
-            code: code ?? 0,
-          });
+        stream.on("close", (code: number | null, receivedSignal?: string) => {
+          if (code === null || code === undefined || Boolean(receivedSignal)) {
+            // SSH channel closed without a numeric exit code or terminated by a
+            // signal — the remote outcome is unknown. Mark indeterminate so
+            // callers avoid blind retries on state-mutating scripts.
+            const normalizedCode = code !== null && code !== undefined && code !== 0 ? code : 1;
+            settle(() =>
+              resolve({
+                stdout: stdout.trim(),
+                stderr: stderr.trim(),
+                code: normalizedCode,
+                indeterminate: true,
+                signal: receivedSignal ?? undefined,
+              }),
+            );
+          } else {
+            settle(() =>
+              resolve({
+                stdout: stdout.trim(),
+                stderr: stderr.trim(),
+                code,
+              }),
+            );
+          }
         });
 
         stream.on("error", (err: Error) => {
-          clearTimeout(timer);
-          reject(err);
+          settle(() => reject(err));
         });
       });
     });
@@ -353,13 +501,14 @@ export class RemoteExecutorService {
     remotePath: string,
     localPath: string,
     timeoutMs: number,
-    onProgress?: (bytes: number) => void,
+    onProgress?: (bytes: number) => Promise<void> | void,
   ): Promise<void> {
     return new Promise((resolve, reject) => {
       let settled = false;
       let sftpRef: SFTPWrapper | null = null;
       let readStreamRef: SftpReadStream | null = null;
       let writeStreamRef: ReturnType<typeof createWriteStream> | null = null;
+      const pendingProgress = new Set<Promise<void>>();
       const settle = (fn: () => void) => {
         if (!settled) {
           settled = true;
@@ -404,6 +553,12 @@ export class RemoteExecutorService {
 
       client.sftp((err, sftp) => {
         if (err) return settle(() => reject(err));
+        if (settled) {
+          try {
+            sftp.end();
+          } catch (_) {}
+          return;
+        }
         sftpRef = sftp;
 
         const readStream = sftp.createReadStream(remotePath);
@@ -413,9 +568,12 @@ export class RemoteExecutorService {
         let totalBytes = 0;
 
         readStream.on("data", (chunk: Buffer) => {
+          if (settled) return;
           totalBytes += chunk.length;
           resetStall(); // transfer is alive — postpone stall deadline
-          if (onProgress) onProgress(totalBytes);
+          invokeProgressCallback(onProgress, totalBytes, pendingProgress, (progressErr) => {
+            settle(() => reject(progressErr));
+          });
         });
 
         readStream.on("error", (e: Error) => {
@@ -431,12 +589,15 @@ export class RemoteExecutorService {
         });
 
         // 'close' fires after all data is flushed and the fd is released.
-        // This is the correct completion signal for a file WriteStream.
-        writeStream.on("close", () =>
-          settle(() => {
-            resolve();
-          }),
-        );
+        // Wait for any in-flight async progress checks before resolving so
+        // late progress rejections still fail the transfer cleanly.
+        writeStream.on("close", () => {
+          void Promise.allSettled([...pendingProgress]).then(() => {
+            settle(() => {
+              resolve();
+            });
+          });
+        });
 
         readStream.pipe(writeStream);
       });
@@ -446,23 +607,44 @@ export class RemoteExecutorService {
   /**
    * Pipe a Readable stream into a remote SFTP write stream.
    * Streaming from rclone stdout into SSH SFTP — no local temp files.
-   * @param onProgress optional callback with cumulative bytes pushed
+   * @param onProgress optional sync/async callback with cumulative bytes pushed
+   * @param fileMode   optional POSIX file mode (default 0o644). Use 0o600 for
+   *                   credential files or sensitive uploads.
    */
   private sftpPutFromStream(
     client: Client,
     remotePath: string,
     readable: Readable,
     timeoutMs: number,
-    onProgress?: (bytes: number) => void,
+    onProgress?: (bytes: number) => Promise<void> | void,
+    fileMode?: number,
   ): Promise<void> {
     return new Promise((resolve, reject) => {
       let settled = false;
       let sftpRef: SFTPWrapper | null = null;
       let writeStreamRef: SftpWriteStream | null = null;
+      const pendingProgress = new Set<Promise<void>>();
+      let onDataHandler: ((chunk: Buffer) => void) | null = null;
+
+      const onReadableError = (e: Error) => {
+        settle(() => {
+          reject(e);
+        });
+      };
+
       const settle = (fn: () => void) => {
         if (!settled) {
           settled = true;
           clearTimeout(stallTimer);
+          if (onDataHandler) {
+            readable.removeListener("data", onDataHandler);
+          }
+          readable.removeListener("error", onReadableError);
+          if (writeStreamRef && typeof readable.unpipe === "function") {
+            try {
+              readable.unpipe(writeStreamRef);
+            } catch (_) {}
+          }
           if (writeStreamRef) {
             try {
               writeStreamRef.destroy();
@@ -496,27 +678,36 @@ export class RemoteExecutorService {
         );
       };
 
+      // Bind readable error listener before async client.sftp() callback so
+      // errors emitted before SFTP opens cannot become unhandled.
+      readable.on("error", onReadableError);
+
       client.sftp((err, sftp) => {
         if (err) return settle(() => reject(err));
+        if (settled) {
+          try {
+            sftp.end();
+          } catch (_) {}
+          return;
+        }
         sftpRef = sftp;
 
         const writeStream = sftp.createWriteStream(remotePath, {
-          mode: 0o644,
+          mode: fileMode ?? 0o644,
         });
         writeStreamRef = writeStream;
         let totalBytes = 0;
 
-        readable.on("data", (chunk: Buffer) => {
+        onDataHandler = (chunk: Buffer) => {
+          if (settled) return;
           totalBytes += chunk.length;
           resetStall(); // transfer is alive — postpone stall deadline
-          if (onProgress) onProgress(totalBytes);
-        });
-
-        readable.on("error", (e: Error) => {
-          settle(() => {
-            reject(e);
+          invokeProgressCallback(onProgress, totalBytes, pendingProgress, (progressErr) => {
+            settle(() => reject(progressErr));
           });
-        });
+        };
+
+        readable.on("data", onDataHandler);
 
         writeStream.on("error", (e: Error) => {
           settle(() => {
@@ -525,11 +716,15 @@ export class RemoteExecutorService {
         });
 
         // 'close' fires after all bytes are flushed to the remote fd.
-        writeStream.on("close", () =>
-          settle(() => {
-            resolve();
-          }),
-        );
+        // Wait for any in-flight async progress checks before resolving so
+        // late cancellation/progress errors fail the transfer rather than resolving.
+        writeStream.on("close", () => {
+          void Promise.allSettled([...pendingProgress]).then(() => {
+            settle(() => {
+              resolve();
+            });
+          });
+        });
 
         readable.pipe(writeStream);
       });

@@ -1,5 +1,6 @@
 import { Test } from "@nestjs/testing";
 import { getQueueToken } from "@nestjs/bullmq";
+import { DelayedError } from "bullmq";
 import { SyncProcessor } from "./sync.processor";
 import { PrismaService } from "../../prisma/prisma.service";
 import { SshKeyService } from "../../services/ssh-key.service";
@@ -17,6 +18,7 @@ function makePrisma() {
   return {
     jobExecution: {
       update: jest.fn().mockResolvedValue({}),
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
     environment: {
       findUniqueOrThrow: jest.fn(),
@@ -59,7 +61,11 @@ function makeEncryption() {
 function makeQueue() {
   return {
     add: jest.fn().mockResolvedValue({ id: "job-id" }),
-    client: Promise.resolve({ get: jest.fn().mockResolvedValue(null) }),
+    client: Promise.resolve({
+      get: jest.fn().mockResolvedValue(null),
+      set: jest.fn().mockResolvedValue("OK"),
+      eval: jest.fn().mockResolvedValue(1),
+    }),
   };
 }
 
@@ -77,9 +83,11 @@ function makeJob(name: string, data: object) {
 describe("SyncProcessor", () => {
   let processor: SyncProcessor;
   let prisma: ReturnType<typeof makePrisma>;
+  let queue: ReturnType<typeof makeQueue>;
 
   beforeEach(async () => {
     prisma = makePrisma();
+    queue = makeQueue();
 
     const module = await Test.createTestingModule({
       providers: [
@@ -88,7 +96,7 @@ describe("SyncProcessor", () => {
         { provide: SshKeyService, useValue: makeSshKey() },
         { provide: RcloneService, useValue: makeRclone() },
         { provide: EncryptionService, useValue: makeEncryption() },
-        { provide: getQueueToken(QUEUES.SYNC), useValue: makeQueue() },
+        { provide: getQueueToken(QUEUES.SYNC), useValue: queue },
         {
           provide: LayoutDetectorService,
           useValue: { detectWpLayout: jest.fn() },
@@ -191,10 +199,31 @@ describe("SyncProcessor", () => {
       await processor.process(job);
 
       const completedUpdate = (
-        prisma.jobExecution.update as jest.Mock
+        prisma.jobExecution.updateMany as jest.Mock
       ).mock.calls.find((c: [any]) => c[0].data.status === "completed");
       expect(completedUpdate).toBeDefined();
-      expect(completedUpdate[0].where.id).toEqual(BigInt(10));
+      expect(completedUpdate[0].where).toEqual({
+        id: BigInt(10),
+        status: { in: ["queued", "active"] },
+      });
+    });
+
+    it("defers sync job with DelayedError when Redis environment lock is held (#51)", async () => {
+      const redisClient = await queue.client;
+      (redisClient.set as jest.Mock).mockResolvedValueOnce(null);
+      const moveToDelayed = jest.fn().mockResolvedValue(undefined);
+
+      const job = {
+        ...makeJob(JOB_TYPES.SYNC_PUSH, {
+          jobExecutionId: 44,
+          targetEnvironmentId: 10,
+        }),
+        token: "sync-tok",
+        moveToDelayed,
+      };
+
+      await expect(processor.process(job as any)).rejects.toThrow(DelayedError);
+      expect(moveToDelayed).toHaveBeenCalledWith(expect.any(Number), "sync-tok");
     });
   });
 
@@ -213,11 +242,14 @@ describe("SyncProcessor", () => {
       );
 
       const failedUpdate = (
-        prisma.jobExecution.update as jest.Mock
+        prisma.jobExecution.updateMany as jest.Mock
       ).mock.calls.find((c: [any]) => c[0].data.status === "failed");
       expect(failedUpdate).toBeDefined();
       expect(failedUpdate[0].data.last_error).toBe("DB connection refused");
-      expect(failedUpdate[0].where.id).toEqual(BigInt(15));
+      expect(failedUpdate[0].where).toEqual({
+        id: BigInt(15),
+        status: { in: ["queued", "active"] },
+      });
     });
 
     it("marks jobExecution as failed when processPush throws", async () => {
@@ -230,7 +262,7 @@ describe("SyncProcessor", () => {
       await expect(processor.process(job)).rejects.toThrow("rsync failed");
 
       const failedUpdate = (
-        prisma.jobExecution.update as jest.Mock
+        prisma.jobExecution.updateMany as jest.Mock
       ).mock.calls.find((c: [any]) => c[0].data.status === "failed");
       expect(failedUpdate).toBeDefined();
       expect(failedUpdate[0].data.last_error).toBe("rsync failed");

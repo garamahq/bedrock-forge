@@ -25,11 +25,15 @@ export function useCancelBackupMutation(envId: number | null) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (execId: number) => backupsApi.cancelBackupExecution(execId),
-    onSuccess: () => {
+    onSuccess: (res) => {
       if (envId) {
         qc.invalidateQueries({ queryKey: ["backups", envId] });
       }
-      toast({ title: "Backup job cancelled" });
+      toast({
+        title: res?.terminated
+          ? "Backup job cancelled"
+          : "Cancellation requested — waiting for worker to stop",
+      });
     },
     onError: () => {
       toast({ title: "Could not cancel job", variant: "destructive" });

@@ -190,15 +190,19 @@ export class StepTracker {
 
   /**
    * Complete helper: marks the JobExecution status as completed, sets completed_at, updates progress, and writes execution log.
+   *
+   * Uses updateMany with a status guard so a concurrent cancellation or failure
+   * that has already set a terminal status is never overwritten.
    */
   async complete(data?: {
     progress?: number;
     executionLog?: Prisma.InputJsonValue;
   }): Promise<void> {
-    await this.prisma.jobExecution.update({
-      where: { id: this.jobExecutionId },
+    await this.prisma.jobExecution.updateMany({
+      where: { id: this.jobExecutionId, status: { in: ["queued", "active"] } },
       data: {
         status: "completed",
+        last_error: null,
         completed_at: new Date(),
         progress: data?.progress ?? 100,
         execution_log:
@@ -211,6 +215,9 @@ export class StepTracker {
 
   /**
    * Fail helper: marks the JobExecution status as failed, updates last_error and completed_at, and logs the error.
+   *
+   * Uses updateMany with a status guard so a concurrent completion that has
+   * already set a terminal status is never overwritten.
    */
   async fail(err: unknown, stepLabel?: string): Promise<void> {
     const msg = err instanceof Error ? err.message : String(err);
@@ -223,8 +230,8 @@ export class StepTracker {
       detail: msg,
     }).catch(() => {});
     await this.prisma.jobExecution
-      .update({
-        where: { id: this.jobExecutionId },
+      .updateMany({
+        where: { id: this.jobExecutionId, status: { in: ["queued", "active"] } },
         data: { status: "failed", last_error: msg, completed_at: new Date() },
       })
       .catch(() => {});
