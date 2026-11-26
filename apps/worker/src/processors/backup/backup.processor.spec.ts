@@ -226,4 +226,96 @@ describe("BackupProcessor", () => {
       );
     });
   });
+
+  describe("scheduled job_type persistence (#48)", () => {
+    it("records job_type=backup:scheduled on scheduled JobExecution rows", async () => {
+      (prisma as any).backupSchedule.findUnique = jest.fn().mockResolvedValue({
+        id: BigInt(4),
+        enabled: true,
+        retention_count: null,
+        retention_days: null,
+      });
+      (prisma as any).jobExecution.create = jest.fn().mockResolvedValue({ id: BigInt(90) });
+      (prisma as any).environment.findUniqueOrThrow = jest.fn().mockResolvedValue({
+        id: BigInt(5),
+        google_drive_folder_id: null,
+      });
+
+      const job = makeJob(JOB_TYPES.BACKUP_SCHEDULED, {
+        scheduleId: 4,
+        environmentId: 5,
+        type: "full",
+      });
+      await processor.process(job);
+
+      expect((prisma as any).jobExecution.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            job_type: JOB_TYPES.BACKUP_SCHEDULED,
+          }),
+        }),
+      );
+    });
+
+    it("schedules GDrive cleanup if Step F backup update hits P2025 missing row (#49)", async () => {
+      const path = require("path");
+      const { writeFile } = require("fs/promises");
+      (processor as any).config = {
+        get: jest.fn().mockReturnValue(path.resolve(__dirname, "../../../scripts")),
+      };
+      const p2025 = Object.assign(new Error("Record to update not found"), {
+        code: "P2025",
+      });
+      prisma.backup.update
+        .mockResolvedValueOnce({})
+        .mockRejectedValueOnce(p2025);
+      (prisma as any).wpDbCredentials = { findUnique: jest.fn().mockResolvedValue(null) };
+      prisma.environment.findUnique = jest.fn();
+      (prisma.environment as any).findUniqueOrThrow = jest.fn().mockResolvedValue({
+        id: BigInt(1),
+        google_drive_folder_id: "folder-1",
+        root_path: "/home/site/public_html",
+        type: "production",
+        project: { name: "Site A" },
+        server: { ip_address: "192.0.2.1", ssh_port: 22, ssh_user: "root" },
+      });
+      const rcloneAny = rclone as unknown as { upload: jest.Mock };
+      rcloneAny.upload = jest.fn().mockResolvedValue("gdrive:folder-1/site.tar.gz");
+
+      const remoteExec = require("@bedrock-forge/remote-executor");
+      jest.spyOn(remoteExec, "createRemoteExecutor").mockReturnValue({
+        execute: jest.fn().mockImplementation(async (cmd: string) => {
+          if (cmd.startsWith("stat -c%s")) return { code: 0, stdout: "4\n", stderr: "" };
+          return {
+            code: 0,
+            stdout: JSON.stringify({ size: 4, filename: "site.tar.gz" }),
+            stderr: "",
+          };
+        }),
+        pushFile: jest.fn().mockResolvedValue(undefined),
+        pullFileToPath: jest.fn().mockImplementation(async (_r: string, localPath: string) => {
+          await writeFile(localPath, "arch");
+        }),
+      });
+
+      const job = makeJob(JOB_TYPES.BACKUP_CREATE, {
+        environmentId: 1,
+        type: "full",
+        jobExecutionId: 10,
+        backupId: 20,
+      });
+
+      try {
+        await expect(processor.process(job)).rejects.toThrow("Record to update not found");
+      } finally {
+        jest.restoreAllMocks();
+      }
+
+      expect(queue.add).toHaveBeenCalledWith(
+        JOB_TYPES.BACKUP_DELETE_FILE,
+        { filePath: "gdrive:folder-1/site.tar.gz" },
+        expect.any(Object),
+      );
+    });
+  });
 });

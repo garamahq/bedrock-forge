@@ -57,4 +57,37 @@ describe("JobExecutionsRepository search", () => {
       }),
     );
   });
+
+  it("updates linked pending Backup and SystemBackup rows to failed when execution is discarded (#49)", async () => {
+    const jobUpdate = jest.fn().mockResolvedValue({ id: 14n, status: "discarded" });
+    const backupUpdateMany = jest.fn().mockResolvedValue({ count: 1 });
+    const systemBackupUpdateMany = jest.fn().mockResolvedValue({ count: 0 });
+    const prisma = {
+      $transaction: jest.fn(async (cb: (tx: unknown) => Promise<unknown>) =>
+        cb({
+          jobExecution: { update: jobUpdate },
+          backup: { updateMany: backupUpdateMany },
+          systemBackup: { updateMany: systemBackupUpdateMany },
+        }),
+      ),
+    } as unknown as PrismaService;
+    const repository = new JobExecutionsRepository(prisma);
+
+    await repository.updateStatus(14n, "discarded", "Removed from queue by operator");
+
+    expect(backupUpdateMany).toHaveBeenCalledWith({
+      where: { job_execution_id: 14n, status: "pending" },
+      data: expect.objectContaining({
+        status: "failed",
+        error_message: "Removed from queue by operator",
+      }),
+    });
+    expect(systemBackupUpdateMany).toHaveBeenCalledWith({
+      where: { job_execution_id: 14n, status: "pending" },
+      data: expect.objectContaining({
+        status: "failed",
+        error_message: "Removed from queue by operator",
+      }),
+    });
+  });
 });

@@ -252,6 +252,65 @@ export class EnvironmentsRepository {
     });
   }
 
+  async createProvisioningRecords(data: {
+    project_id: bigint;
+    server_id: bigint;
+    type: string;
+    url: string;
+    root_path: string;
+    queueName: string;
+    jobType: string;
+    bullJobId: string;
+    payload: Prisma.InputJsonObject;
+    dbCredentials: UpsertDbCredentialsDto;
+  }) {
+    return this.prisma.$transaction(async (tx) => {
+      const environment = await tx.environment.create({
+        data: {
+          project_id: data.project_id,
+          server_id: data.server_id,
+          type: data.type,
+          url: data.url,
+          root_path: data.root_path,
+        },
+        include: {
+          server: {
+            select: { id: true, name: true, ip_address: true, status: true },
+          },
+        },
+      });
+
+      const credData = {
+        db_name_encrypted: this.enc.encrypt(data.dbCredentials.dbName),
+        db_user_encrypted: this.enc.encrypt(data.dbCredentials.dbUser),
+        db_password_encrypted: this.enc.encrypt(data.dbCredentials.dbPassword),
+        db_host_encrypted: this.enc.encrypt(data.dbCredentials.dbHost),
+      };
+      await tx.wpDbCredentials.upsert({
+        where: { environment_id: environment.id },
+        update: credData,
+        create: { environment_id: environment.id, ...credData },
+      });
+
+      const jobExecution = await tx.jobExecution.create({
+        data: {
+          queue_name: data.queueName,
+          bull_job_id: data.bullJobId,
+          job_type: data.jobType,
+          environment_id: environment.id,
+          server_id: data.server_id,
+          status: "queued",
+          payload: {
+            ...data.payload,
+            environmentId: Number(environment.id),
+          } as Prisma.InputJsonObject,
+        },
+      });
+
+      return { environment, jobExecution };
+    });
+  }
+
   async createJobExecution(data: Prisma.JobExecutionUncheckedCreateInput) {
     return this.prisma.jobExecution.create({ data });
   }

@@ -83,6 +83,39 @@ export class QueueRecoveryService implements OnApplicationBootstrap {
           `Marked ${stale.count} stale active job executions as failed in database`,
         );
       }
+
+      // Reconcile pending/running Backup & SystemBackup rows tied to failed/discarded executions (#43/#49)
+      const now = new Date();
+      const orphanReason =
+        "Linked job execution failed or was interrupted before completion";
+      await Promise.allSettled([
+        this.prisma.backup.updateMany({
+          where: {
+            status: { in: ["pending", "running"] },
+            jobExecution: {
+              status: { in: ["failed", "dead_letter", "discarded"] },
+            },
+          },
+          data: {
+            status: "failed",
+            error_message: orphanReason,
+            completed_at: now,
+          },
+        }),
+        this.prisma.systemBackup.updateMany({
+          where: {
+            status: { in: ["pending", "running"] },
+            jobExecution: {
+              status: { in: ["failed", "dead_letter", "discarded"] },
+            },
+          },
+          data: {
+            status: "failed",
+            error_message: orphanReason,
+            completed_at: now,
+          },
+        }),
+      ]);
     } catch (err) {
       this.logger.warn(
         `Failed to clean stale active DB job executions: ${err}`,

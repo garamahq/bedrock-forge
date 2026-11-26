@@ -163,7 +163,11 @@ export function BackupsList({
                         )}
                       </>
                     )}
-                    {canDelete && (
+                    {canDelete &&
+                      b.status !== "pending" &&
+                      b.status !== "running" &&
+                      b.jobExecution?.status !== "queued" &&
+                      b.jobExecution?.status !== "active" && (
                       <Button
                         variant="ghost"
                         size="icon"

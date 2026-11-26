@@ -173,6 +173,37 @@ describe("BackupsService", () => {
         backupId: 20,
       });
     });
+
+    it("reconciles orphaned queued execution with missing BullMQ job instead of blocking new backup (#43)", async () => {
+      repo.findEnvironment.mockResolvedValue(makeEnv());
+      (repo as any).findActiveJobExecutions = jest.fn().mockResolvedValue([
+        {
+          id: BigInt(999),
+          queue_name: QUEUES.BACKUPS,
+          bull_job_id: "missing-redis-job",
+          status: "queued",
+          created_at: new Date(Date.now() - 60_000),
+        },
+      ]);
+      (repo as any).reconcileMissingJobExecution = jest.fn().mockResolvedValue(undefined);
+      (queue as any).getJob = jest.fn().mockResolvedValue(null);
+      repo.createJobExecutionAndBackup.mockResolvedValue({
+        exec: { id: BigInt(56) },
+        backup: { id: BigInt(21) },
+      });
+      queue.add.mockResolvedValue({ id: "fresh-bull-id" });
+
+      const result = await svc.enqueueCreate({
+        environmentId: 1,
+        type: "db_only",
+      });
+
+      expect((repo as any).reconcileMissingJobExecution).toHaveBeenCalledWith(
+        BigInt(999),
+        expect.stringContaining("no longer exists"),
+      );
+      expect(result.backupId).toBe(21);
+    });
   });
 
   // ── enqueueRestore ───────────────────────────────────────────────────────
@@ -287,6 +318,30 @@ describe("BackupsService", () => {
       repo.findById.mockResolvedValue(null);
       await expect(svc.remove(404)).rejects.toThrow(NotFoundException);
       expect(repo.delete).not.toHaveBeenCalled();
+    });
+
+    it("refuses to delete a pending or running backup or one with an active execution (#49)", async () => {
+      repo.findById.mockResolvedValueOnce(
+        makeBackup({ status: "running", file_path: null }),
+      );
+      await expect(svc.remove(10)).rejects.toThrow(BadRequestException);
+      expect(queue.add).not.toHaveBeenCalled();
+      expect(repo.delete).not.toHaveBeenCalled();
+
+      repo.findById.mockResolvedValueOnce({
+        ...makeBackup({ status: "pending", file_path: null }),
+        jobExecution: { id: BigInt(9), status: "queued" },
+      });
+      await expect(svc.remove(10)).rejects.toThrow(BadRequestException);
+      expect(repo.delete).not.toHaveBeenCalled();
+
+      // Atomic race fallback when deleteIfTerminal sees status flipped in DB
+      (repo as any).deleteIfTerminal = jest.fn().mockResolvedValue(0);
+      repo.findById.mockResolvedValueOnce(
+        makeBackup({ status: "completed", file_path: "gdrive:f/x.tar.gz" }),
+      );
+      await expect(svc.remove(10)).rejects.toThrow(BadRequestException);
+      expect(queue.add).not.toHaveBeenCalled();
     });
   });
 

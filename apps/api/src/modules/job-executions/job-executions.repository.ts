@@ -272,13 +272,52 @@ export class JobExecutionsRepository {
       status === "failed" ||
       status === "dead_letter" ||
       status === "discarded";
-    return this.prisma.jobExecution.update({
-      where: { id },
-      data: {
-        status,
-        last_error: error,
-        ...(isFinished ? { completed_at: new Date() } : {}),
-      },
+    const now = new Date();
+    const shouldFailLinkedBackups =
+      status === "discarded" ||
+      status === "failed" ||
+      status === "dead_letter";
+
+    if (!shouldFailLinkedBackups) {
+      return this.prisma.jobExecution.update({
+        where: { id },
+        data: {
+          status,
+          last_error: error,
+          ...(isFinished ? { completed_at: now } : {}),
+        },
+      });
+    }
+
+    const reason =
+      error ?? (status === "discarded" ? "Removed from queue by operator" : "Job failed");
+
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.jobExecution.update({
+        where: { id },
+        data: {
+          status,
+          last_error: error,
+          completed_at: now,
+        },
+      });
+      await tx.backup.updateMany({
+        where: { job_execution_id: id, status: "pending" },
+        data: {
+          status: "failed",
+          error_message: reason,
+          completed_at: now,
+        },
+      });
+      await tx.systemBackup.updateMany({
+        where: { job_execution_id: id, status: "pending" },
+        data: {
+          status: "failed",
+          error_message: reason,
+          completed_at: now,
+        },
+      });
+      return updated;
     });
   }
 
@@ -364,20 +403,47 @@ export class JobExecutionsRepository {
     status: "completed" | "failed",
     reason?: string,
   ): Promise<number> {
-    const result = await this.prisma.jobExecution.updateMany({
-      where: {
-        id,
-        status: { in: ["active", "queued"] },
-        created_at: { lt: cutoff },
-      },
-      data: {
-        status,
-        last_error:
-          status === "failed" ? (reason ?? "Queue job is missing") : null,
-        ...(status === "completed" ? { progress: 100 } : {}),
-        completed_at: new Date(),
-      },
+    const now = new Date();
+    const failureReason = reason ?? "Queue job is missing";
+    return this.prisma.$transaction(async (tx) => {
+      const result = await tx.jobExecution.updateMany({
+        where: {
+          id,
+          status: { in: ["active", "queued"] },
+          created_at: { lt: cutoff },
+        },
+        data: {
+          status,
+          last_error: status === "failed" ? failureReason : null,
+          ...(status === "completed" ? { progress: 100 } : {}),
+          completed_at: now,
+        },
+      });
+      if (result.count > 0 && status === "failed") {
+        await tx.backup.updateMany({
+          where: {
+            job_execution_id: id,
+            status: { in: ["pending", "running"] },
+          },
+          data: {
+            status: "failed",
+            error_message: failureReason,
+            completed_at: now,
+          },
+        });
+        await tx.systemBackup.updateMany({
+          where: {
+            job_execution_id: id,
+            status: { in: ["pending", "running"] },
+          },
+          data: {
+            status: "failed",
+            error_message: failureReason,
+            completed_at: now,
+          },
+        });
+      }
+      return result.count;
     });
-    return result.count;
   }
 }

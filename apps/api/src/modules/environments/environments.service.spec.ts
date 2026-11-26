@@ -687,9 +687,12 @@ describe("EnvironmentsService", () => {
   describe("createFull credential hygiene (#108)", () => {
     it("stores encrypted DB credentials and omits dbPassword from JobExecution log and queue payload", async () => {
       const env = makeEnv({ id: BigInt(42) });
-      repo.createEnvironment.mockResolvedValue(env);
-      repo.upsertDbCredentials.mockResolvedValue({});
-      repo.createJobExecution.mockResolvedValue({ id: BigInt(99) });
+      (repo as any).createProvisioningRecords = jest
+        .fn()
+        .mockImplementation(async (input: { bullJobId: string }) => ({
+          environment: env,
+          jobExecution: { id: BigInt(99), bull_job_id: input.bullJobId },
+        }));
       const projectsQueue = (svc as unknown as { projectsQueue: { add: jest.Mock } }).projectsQueue;
 
       const syntheticPass = "syntHetic-Db-Pass-98765!";
@@ -703,14 +706,18 @@ describe("EnvironmentsService", () => {
         db_host: "localhost",
       } as any);
 
-      expect(repo.upsertDbCredentials).toHaveBeenCalledWith(BigInt(42), {
-        dbName: "wp_sec",
-        dbUser: "u_sec",
-        dbPassword: syntheticPass,
-        dbHost: "localhost",
-      });
+      expect((repo as any).createProvisioningRecords).toHaveBeenCalledWith(
+        expect.objectContaining({
+          dbCredentials: {
+            dbName: "wp_sec",
+            dbUser: "u_sec",
+            dbPassword: syntheticPass,
+            dbHost: "localhost",
+          },
+        }),
+      );
 
-      const execCall = repo.createJobExecution.mock.calls[0][0];
+      const execCall = (repo as any).createProvisioningRecords.mock.calls[0][0];
       const serializedPayload = JSON.stringify(execCall.payload);
       expect(serializedPayload).not.toContain(syntheticPass);
       expect(serializedPayload).not.toContain("dbPassword");
@@ -718,6 +725,67 @@ describe("EnvironmentsService", () => {
       const queueCall = projectsQueue.add.mock.calls[0][1];
       expect(JSON.stringify(queueCall)).not.toContain(syntheticPass);
       expect(JSON.stringify(queueCall)).not.toContain("dbPassword");
+    });
+  });
+
+  describe("createFull enqueue failure and job-ID linking (#109)", () => {
+    it("pre-allocates bull_job_id UUID and marks JobExecution failed when queue.add throws", async () => {
+      const env = makeEnv({ id: BigInt(42) });
+      (repo as any).createProvisioningRecords = jest
+        .fn()
+        .mockImplementation(async (input: { bullJobId: string }) => ({
+          environment: env,
+          jobExecution: { id: BigInt(99), bull_job_id: input.bullJobId },
+        }));
+      const projectsQueue = (
+        svc as unknown as { projectsQueue: { add: jest.Mock } }
+      ).projectsQueue;
+      projectsQueue.add.mockRejectedValueOnce(new Error("Redis connection lost"));
+
+      await expect(
+        svc.createFull(10, {
+          server_id: 5,
+          domain: "envfail.example.test",
+          admin_email: "admin@example.test",
+        } as any),
+      ).rejects.toThrow("Redis connection lost");
+
+      expect((repo as any).createProvisioningRecords).toHaveBeenCalledWith(
+        expect.objectContaining({
+          bullJobId: expect.stringMatching(/^[0-9a-f-]{36}$/i),
+        }),
+      );
+      expect(repo.updateJobExecution).toHaveBeenCalledWith(
+        BigInt(99),
+        expect.objectContaining({
+          status: "failed",
+          last_error: expect.stringContaining("Redis connection lost"),
+        }),
+      );
+    });
+
+    it("keeps pre-allocated bull_job_id valid when post-enqueue bull_job_id update rejects", async () => {
+      const env = makeEnv({ id: BigInt(42) });
+      (repo as any).createProvisioningRecords = jest
+        .fn()
+        .mockImplementation(async (input: { bullJobId: string }) => ({
+          environment: env,
+          jobExecution: { id: BigInt(99), bull_job_id: input.bullJobId },
+        }));
+      const projectsQueue = (
+        svc as unknown as { projectsQueue: { add: jest.Mock } }
+      ).projectsQueue;
+      projectsQueue.add.mockResolvedValueOnce({ id: "override-id" });
+      repo.updateJobExecution.mockRejectedValueOnce(new Error("DB busy"));
+
+      const result = await svc.createFull(10, {
+        server_id: 5,
+        domain: "envlinkfail.example.test",
+        admin_email: "admin@example.test",
+      } as any);
+
+      expect(result.jobExecutionId).toBe(99);
+      expect(repo.updateJobExecution).toHaveBeenCalledTimes(1);
     });
   });
 });

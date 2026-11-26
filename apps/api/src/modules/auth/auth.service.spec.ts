@@ -25,6 +25,7 @@ const makeRepo = () => ({
   storeRefreshToken: jest.fn(),
   findValidRefreshToken: jest.fn(),
   revokeRefreshToken: jest.fn(),
+  rotateRefreshToken: jest.fn(),
   revokeAllUserRefreshTokens: jest.fn(),
   updatePassword: jest.fn(),
   updateMfa: jest.fn(),
@@ -118,22 +119,25 @@ describe("AuthService", () => {
 
   describe("refresh", () => {
     it("throws UnauthorizedException for invalid token", async () => {
-      repo.findValidRefreshToken.mockResolvedValue(null);
+      repo.rotateRefreshToken.mockResolvedValue(null);
       await expect(service.refresh("bad-token")).rejects.toThrow(
         UnauthorizedException,
       );
     });
 
-    it("rotates token on valid refresh", async () => {
-      const storedToken = { id: BigInt(5), user_id: BigInt(1) };
-      repo.findValidRefreshToken.mockResolvedValue(storedToken);
-      repo.revokeRefreshToken.mockResolvedValue(undefined);
-      repo.findUserById.mockResolvedValue(mockUser);
-      repo.storeRefreshToken.mockResolvedValue(undefined);
+    it("rotates token atomically on valid refresh", async () => {
+      repo.rotateRefreshToken.mockResolvedValue(mockUser);
 
       const result = await service.refresh("valid-refresh-token");
-      expect(repo.revokeRefreshToken).toHaveBeenCalledWith(storedToken.id);
+      expect(repo.rotateRefreshToken).toHaveBeenCalledWith(
+        expect.objectContaining({
+          oldTokenHash: expect.any(String),
+          newTokenHash: expect.any(String),
+          expiresAt: expect.any(Date),
+        }),
+      );
       expect(result.accessToken).toBe("signed-access-token");
+      expect(result.refreshToken).toBeTruthy();
     });
   });
 

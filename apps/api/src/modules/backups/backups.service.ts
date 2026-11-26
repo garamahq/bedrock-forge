@@ -36,6 +36,47 @@ export class BackupsService {
     return b;
   }
 
+  private async assertNoActiveJob(envId: bigint, errorMessage: string): Promise<void> {
+    if (typeof this.repo.findActiveJobExecutions === "function") {
+      const candidates = await this.repo.findActiveJobExecutions(envId);
+      const orphanGraceCutoff = Date.now() - 15_000;
+      for (const exec of candidates) {
+        const isPlaceholderId = !exec.bull_job_id || exec.bull_job_id === "0";
+        if (isPlaceholderId) {
+          await this.repo.reconcileMissingJobExecution(
+            exec.id,
+            "Queued job had no BullMQ job ID.",
+          );
+          continue;
+        }
+        if (
+          exec.queue_name === QUEUES.BACKUPS &&
+          exec.status === "queued" &&
+          exec.created_at.getTime() < orphanGraceCutoff &&
+          typeof this.backupsQueue.getJob === "function"
+        ) {
+          const existing = await this.backupsQueue
+            .getJob(exec.bull_job_id)
+            .catch(() => null);
+          if (!existing) {
+            await this.repo.reconcileMissingJobExecution(
+              exec.id,
+              "Queued backup job no longer exists in Redis.",
+            );
+            continue;
+          }
+        }
+        throw new BadRequestException(errorMessage);
+      }
+      return;
+    }
+
+    const hasActive = await this.repo.hasActiveJob(envId);
+    if (hasActive) {
+      throw new BadRequestException(errorMessage);
+    }
+  }
+
   async enqueueCreate(dto: EnqueueBackupDto) {
     const env = await this.repo.findEnvironment(BigInt(dto.environmentId));
     if (!env) {
@@ -46,12 +87,10 @@ export class BackupsService {
         `Environment ${dto.environmentId} has no Google Drive folder ID configured.`,
       );
     }
-    const hasActive = await this.repo.hasActiveJob(BigInt(dto.environmentId));
-    if (hasActive) {
-      throw new BadRequestException(
-        `An active backup or restore job is already running for this environment.`,
-      );
-    }
+    await this.assertNoActiveJob(
+      BigInt(dto.environmentId),
+      "An active backup or restore job is already running for this environment.",
+    );
 
     const bullJobId = randomUUID();
     // Atomically create both rows so a queue.add() failure leaves no orphans.
@@ -131,12 +170,10 @@ export class BackupsService {
       targetEnvId = dto.targetEnvironmentId;
     }
 
-    const hasActive = await this.repo.hasActiveJob(BigInt(targetEnvId));
-    if (hasActive) {
-      throw new BadRequestException(
-        `An active backup or restore job is already running for the target environment.`,
-      );
-    }
+    await this.assertNoActiveJob(
+      BigInt(targetEnvId),
+      "An active backup or restore job is already running for the target environment.",
+    );
 
     const bullJobId = randomUUID();
     const exec = await this.repo.createJobExecution({
@@ -204,15 +241,43 @@ export class BackupsService {
   }
 
   async remove(id: number) {
-    const backup = await this.findOne(id);
-    // Enqueue async GDrive file deletion before removing the DB record
-    if (backup.file_path) {
+    const backup = (await this.findOne(id)) as Awaited<
+      ReturnType<BackupsRepository["findById"]>
+    > & { jobExecution?: { status: string } | null };
+
+    const execStatus = backup?.jobExecution?.status;
+    if (
+      backup?.status === "pending" ||
+      backup?.status === "running" ||
+      execStatus === "queued" ||
+      execStatus === "active"
+    ) {
+      throw new BadRequestException(
+        "Cannot delete a backup while its job is queued or running. Cancel the job first.",
+      );
+    }
+
+    let removed: unknown;
+    if (typeof this.repo.deleteIfTerminal === "function") {
+      const deletedCount = await this.repo.deleteIfTerminal(BigInt(id));
+      if (deletedCount === 0) {
+        throw new BadRequestException(
+          "Cannot delete a backup while its job is queued or running. Cancel the job first.",
+        );
+      }
+      removed = { id: BigInt(id), deleted: true };
+    } else {
+      removed = await this.repo.delete(BigInt(id));
+    }
+
+    // Enqueue async GDrive file deletion only after confirming DB deletion
+    if (backup?.file_path) {
       await this.backupsQueue.add(
         JOB_TYPES.BACKUP_DELETE_FILE,
         { filePath: backup.file_path },
         { ...DEFAULT_JOB_OPTIONS, attempts: 5 },
       );
     }
-    return this.repo.delete(BigInt(id));
+    return removed;
   }
 }

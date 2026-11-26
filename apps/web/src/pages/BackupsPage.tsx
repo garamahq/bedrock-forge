@@ -81,6 +81,15 @@ function fmt(bytes: number | null) {
   return `${(bytes / 1048576).toFixed(1)} MB`;
 }
 
+function isBackupInProgress(b: Backup): boolean {
+  return (
+    b.status === "pending" ||
+    b.status === "running" ||
+    b.jobExecution?.status === "queued" ||
+    b.jobExecution?.status === "active"
+  );
+}
+
 const BACKUP_TYPES = [
   { value: "full", label: "Full (files + DB)" },
   { value: "db_only", label: "Database only" },
@@ -328,11 +337,22 @@ export function BackupsPage() {
   const totalPages = backupsData ? Math.ceil(backupsData.total / 10) : 1;
   const [expandedLogId, setExpandedLogId] = useState<number | null>(null);
 
+  const deletableBackupIds = useMemo(
+    () =>
+      (backupsData?.items ?? [])
+        .filter((b) => !isBackupInProgress(b))
+        .map((b) => b.id),
+    [backupsData?.items],
+  );
+
   const toggleSelectAll = () => {
-    if (selectedIds.length === (backupsData?.items.length ?? 0)) {
+    if (
+      deletableBackupIds.length > 0 &&
+      selectedIds.length === deletableBackupIds.length
+    ) {
       setSelectedIds([]);
     } else {
-      setSelectedIds(backupsData?.items.map((b) => b.id) ?? []);
+      setSelectedIds(deletableBackupIds);
     }
   };
 
@@ -550,9 +570,10 @@ export function BackupsPage() {
                     <th className="w-10 px-4 py-3">
                       <Checkbox
                         checked={
-                          selectedIds.length > 0 &&
-                          selectedIds.length === backupsData?.items.length
+                          deletableBackupIds.length > 0 &&
+                          selectedIds.length === deletableBackupIds.length
                         }
+                        disabled={deletableBackupIds.length === 0}
                         onCheckedChange={toggleSelectAll}
                       />
                     </th>
@@ -583,6 +604,7 @@ export function BackupsPage() {
                           <td className="px-4 py-3">
                             <Checkbox
                               checked={selectedIds.includes(b.id)}
+                              disabled={isBackupInProgress(b)}
                               onCheckedChange={() => toggleSelect(b.id)}
                             />
                           </td>
@@ -684,7 +706,7 @@ export function BackupsPage() {
                                   )}
                                 </>
                               )}
-                              {isAdmin && (
+                              {isAdmin && !isBackupInProgress(b) && (
                                 <Button
                                   variant="ghost"
                                   size="icon"

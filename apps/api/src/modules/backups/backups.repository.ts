@@ -70,7 +70,10 @@ export class BackupsRepository {
   findById(id: bigint) {
     return this.prisma.backup.findUnique({
       where: { id },
-      include: { environment: { include: { server: true } } },
+      include: {
+        environment: { include: { server: true } },
+        jobExecution: { select: { id: true, status: true } },
+      },
     });
   }
 
@@ -94,6 +97,20 @@ export class BackupsRepository {
 
   delete(id: bigint) {
     return this.prisma.backup.delete({ where: { id } });
+  }
+
+  async deleteIfTerminal(id: bigint): Promise<number> {
+    const result = await this.prisma.backup.deleteMany({
+      where: {
+        id,
+        status: { in: ["completed", "failed"] },
+        OR: [
+          { job_execution_id: null },
+          { jobExecution: { status: { notIn: ["queued", "active"] } } },
+        ],
+      },
+    });
+    return result.count;
   }
 
   createJobExecution(data: {
@@ -182,9 +199,47 @@ export class BackupsRepository {
           environment_id: envId,
           queue_name: { in: [QUEUES.BACKUPS, QUEUES.SYNC] },
           status: { in: ["queued", "active"] },
+          bull_job_id: { notIn: ["", "0"] },
         },
         select: { id: true },
       })
       .then((r) => r !== null);
+  }
+
+  findActiveJobExecutions(envId: bigint) {
+    return this.prisma.jobExecution.findMany({
+      where: {
+        environment_id: envId,
+        queue_name: { in: [QUEUES.BACKUPS, QUEUES.SYNC] },
+        status: { in: ["queued", "active"] },
+      },
+      select: {
+        id: true,
+        queue_name: true,
+        bull_job_id: true,
+        status: true,
+        created_at: true,
+      },
+    });
+  }
+
+  async reconcileMissingJobExecution(
+    execId: bigint,
+    reason: string,
+  ): Promise<void> {
+    const now = new Date();
+    await this.prisma.$transaction(async (tx) => {
+      await tx.jobExecution.updateMany({
+        where: { id: execId, status: { in: ["queued", "active"] } },
+        data: { status: "failed", last_error: reason, completed_at: now },
+      });
+      await tx.backup.updateMany({
+        where: {
+          job_execution_id: execId,
+          status: { in: ["pending", "running"] },
+        },
+        data: { status: "failed", error_message: reason, completed_at: now },
+      });
+    });
   }
 }

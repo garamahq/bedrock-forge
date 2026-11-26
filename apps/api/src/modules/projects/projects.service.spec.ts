@@ -488,4 +488,72 @@ describe("ProjectsService", () => {
       expect(JSON.stringify(queuePayload)).not.toContain("dbPassword");
     });
   });
+
+  describe("createFull enqueue failure and job-ID linking (#109)", () => {
+    it("pre-allocates bull_job_id UUID, stores safe payload, and marks JobExecution failed when Redis add rejects", async () => {
+      const project = makeProject(BigInt(12));
+      const environment = makeEnvironment(BigInt(34));
+      (repo as any).createFull.mockResolvedValue({
+        project,
+        environment,
+        jobExecution: { id: BigInt(77), bull_job_id: "pre-uuid-1" },
+      });
+      (repo as any).markJobExecutionFailed = jest.fn().mockResolvedValue({});
+      queue.add.mockRejectedValueOnce(new Error("Redis unavailable"));
+
+      await expect(
+        svc.createFull({
+          name: "Resilient Site",
+          client_id: 2,
+          server_id: 5,
+          domain: "resilient.example.test",
+          admin_email: "admin@example.test",
+        } as any),
+      ).rejects.toThrow("Redis unavailable");
+
+      expect((repo as any).createFull).toHaveBeenCalledWith(
+        expect.objectContaining({
+          bullJobId: expect.stringMatching(/^[0-9a-f-]{36}$/i),
+          payload: expect.objectContaining({
+            cyberpanel: expect.objectContaining({
+              domain: "resilient.example.test",
+            }),
+          }),
+        }),
+      );
+      expect(queue.add).toHaveBeenCalledWith(
+        "project:create-bedrock",
+        expect.objectContaining({ jobExecutionId: 77 }),
+        expect.objectContaining({ jobId: expect.stringMatching(/^[0-9a-f-]{36}$/i) }),
+      );
+      expect((repo as any).markJobExecutionFailed).toHaveBeenCalledWith(
+        BigInt(77),
+        expect.stringContaining("Redis unavailable"),
+      );
+    });
+
+    it("keeps pre-allocated bull_job_id traceable without marking failed if post-enqueue updateBullJobId throws", async () => {
+      const project = makeProject(BigInt(12));
+      const environment = makeEnvironment(BigInt(34));
+      (repo as any).createFull.mockImplementation(async (input: { bullJobId: string }) => ({
+        project,
+        environment,
+        jobExecution: { id: BigInt(77), bull_job_id: input.bullJobId },
+      }));
+      (repo as any).markJobExecutionFailed = jest.fn().mockResolvedValue({});
+      queue.add.mockResolvedValueOnce({ id: "external-diff-id" });
+      repo.updateBullJobId.mockRejectedValueOnce(new Error("Transient DB error"));
+
+      const result = await svc.createFull({
+        name: "Link Failure Site",
+        client_id: 2,
+        server_id: 5,
+        domain: "linkfail.example.test",
+        admin_email: "admin@example.test",
+      } as any);
+
+      expect(result.jobExecutionId).toBe(77);
+      expect((repo as any).markJobExecutionFailed).not.toHaveBeenCalled();
+    });
+  });
 });

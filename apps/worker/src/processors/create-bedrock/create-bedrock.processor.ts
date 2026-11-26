@@ -712,35 +712,63 @@ export class CreateBedrockProcessor extends WorkerHost {
           }
 
           const bullJobId = randomUUID();
-          const backupExec = await this.prisma.jobExecution.create({
-            data: {
-              queue_name: QUEUES.BACKUPS,
-              job_type: JOB_TYPES.BACKUP_CREATE,
-              bull_job_id: bullJobId,
-              environment_id: env.id,
-              status: "queued",
-              payload: { environmentId: Number(env.id), type: "full" },
+          const { backupExec, backup } = await this.prisma.$transaction(
+            async (tx) => {
+              const createdExec = await tx.jobExecution.create({
+                data: {
+                  queue_name: QUEUES.BACKUPS,
+                  job_type: JOB_TYPES.BACKUP_CREATE,
+                  bull_job_id: bullJobId,
+                  environment_id: env.id,
+                  status: "queued",
+                  payload: { environmentId: Number(env.id), type: "full" },
+                },
+              });
+              const createdBackup = await tx.backup.create({
+                data: {
+                  environment_id: env.id,
+                  job_execution_id: createdExec.id,
+                  type: "full",
+                  status: "pending",
+                },
+              });
+              return { backupExec: createdExec, backup: createdBackup };
             },
-          });
-
-          const backup = await this.prisma.backup.create({
-            data: {
-              environment_id: env.id,
-              type: "full",
-              status: "pending",
-            },
-          });
-
-          await this.backupsQueue.add(
-            JOB_TYPES.BACKUP_CREATE,
-            {
-              environmentId: Number(env.id),
-              type: "full",
-              jobExecutionId: Number(backupExec.id),
-              backupId: Number(backup.id),
-            },
-            { ...BACKUP_JOB_OPTIONS, jobId: bullJobId },
           );
+
+          try {
+            await this.backupsQueue.add(
+              JOB_TYPES.BACKUP_CREATE,
+              {
+                environmentId: Number(env.id),
+                type: "full",
+                jobExecutionId: Number(backupExec.id),
+                backupId: Number(backup.id),
+              },
+              { ...BACKUP_JOB_OPTIONS, jobId: bullJobId },
+            );
+          } catch (enqueueErr) {
+            const errMsg =
+              enqueueErr instanceof Error
+                ? enqueueErr.message
+                : String(enqueueErr);
+            const now = new Date();
+            await Promise.allSettled([
+              this.prisma.jobExecution.update({
+                where: { id: backupExec.id },
+                data: { status: "failed", last_error: errMsg, completed_at: now },
+              }),
+              this.prisma.backup.update({
+                where: { id: backup.id },
+                data: {
+                  status: "failed",
+                  error_message: errMsg,
+                  completed_at: now,
+                },
+              }),
+            ]);
+            throw enqueueErr;
+          }
 
           // Poll for backup completion
           let isDone = false;

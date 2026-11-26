@@ -34,7 +34,7 @@ import { Queue } from "bullmq";
 import { QUEUES, JOB_TYPES, DEFAULT_JOB_OPTIONS } from "@bedrock-forge/shared";
 import { BackupSchedulesService } from "../backups/backup-schedules.service";
 import { PluginUpdateSchedulesService } from "../plugin-update-schedules/plugin-update-schedules.service";
-import { randomBytes, createHmac, timingSafeEqual } from "crypto";
+import { randomBytes, randomUUID, createHmac, timingSafeEqual } from "crypto";
 import { readFileSync } from "fs";
 import { join } from "path";
 
@@ -189,73 +189,86 @@ export class EnvironmentsService {
       dto.db_password?.trim() || randomBytes(16).toString("base64url");
     const dbHost = dto.db_host?.trim() || "localhost";
 
-    // 1. Create the Environment in the database (Prisma)
-    const env = await this.repo.createEnvironment({
-      project_id: BigInt(projectId),
-      server_id: BigInt(server_id),
-      type: envType,
-      url: siteUrl,
-      root_path: rootPath,
-    });
-
-    // Store encrypted DB credentials in WpDbCredentials so JobExecution logs and queue payloads never hold plaintext secrets.
-    await this.repo.upsertDbCredentials(env.id, {
+    const bullJobId = randomUUID();
+    const safeCyberpanelPayload = {
+      domain,
       dbName,
       dbUser,
-      dbPassword,
       dbHost,
-    });
+      phpVersion,
+      adminEmail: admin_email,
+    };
 
-    // 2. Create the Job Execution record (omit dbPassword from operational log payload)
-    const jobExecution = await this.repo.createJobExecution({
-      queue_name: QUEUES.PROJECTS,
-      bull_job_id: "0",
-      job_type: JOB_TYPES.PROJECT_CREATE_BEDROCK,
-      environment_id: env.id,
-      server_id: BigInt(server_id),
-      status: "queued",
-      payload: {
-        environmentId: Number(env.id),
-        cyberpanel: {
-          domain,
+    // 1. Atomically create Environment + encrypted WpDbCredentials + pre-linked JobExecution
+    const { environment: env, jobExecution } =
+      await this.repo.createProvisioningRecords({
+        project_id: BigInt(projectId),
+        server_id: BigInt(server_id),
+        type: envType,
+        url: siteUrl,
+        root_path: rootPath,
+        queueName: QUEUES.PROJECTS,
+        jobType: JOB_TYPES.PROJECT_CREATE_BEDROCK,
+        bullJobId,
+        payload: {
+          cyberpanel: safeCyberpanelPayload,
+          ...(dto.source_environment_id !== undefined
+            ? { sourceEnvironmentId: dto.source_environment_id }
+            : {}),
+        },
+        dbCredentials: {
           dbName,
           dbUser,
+          dbPassword,
           dbHost,
-          phpVersion,
-          adminEmail: admin_email,
         },
-        sourceEnvironmentId: dto.source_environment_id,
-      },
-    });
+      });
 
-    // 3. Enqueue the provisioning job (worker decrypts password from WpDbCredentials)
-    const job = await this.projectsQueue.add(
-      JOB_TYPES.PROJECT_CREATE_BEDROCK,
-      {
-        environmentId: Number(env.id),
-        jobExecutionId: Number(jobExecution.id),
-        cyberpanel: {
-          domain,
-          dbName,
-          dbUser,
-          dbHost,
-          phpVersion,
-          adminEmail: admin_email,
+    // 2. Enqueue the provisioning job (worker decrypts password from WpDbCredentials)
+    let job;
+    try {
+      job = await this.projectsQueue.add(
+        JOB_TYPES.PROJECT_CREATE_BEDROCK,
+        {
+          environmentId: Number(env.id),
+          jobExecutionId: Number(jobExecution.id),
+          cyberpanel: safeCyberpanelPayload,
+          sourceEnvironmentId: dto.source_environment_id,
         },
-        sourceEnvironmentId: dto.source_environment_id,
-      },
-      { ...DEFAULT_JOB_OPTIONS, attempts: 1 },
-    );
+        { ...DEFAULT_JOB_OPTIONS, attempts: 1, jobId: bullJobId },
+      );
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      await this.repo
+        .updateJobExecution(jobExecution.id, {
+          status: "failed",
+          last_error: errMsg,
+          completed_at: new Date(),
+        })
+        .catch(() => undefined);
+      throw err;
+    }
 
-    // 4. Back-fill the bull_job_id
-    await this.repo.updateJobExecution(jobExecution.id, {
-      bull_job_id: String(job.id),
-    });
+    // 3. Reconcile bull_job_id only if queue returned a different job ID
+    const resolvedJobId = String(job.id ?? bullJobId);
+    if (resolvedJobId !== bullJobId) {
+      await this.repo
+        .updateJobExecution(jobExecution.id, {
+          bull_job_id: resolvedJobId,
+        })
+        .catch((linkErr) => {
+          this.logger.warn(
+            `Failed to reconcile bull_job_id ${resolvedJobId} for jobExecution ${jobExecution.id}: ${
+              linkErr instanceof Error ? linkErr.message : String(linkErr)
+            }`,
+          );
+        });
+    }
 
     return {
       environment: { id: Number(env.id), url: siteUrl },
       jobExecutionId: Number(jobExecution.id),
-      jobId: String(job.id),
+      jobId: jobExecution.bull_job_id || bullJobId,
     };
   }
 
