@@ -53,6 +53,16 @@ describe("SyncService", () => {
   });
 
   describe("enqueueClone", () => {
+    it("throws BadRequestException when source and target environments are equal (#82)", async () => {
+      await expect(
+        svc.enqueueClone({ sourceEnvironmentId: 5, targetEnvironmentId: 5 }),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(repo.hasActiveJob).not.toHaveBeenCalled();
+      expect(repo.findEnvironmentById).not.toHaveBeenCalled();
+      expect(orchestrator.enqueue).not.toHaveBeenCalled();
+    });
+
     it("throws BadRequestException when target environment already has an active job", async () => {
       repo.hasActiveJob.mockResolvedValue(true);
 
@@ -127,6 +137,19 @@ describe("SyncService", () => {
   });
 
   describe("enqueuePush", () => {
+    it("throws BadRequestException when source and target environments are equal (#82)", async () => {
+      await expect(
+        svc.enqueuePush({
+          sourceEnvironmentId: 7,
+          targetEnvironmentId: 7,
+          scope: "both",
+        }),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(repo.hasActiveJob).not.toHaveBeenCalled();
+      expect(orchestrator.enqueue).not.toHaveBeenCalled();
+    });
+
     it("throws BadRequestException when target environment already has an active job", async () => {
       repo.hasActiveJob.mockResolvedValue(true);
 

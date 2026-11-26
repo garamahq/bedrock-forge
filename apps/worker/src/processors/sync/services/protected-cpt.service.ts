@@ -72,11 +72,13 @@ export class ProtectedCptService {
     );
     if (result.code !== 0) {
       await tracker.track({
-        step: "Protected Post Types — could not collect upload paths",
-        level: "warn",
+        step: "Protected Post Types — failed to enumerate upload paths",
+        level: "error",
         detail: result.stderr,
       });
-      return [];
+      throw new Error(
+        `Failed to enumerate protected post type upload paths (exit ${result.code}): ${result.stderr || result.stdout}`,
+      );
     }
 
     const paths = this.extractProtectedUploadPaths(result.stdout);
@@ -210,7 +212,17 @@ export class ProtectedCptService {
     const tableCheck = await executor.execute(
       `mysql --defaults-extra-file=${shellQuote(tgtMycnf)} ${shellQuote(creds.dbName)} -sN -e ${shellQuote(`SHOW TABLES LIKE '${prefix}posts'`)}`,
     );
-    if (tableCheck.code !== 0 || tableCheck.stdout.trim() === "") {
+    if (tableCheck.code !== 0) {
+      await tracker.track({
+        step: "Protected Post Types — failed to inspect target posts table",
+        level: "error",
+        detail: tableCheck.stderr,
+      });
+      throw new Error(
+        `Failed to inspect target posts table for protected post types (exit ${tableCheck.code}): ${tableCheck.stderr || tableCheck.stdout}`,
+      );
+    }
+    if (tableCheck.stdout.trim() === "") {
       await tracker.track({
         step: "Protected Post Types — posts table does not exist, skipping backup",
         level: "info",

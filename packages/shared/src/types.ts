@@ -112,21 +112,31 @@ export type PluginScheduledUpdatePayload = z.infer<
   typeof PluginScheduledUpdatePayloadSchema
 >;
 
-export const SyncClonePayloadSchema = z.object({
-  sourceEnvironmentId: z.number().int().positive(),
-  targetEnvironmentId: z.number().int().positive(),
-  jobExecutionId: z.number().int().positive(),
-  skipSafetyBackup: z.boolean().default(false).optional(),
-});
+export const SyncClonePayloadSchema = z
+  .object({
+    sourceEnvironmentId: z.number().int().positive(),
+    targetEnvironmentId: z.number().int().positive(),
+    jobExecutionId: z.number().int().positive(),
+    skipSafetyBackup: z.boolean().default(false).optional(),
+  })
+  .refine((d) => d.sourceEnvironmentId !== d.targetEnvironmentId, {
+    message: "Source and target environments must be different",
+    path: ["targetEnvironmentId"],
+  });
 export type SyncClonePayload = z.infer<typeof SyncClonePayloadSchema>;
 
-export const SyncPushPayloadSchema = z.object({
-  sourceEnvironmentId: z.number().int().positive(),
-  targetEnvironmentId: z.number().int().positive(),
-  scope: z.enum(["database", "files", "both"]),
-  jobExecutionId: z.number().int().positive(),
-  skipSafetyBackup: z.boolean().default(false).optional(),
-});
+export const SyncPushPayloadSchema = z
+  .object({
+    sourceEnvironmentId: z.number().int().positive(),
+    targetEnvironmentId: z.number().int().positive(),
+    scope: z.enum(["database", "files", "both"]),
+    jobExecutionId: z.number().int().positive(),
+    skipSafetyBackup: z.boolean().default(false).optional(),
+  })
+  .refine((d) => d.sourceEnvironmentId !== d.targetEnvironmentId, {
+    message: "Source and target environments must be different",
+    path: ["targetEnvironmentId"],
+  });
 export type SyncPushPayload = z.infer<typeof SyncPushPayloadSchema>;
 
 export const MonitorCheckPayloadSchema = z.object({

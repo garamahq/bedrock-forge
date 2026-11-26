@@ -299,5 +299,179 @@ describe("SyncFilesService", () => {
         ),
       ).rejects.toThrow("rsync failed (exit 12): rsync: connection timed out");
     });
+
+    it("omits --ignore-errors when --delete is used so sender I/O errors cannot wipe destination files (#84)", async () => {
+      const { sourceExecutor, tracker } = makeRsyncArgs({
+        code: 0,
+        stdout: "done",
+      });
+
+      await (service as any).pushFilesViaRsync(
+        makeJob(JOB_TYPES.SYNC_CLONE, { jobExecutionId: 1 }),
+        "/src/path",
+        "/tgt/path",
+        {
+          server: {
+            ip_address: "1.2.3.4",
+            ssh_port: 22,
+            ssh_user: "user",
+            ssh_private_key_encrypted: null,
+          },
+        },
+        sourceExecutor as any,
+        tracker as any,
+        [],
+      );
+
+      const rsyncCall = sourceExecutor.execute.mock.calls.find(([cmd]: [string]) =>
+        cmd.startsWith("rsync "),
+      );
+      expect(rsyncCall).toBeDefined();
+      expect(rsyncCall[0]).toContain("--delete");
+      expect(rsyncCall[0]).not.toContain("--ignore-errors");
+    });
+
+    it("fails exit 23 when file open/read fails even with 'Operation not permitted' or mixed attribute warnings (#87)", async () => {
+      for (const stderr of [
+        'rsync: send_files failed to open "/src/path/wp-content/secret.php": Operation not permitted (1)\nrsync error: some files/attrs were not transferred (code 23)',
+        'rsync: chown "/tgt/path/wp-config.php" failed: Operation not permitted (1)\nrsync: send_files failed to open "/src/path/file.php": Permission denied (13)\nrsync error: some files/attrs were not transferred (code 23)',
+      ]) {
+        const { sourceExecutor, tracker } = makeRsyncArgs({
+          code: 23,
+          stderr,
+        });
+
+        await expect(
+          (service as any).pushFilesViaRsync(
+            makeJob(JOB_TYPES.SYNC_CLONE, { jobExecutionId: 1 }),
+            "/src/path",
+            "/tgt/path",
+            {
+              server: {
+                ip_address: "1.2.3.4",
+                ssh_port: 22,
+                ssh_user: "user",
+                ssh_private_key_encrypted: null,
+              },
+            },
+            sourceExecutor as any,
+            tracker as any,
+            [],
+          ),
+        ).rejects.toThrow("rsync failed (exit 23)");
+      }
+    });
+  });
+
+  describe("missing source guard & tar fallback deletion parity (#85, #88)", () => {
+    it("throws explicit error when source directory is missing instead of returning void (#85)", async () => {
+      const sourceExecutor = {
+        execute: jest.fn().mockResolvedValue({ code: 0, stdout: "missing", stderr: "" }),
+      };
+      const targetExecutor = { execute: jest.fn() };
+      const tracker = { track: jest.fn().mockResolvedValue(undefined) };
+
+      await expect(
+        service.pushFiles(
+          makeJob(JOB_TYPES.SYNC_PUSH, { jobExecutionId: 1 }),
+          { root_path: "/missing/src" },
+          {
+            root_path: "/tgt",
+            server: {
+              ip_address: "1.2.3.4",
+              ssh_port: 22,
+              ssh_user: "user",
+              name: "T",
+              ssh_private_key_encrypted: null,
+            },
+          },
+          sourceExecutor as any,
+          targetExecutor as any,
+          tracker as any,
+        ),
+      ).rejects.toThrow(/Source site directory not found/);
+    });
+
+    it("prunes stale non-excluded files in tar fallback while preserving excluded files (#88)", () => {
+      const excludes = (service as any).buildFileSyncExcludes([
+        "wp-content/uploads/2026/01/hero.jpg",
+      ]);
+      const archiveEntries = [
+        "./index.php",
+        "./wp-content/themes/app/style.css",
+      ];
+      const targetFiles = [
+        "index.php",
+        "wp-content/themes/app/style.css",
+        "wp-content/plugins/removed-plugin/plugin.php",
+        ".env",
+        "wp-content/uploads/2026/01/hero.jpg",
+        "wp-content/cache/page.html",
+      ];
+
+      const stale = (service as any).computeStaleTargetFiles(
+        targetFiles,
+        archiveEntries,
+        excludes,
+      );
+      expect(stale).toEqual(["wp-content/plugins/removed-plugin/plugin.php"]);
+    });
+
+    it("executes tar relay deletion pruning against stale files without removing excluded paths (#88)", async () => {
+      const pushedFiles: Array<{ remotePath: string; content: Buffer }> = [];
+      const sourceExecutor = {
+        pushFile: jest.fn().mockResolvedValue(undefined),
+        execute: jest.fn().mockResolvedValue({ code: 0, stdout: "", stderr: "" }),
+        pullFileToPath: jest.fn().mockImplementation(async (_r: string, localPath: string) => {
+          const { writeFile } = require("fs/promises");
+          await writeFile(localPath, Buffer.from("tar-bytes"));
+        }),
+      };
+      const targetExecutor = {
+        pushFile: jest.fn().mockImplementation(async (arg: { remotePath: string; content: Buffer }) => {
+          pushedFiles.push(arg);
+        }),
+        pushFileFromStream: jest.fn().mockResolvedValue(undefined),
+        execute: jest.fn().mockImplementation(async (cmd: string) => {
+          if (cmd.startsWith("tar -tzf")) {
+            return { code: 0, stdout: "./index.php\n", stderr: "" };
+          }
+          if (cmd.includes("find . -mindepth 1")) {
+            return {
+              code: 0,
+              stdout:
+                "index.php\n.env\nwp-content/uploads/2026/01/hero.jpg\nwp-content/plugins/removed/file.php\n",
+              stderr: "",
+            };
+          }
+          return { code: 0, stdout: "", stderr: "" };
+        }),
+      };
+      const tracker = {
+        track: jest.fn().mockResolvedValue(undefined),
+        trackCommand: jest.fn().mockResolvedValue(undefined),
+      };
+
+      await (service as any).pushFilesViaTarRelay(
+        makeJob(JOB_TYPES.SYNC_PUSH, { jobExecutionId: 9 }),
+        "/src",
+        "/tgt",
+        sourceExecutor,
+        targetExecutor,
+        tracker,
+        ["wp-content/uploads/2026/01/hero.jpg"],
+      );
+
+      const prunePush = pushedFiles.find((p) => p.remotePath.includes("forge_tar_prune_"));
+      expect(prunePush).toBeDefined();
+      expect(prunePush!.content.toString("utf8")).toBe(
+        "wp-content/plugins/removed/file.php\n",
+      );
+      expect(
+        targetExecutor.execute.mock.calls.some(([cmd]: [string]) =>
+          cmd.includes("xargs -d '\\n' rm -f"),
+        ),
+      ).toBe(true);
+    });
   });
 });
