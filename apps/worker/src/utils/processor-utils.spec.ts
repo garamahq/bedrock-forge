@@ -321,4 +321,40 @@ describe("fixCyberPanelOwnership", () => {
     expect(executedCommands.some((c) => c.includes("chmod 440"))).toBe(true);
     expect(executedCommands.some((c) => c.includes("chmod 750"))).toBe(true);
   });
+
+  it("excludes protected paths and preserves executable/private file modes when scoped options are passed (#86)", async () => {
+    const executedCommands: string[] = [];
+    const mockExecutor = {
+      execute: jest.fn().mockImplementation((cmd: string) => {
+        executedCommands.push(cmd);
+        if (cmd.includes("stat -c '%U'")) {
+          return Promise.resolve({ code: 0, stdout: "siteuser\n", stderr: "" });
+        }
+        if (cmd.includes("getent group")) {
+          return Promise.resolve({ code: 0, stdout: "nogroup\n", stderr: "" });
+        }
+        return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+      }),
+    } as any;
+
+    await fixCyberPanelOwnership(
+      mockExecutor,
+      "/home/example.com/public_html",
+      undefined,
+      {
+        excludePaths: [".env", "wp-content/uploads/"],
+        preserveExecutable: true,
+        preservePrivateFiles: true,
+      },
+    );
+
+    const findCmd = executedCommands.find((c) => c.includes("-prune"));
+    expect(findCmd).toBeDefined();
+    expect(findCmd).toContain("/home/example.com/public_html/.env");
+    expect(findCmd).toContain("/home/example.com/public_html/wp-content/uploads");
+    expect(findCmd).toContain("-perm /111 -exec chmod 755");
+    expect(findCmd).toContain("! -perm /111 -perm /077 -exec chmod 644");
+    expect(executedCommands.some((c) => c.includes("chattr -R"))).toBe(false);
+    expect(executedCommands.some((c) => c.startsWith("chown -R "))).toBe(false);
+  });
 });

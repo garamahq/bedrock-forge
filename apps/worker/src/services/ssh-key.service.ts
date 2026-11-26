@@ -1,7 +1,18 @@
 import { Injectable, Logger } from "@nestjs/common";
+import { createHash } from "crypto";
 import { PrismaService } from "../prisma/prisma.service";
 import { EncryptionService } from "../encryption/encryption.service";
-import { SshServerConfig } from "@bedrock-forge/remote-executor";
+import { RemoteExecutorService, SshServerConfig } from "@bedrock-forge/remote-executor";
+import { shellQuote } from "../utils/processor-utils";
+
+export interface PeerTrustArtifacts {
+  knownHostsPath: string;
+  sshOptions: string;
+}
+
+function normalizeSshSha256Fingerprint(raw: string): string {
+  return raw.trim().replace(/^SHA256:/i, "").replace(/=+$/, "");
+}
 
 /**
  * SshKeyService
@@ -93,6 +104,84 @@ export class SshKeyService {
           data: { host_key_fingerprint: fingerprint },
         });
       },
+    };
+  }
+
+  /**
+   * Scan the peer server's SSH host keys from the initiating server, verify at least
+   * one presented key matches Forge's stored SHA-256 fingerprint, and write a strict
+   * single-purpose known_hosts file (chmod 600) on the initiator host (#80).
+   */
+  async preparePeerKnownHosts(
+    initiatorExecutor: Pick<RemoteExecutorService, "execute" | "pushFile">,
+    peerServer: {
+      name: string;
+      ip_address: string;
+      ssh_port?: number | null;
+      host_key_fingerprint?: string | null;
+    },
+    remoteKnownHostsPath: string,
+  ): Promise<PeerTrustArtifacts> {
+    const expectedFp = peerServer.host_key_fingerprint
+      ? normalizeSshSha256Fingerprint(peerServer.host_key_fingerprint)
+      : "";
+    if (!expectedFp) {
+      throw new Error(
+        `Peer server "${peerServer.name}" has no stored SSH host_key_fingerprint in Forge; cannot establish trusted peer transfer.`,
+      );
+    }
+
+    const peerPort = Number(peerServer.ssh_port || 22);
+    const scanRes = await initiatorExecutor.execute(
+      `ssh-keyscan -p ${peerPort} -T 10 ${shellQuote(peerServer.ip_address)} 2>/dev/null`,
+    );
+    if (scanRes.code !== 0 || !scanRes.stdout.trim()) {
+      throw new Error(
+        `Failed to probe SSH host key for peer "${peerServer.name}" (${peerServer.ip_address}:${peerPort}).`,
+      );
+    }
+
+    const matchedLines: string[] = [];
+    for (const rawLine of scanRes.stdout.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("#")) continue;
+      const parts = line.split(/\s+/);
+      if (parts.length < 3) continue;
+
+      let keyBuffer: Buffer;
+      try {
+        keyBuffer = Buffer.from(parts[2], "base64");
+      } catch {
+        continue;
+      }
+      if (keyBuffer.length === 0) continue;
+
+      const digest = createHash("sha256")
+        .update(keyBuffer)
+        .digest("base64")
+        .replace(/=+$/, "");
+      if (digest === expectedFp) {
+        matchedLines.push(line);
+      }
+    }
+
+    if (matchedLines.length === 0) {
+      throw new Error(
+        `SSH host key verification failed for peer "${peerServer.name}" (${peerServer.ip_address}:${peerPort}): expected fingerprint did not match any presented host key.`,
+      );
+    }
+
+    await initiatorExecutor.pushFile({
+      remotePath: remoteKnownHostsPath,
+      content: Buffer.from(matchedLines.join("\n") + "\n", "utf8"),
+    });
+    await initiatorExecutor.execute(
+      `chmod 600 ${shellQuote(remoteKnownHostsPath)}`,
+    );
+
+    return {
+      knownHostsPath: remoteKnownHostsPath,
+      sshOptions: `-o StrictHostKeyChecking=yes -o UserKnownHostsFile=${shellQuote(remoteKnownHostsPath)}`,
     };
   }
 }

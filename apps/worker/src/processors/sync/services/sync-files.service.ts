@@ -73,6 +73,7 @@ export class SyncFilesService {
         ssh_user: string;
         name: string;
         ssh_private_key_encrypted: string | null;
+        host_key_fingerprint?: string | null;
       };
     },
     sourceExecutor: Executor,
@@ -119,14 +120,7 @@ export class SyncFilesService {
       return;
     }
 
-    // Pre-sync: proactively unlock permissions and immutable attributes on target
-    await targetExecutor
-      .execute(
-        `chattr -R -i -a ${shellQuote(targetSite)} 2>/dev/null || true; chmod -R u+w ${shellQuote(targetSite)} 2>/dev/null || true; find ${shellQuote(targetSite)} -type d -exec chmod 755 {} + 2>/dev/null || true; find ${shellQuote(targetSite)} -type f -exec chmod 644 {} + 2>/dev/null || true`,
-      )
-      .catch(() => {});
-
-    // Check if rsync is available on both source and target
+    // Check if rsync is available on both source and target without mutating target permissions pre-transfer (#86)
     const [rsyncSrcCheck, rsyncTgtCheck] = await Promise.all([
       sourceExecutor.execute(
         "command -v rsync > /dev/null 2>&1 && echo ok || echo missing",
@@ -166,7 +160,12 @@ export class SyncFilesService {
       );
     }
 
-    await fixCyberPanelOwnership(targetExecutor, targetSite, tracker);
+    // Post-transfer scoped ownership & permissions preserving excluded paths, executables, and private configs (#86)
+    await fixCyberPanelOwnership(targetExecutor, targetSite, tracker, {
+      excludePaths: this.buildFileSyncExcludes(allProtectedFileExcludes),
+      preserveExecutable: true,
+      preservePrivateFiles: true,
+    });
   }
 
   /** rsync source → target using SSH, executed on the source server. */
@@ -181,78 +180,116 @@ export class SyncFilesService {
         ssh_user: string;
         name: string;
         ssh_private_key_encrypted: string | null;
+        host_key_fingerprint?: string | null;
       };
     },
     sourceExecutor: Executor,
     tracker: StepTracker,
     protectedFileExcludes: string[] = [],
   ): Promise<void> {
-    // Upload worker's private key to source as a temp file
     const keyPath = `/tmp/forge_push_key_${job.id}`;
     const excludeFilePath = `/tmp/forge_rsync_exclude_${job.id}.txt`;
+    const knownHostsPath = `/tmp/forge_known_hosts_${job.id}`;
     const rawKey = await this.sshKey.resolvePrivateKey(targetEnv.server);
-    await sourceExecutor.pushFile({
-      remotePath: keyPath,
-      content: Buffer.from(rawKey),
-    });
-    await sourceExecutor.execute(`chmod 600 ${shellQuote(keyPath)}`);
 
-    // Prepend '/' to anchor each pattern to the transfer root, so rsync won't
-    // strip nested directories with the same name inside plugins or themes.
     const allExcludes = this.buildFileSyncExcludes(protectedFileExcludes);
     const excludeFileContent =
       allExcludes.map((e) => `/${e}`).join("\n") + "\n";
-    await sourceExecutor.pushFile({
-      remotePath: excludeFilePath,
-      content: Buffer.from(excludeFileContent, "utf8"),
-    });
 
-    const rsyncCmd = [
-      "rsync",
-      "-az",
-      "--delete",
-      "--no-owner",
-      "--no-group",
-      "--no-perms",
-      "--ignore-errors",
-      "--timeout=300",
-      `--exclude-from=${shellQuote(excludeFilePath)}`,
-      "-e",
-      shellQuote(
-        `ssh -i ${keyPath} -p ${targetEnv.server.ssh_port} -o StrictHostKeyChecking=no -o ConnectTimeout=30`,
-      ),
-      `${shellQuote(sourceRoot)}/`,
-      `${shellQuote(targetEnv.server.ssh_user)}@${targetEnv.server.ip_address}:${shellQuote(targetRoot)}/`,
-    ].join(" ");
+    let rsyncResult: { code: number; stdout: string; stderr: string };
+    try {
+      await sourceExecutor.pushFile({
+        remotePath: keyPath,
+        content: Buffer.from(rawKey),
+      });
+      await sourceExecutor.execute(`chmod 600 ${shellQuote(keyPath)}`);
 
-    const customCount = protectedFileExcludes.length;
-    const loggedExcludes =
-      customCount > 0
-        ? `.env, wp-config.php, .htaccess, storage/, node_modules/, builder & disk caches (+ ${customCount} protected uploads/files)`
-        : `.env, wp-config.php, .htaccess, storage/, node_modules/, builder & disk caches`;
+      const peerTrust = await this.sshKey.preparePeerKnownHosts(
+        sourceExecutor,
+        {
+          name: targetEnv.server.name,
+          ip_address: targetEnv.server.ip_address,
+          ssh_port: targetEnv.server.ssh_port,
+          host_key_fingerprint: targetEnv.server.host_key_fingerprint ?? null,
+        },
+        knownHostsPath,
+      );
 
-    await tracker.track({
-      step: "Syncing site files via rsync",
-      level: "info",
-      detail: `${sourceRoot} → ${targetEnv.server.ip_address}:${targetRoot} (excluding: ${loggedExcludes})`,
-      command:
-        "rsync -az --delete --no-perms --exclude-from=[excludes] (key redacted)",
-    });
+      await sourceExecutor.pushFile({
+        remotePath: excludeFilePath,
+        content: Buffer.from(excludeFileContent, "utf8"),
+      });
 
-    const rsyncStart = Date.now();
-    const rsyncResult = await sourceExecutor.execute(rsyncCmd);
+      const rsyncCmd = [
+        "rsync",
+        "-az",
+        "--delete",
+        "--no-owner",
+        "--no-group",
+        "--no-perms",
+        "--executability",
+        "--ignore-errors",
+        "--timeout=300",
+        `--exclude-from=${shellQuote(excludeFilePath)}`,
+        "-e",
+        shellQuote(
+          `ssh -i ${keyPath} -p ${targetEnv.server.ssh_port} ${peerTrust.sshOptions} -o ConnectTimeout=30`,
+        ),
+        `${shellQuote(sourceRoot)}/`,
+        `${shellQuote(targetEnv.server.ssh_user)}@${targetEnv.server.ip_address}:${shellQuote(targetRoot)}/`,
+      ].join(" ");
 
-    // Cleanup key and exclude file regardless of outcome
-    await sourceExecutor
-      .execute(`rm -f ${shellQuote(keyPath)} ${shellQuote(excludeFilePath)}`)
-      .catch(() => {});
+      const customCount = protectedFileExcludes.length;
+      const loggedExcludes =
+        customCount > 0
+          ? `.env, wp-config.php, .htaccess, storage/, node_modules/, builder & disk caches (+ ${customCount} protected uploads/files)`
+          : `.env, wp-config.php, .htaccess, storage/, node_modules/, builder & disk caches`;
 
-    await tracker.trackCommand(
-      "rsync site files",
-      "rsync -az --delete --no-perms --exclude-from=[excludes] (key redacted)",
-      rsyncResult,
-      Date.now() - rsyncStart,
-    );
+      await tracker.track({
+        step: "Syncing site files via rsync",
+        level: "info",
+        detail: `${sourceRoot} → ${targetEnv.server.ip_address}:${targetRoot} (excluding: ${loggedExcludes})`,
+        command:
+          "rsync -az --delete --no-perms --executability --exclude-from=[excludes] (key redacted)",
+      });
+
+      const rsyncStart = Date.now();
+      rsyncResult = await sourceExecutor.execute(rsyncCmd);
+
+      await tracker.trackCommand(
+        "rsync site files",
+        "rsync -az --delete --no-perms --executability --exclude-from=[excludes] (key redacted)",
+        rsyncResult,
+        Date.now() - rsyncStart,
+      );
+    } finally {
+      const cleanupPaths = `${shellQuote(keyPath)} ${shellQuote(excludeFilePath)} ${shellQuote(knownHostsPath)}`;
+      try {
+        const rmRes = await sourceExecutor.execute(`rm -f ${cleanupPaths}`);
+        if (rmRes.code !== 0) {
+          const detail = `rm -f ${cleanupPaths} exited ${rmRes.code}: ${rmRes.stderr || rmRes.stdout}`;
+          this.logger.error(`Temporary SSH key/transfer cleanup failed: ${detail}`);
+          await tracker
+            .track({
+              step: "Temporary SSH key cleanup warning",
+              level: "warn",
+              detail,
+            })
+            .catch(() => {});
+        }
+      } catch (cleanupErr) {
+        const detail =
+          cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr);
+        this.logger.error(`Temporary SSH key/transfer cleanup failed: ${detail}`);
+        await tracker
+          .track({
+            step: "Temporary SSH key cleanup warning",
+            level: "warn",
+            detail,
+          })
+          .catch(() => {});
+      }
+    }
 
     const RSYNC_PARTIAL = 23; // partial transfer / some attrs not set
     const rsyncOutput = rsyncResult.stderr || rsyncResult.stdout || "";
