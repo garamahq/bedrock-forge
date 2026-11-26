@@ -2,8 +2,8 @@
 <?php
 /**
  * backup.php — Bedrock Forge remote backup script
- * Usage: php backup.php --docroot=/var/www/site --type=full|database|files [--output=/tmp/backup.tar.gz]
- * Outputs JSON: {"filename":"/path/to/file","size":12345}
+ * Usage: php backup.php --docroot=/var/www/site --type=full|database|files [--output=/tmp/backup.tar.gz] [--staging-dir=/tmp]
+ * Outputs JSON: {"filename":"/path/to/file","size":12345,"archive_verified":true,"consistent":true,"warnings":{"benign_files":[],"critical_files":[]}}
  */
 
 // PHP 7.0+ required (null coalescing operator, scalar type hints, return types)
@@ -13,13 +13,87 @@ if (PHP_VERSION_ID < 70000) {
 }
 
 error_reporting(E_ALL);
+@ini_set('display_errors', 'stderr');
+@ini_set('log_errors', '1');
 set_time_limit(0);
 
-$opts = getopt('', ['docroot:', 'type:', 'output:', 'restore', 'file:', 'db-name:', 'db-user:', 'db-pass:', 'db-host:', 'site-url:', 'mycnf:']);
+// Keep STDOUT clean for machine-parsed JSON output by forwarding any PHP warnings/notices to STDERR.
+set_error_handler(static function (int $severity, string $message, string $file, int $line): bool {
+    if (!(error_reporting() & $severity)) {
+        return false;
+    }
+    fwrite(STDERR, "[PHP notice/warning] {$message} in {$file}:{$line}\n");
+    return true;
+});
+
+$opts = getopt('', [
+    'docroot:',
+    'type:',
+    'output:',
+    'staging-dir:',
+    'restore',
+    'file:',
+    'db-name:',
+    'db-user:',
+    'db-pass:',
+    'db-host:',
+    'site-url:',
+    'mycnf:',
+]);
+
+$runToken = date('Ymd_His') . '_' . bin2hex(random_bytes(8));
 
 $docroot = $opts['docroot'] ?? null;
 $type    = $opts['type'] ?? 'full';
-$output  = $opts['output'] ?? '/tmp/forge_backup_' . time() . '.tar.gz';
+$hasExplicitOutput = !empty($opts['output']) && is_string($opts['output']);
+$output  = $hasExplicitOutput
+    ? $opts['output']
+    : rtrim(sys_get_temp_dir(), '/') . '/forge_backup_' . $runToken . '.tar.gz';
+
+$stagingBase = (!empty($opts['staging-dir']) && is_string($opts['staging-dir']))
+    ? rtrim($opts['staging-dir'], '/')
+    : rtrim(sys_get_temp_dir(), '/');
+if ($stagingBase === '' || $stagingBase[0] !== '/') {
+    fwrite(STDERR, "ERROR: --staging-dir must be an absolute path\n");
+    exit(1);
+}
+if (!is_dir($stagingBase) && !@mkdir($stagingBase, 0700, true)) {
+    fwrite(STDERR, "ERROR: Unable to create staging directory: {$stagingBase}\n");
+    exit(1);
+}
+
+$runStageDir = $stagingBase . '/forge_stage_' . $runToken;
+if (!@mkdir($runStageDir, 0700, true)) {
+    fwrite(STDERR, "ERROR: Unable to create private run staging directory: {$runStageDir}\n");
+    exit(1);
+}
+@chmod($runStageDir, 0700);
+
+$forgeCleanupState = [
+    'stageDir' => $runStageDir,
+    'mycnf' => null,
+    'runCacheRoot' => null,
+    'output' => $hasExplicitOutput ? $output : null,
+    'succeeded' => false,
+];
+
+register_shutdown_function(static function () use (&$forgeCleanupState): void {
+    if (!empty($forgeCleanupState['mycnf']) && file_exists($forgeCleanupState['mycnf'])) {
+        @unlink($forgeCleanupState['mycnf']);
+    }
+    if (!empty($forgeCleanupState['stageDir']) && is_dir($forgeCleanupState['stageDir'])) {
+        exec('rm -rf ' . escapeshellarg($forgeCleanupState['stageDir']) . ' 2>/dev/null || true');
+    }
+    if (!$forgeCleanupState['succeeded']) {
+        if (!empty($forgeCleanupState['runCacheRoot']) && is_dir($forgeCleanupState['runCacheRoot'])) {
+            exec('rm -rf ' . escapeshellarg($forgeCleanupState['runCacheRoot']) . ' 2>/dev/null || true');
+        }
+        if (!empty($forgeCleanupState['output']) && file_exists($forgeCleanupState['output'])) {
+            @unlink($forgeCleanupState['output']);
+        }
+    }
+});
+
 $restore = isset($opts['restore']);
 $file    = $opts['file'] ?? null;
 // Stored credential overrides — used as fallback when on-disk parsing fails
@@ -43,17 +117,39 @@ if ($mycnf && file_exists($mycnf)) {
     if (!empty($section['database'])) $cliDbName = $section['database'];
 }
 
+$docrootTrimmed = is_string($docroot) ? rtrim($docroot, '/') : '';
+$isSymlinkDocroot = false;
+$resolvedDocroot = $docrootTrimmed;
+$logicalBasename = '';
+$physicalBasename = '';
+
 if (!$restore) {
-    if (!$docroot || !is_dir($docroot)) {
-        fwrite(STDERR, "ERROR: Invalid or missing --docroot (directory does not exist)\n");
+    if (!$docrootTrimmed || $docrootTrimmed[0] !== '/') {
+        fwrite(STDERR, "ERROR: Invalid or missing --docroot\n");
         exit(1);
     }
+    if (is_link($docrootTrimmed)) {
+        $real = realpath($docrootTrimmed);
+        if ($real === false || !is_dir($real)) {
+            fwrite(STDERR, "ERROR: --docroot is a broken symlink ({$docrootTrimmed})\n");
+            exit(1);
+        }
+        $isSymlinkDocroot = true;
+        $resolvedDocroot = $real;
+    } elseif (!is_dir($docrootTrimmed)) {
+        fwrite(STDERR, "ERROR: Invalid or missing --docroot (directory does not exist)\n");
+        exit(1);
+    } else {
+        $resolvedDocroot = realpath($docrootTrimmed) ?: $docrootTrimmed;
+    }
+    $logicalBasename = basename($docrootTrimmed);
+    $physicalBasename = basename($resolvedDocroot);
 } else {
     if (!$docroot || !is_string($docroot) || strlen(trim($docroot)) < 2 || $docroot[0] !== '/') {
         fwrite(STDERR, "ERROR: Invalid or missing --docroot (must be an absolute path)\n");
         exit(1);
     }
-    $extractTo = dirname($docroot);
+    $extractTo = dirname($docrootTrimmed);
     if (!is_dir($extractTo)) {
         @mkdir($extractTo, 0755, true);
     }
@@ -90,16 +186,7 @@ if ($restore) {
     }
 
     // Extract to the PARENT of docroot.
-    // Archives are created with: tar -C dirname(docroot) basename(docroot)
-    // so every file inside is stored as  basename/path/to/file.php
-    // Extracting to dirname(docroot) restores files to the correct location.
-    $extractTo = dirname($docroot);
-    // Flags explanation:
-    // --no-same-owner: do not try to chown to archived UID/GID (prevents exit 2 on non-root or differing server UIDs)
-    // --no-same-permissions: do not copy restrictive file modes from archive
-    // --touch: do not fail on timestamp updates (prevents utime: Operation not permitted)
-    // --unlink-first: remove each existing file before writing to prevent EPERM/EACCES on 0440 files (mutually exclusive with --overwrite in tar)
-    // --warning=no-timestamp: suppress timestamp warnings
+    $extractTo = dirname($docrootTrimmed);
     $tarFlags = '--no-same-owner --no-same-permissions --touch --unlink-first --warning=no-timestamp';
     $cmd = "tar -xzf " . escapeshellarg($file) . " -C " . escapeshellarg($extractTo) . " " . $tarFlags . " 2>&1";
     exec($cmd, $out, $code);
@@ -128,8 +215,6 @@ if ($restore) {
     }
 
     // ── Database import ────────────────────────────────────────────────────
-    // The archive places forge_db_*.sql at the $extractTo level (same level
-    // as the docroot directory itself).  Import it if found.
     $dbImported = false;
     $sqlFiles   = glob($extractTo . '/forge_db_*.sql');
 
@@ -193,10 +278,11 @@ if ($restore) {
                 $dbPort = ' --port=' . (int)$creds['DB_PORT'];
             }
 
-            // Write temp .my.cnf — avoids all shell-quoting issues with passwords
-            $mycnfFile = tempnam(sys_get_temp_dir(), 'forge_rstore_mycnf_');
+            // Write temp .my.cnf inside private 0700 stage dir with 0600 permissions
+            $mycnfFile = $runStageDir . '/forge_restore_mycnf_' . $runToken . '.cnf';
             file_put_contents($mycnfFile, "[client]\nuser={$creds['DB_USER']}\npassword={$creds['DB_PASSWORD']}\nhost={$dbHost}\n");
             chmod($mycnfFile, 0600);
+            $forgeCleanupState['mycnf'] = $mycnfFile;
 
             $importCmd = sprintf(
                 'mysql --defaults-extra-file=%s%s %s < %s 2>&1',
@@ -207,6 +293,7 @@ if ($restore) {
             );
             exec($importCmd, $importOut, $importCode);
             @unlink($mycnfFile);
+            $forgeCleanupState['mycnf'] = null;
 
             if ($importCode !== 0) {
                 fwrite(STDERR, "ERROR: DB import failed (exit {$importCode}): " . implode("\n", $importOut) . "\n");
@@ -220,16 +307,13 @@ if ($restore) {
             fwrite(STDERR, "WARNING: SQL dump found but DB credentials could not be resolved — skipping DB import\n");
         }
 
-        @unlink($sqlFile); // clean up extracted dump regardless of import success
+        @unlink($sqlFile);
     }
 
-    // ── Fix file ownership (CyberPanel pattern) ────────────────────────────
-    // CyberPanel expects:
-    //   - docroot folder itself → user:nogroup  mode 750  (drwxr-x---)
-    // ── Fix file ownership & permissions ──────────────────────────────────
     fixSiteOwnershipAndPermissions($docroot);
 
-    echo json_encode(['status' => 'restored', 'file' => $file, 'db_imported' => $dbImported]);
+    $forgeCleanupState['succeeded'] = true;
+    echo json_encode(['status' => 'restored', 'file' => $file, 'db_imported' => $dbImported]) . "\n";
     exit(0);
 }
 
@@ -278,7 +362,7 @@ function fixSiteOwnershipAndPermissions(string $docroot): array {
         }
     }
 
-    // 2. Detect Web Group (nogroup on Debian/Ubuntu OLS, nobody on RHEL/CentOS/AlmaLinux OLS, www-data, etc.)
+    // 2. Detect Web Group
     $webGroup = $owner ?: 'nogroup';
     exec('for g in nogroup nobody www-data nginx apache; do if getent group "$g" >/dev/null 2>&1; then echo "$g"; exit 0; fi; done; echo ' . escapeshellarg($owner ?: 'root'), $gOut, $gCode);
     if ($gCode === 0 && !empty($gOut[0]) && trim($gOut[0])) {
@@ -292,11 +376,8 @@ function fixSiteOwnershipAndPermissions(string $docroot): array {
     exec('find ' . escapeshellarg($root) . ' -type f -exec chmod 644 {} + 2>/dev/null');
 
     if ($owner) {
-        // Step 1: inner contents -> owner:owner (recursive)
         exec('chown -R ' . escapeshellarg($owner . ':' . $owner) . ' ' . escapeshellarg($root) . ' 2>&1');
-        // Step 2: docroot folder -> owner:webGroup (non-recursive)
         exec('chown ' . escapeshellarg($owner . ':' . $webGroup) . ' ' . escapeshellarg($root) . ' 2>&1');
-        // Step 3: enforce 750 on docroot
         exec('chmod 750 ' . escapeshellarg($root) . ' 2>&1');
     }
 
@@ -340,17 +421,14 @@ function fixSiteOwnershipAndPermissions(string $docroot): array {
 
 // Parse DB credentials — tries Bedrock .env first, then wp-config.php, then config/application.php
 function parseWpConfig(string $docroot): array {
-    // 1. Bedrock .env (most common for this tool)
     $envFile = $docroot . '/.env';
     if (file_exists($envFile)) {
         $creds = parseEnvFile($envFile);
         if (!empty($creds['DB_NAME'])) return $creds;
     }
 
-    // 2. Standard wp-config.php
     $configFile = $docroot . '/wp-config.php';
     if (!file_exists($configFile)) {
-        // 3. Bedrock config/application.php
         $configFile = $docroot . '/config/application.php';
     }
     if (!file_exists($configFile)) return [];
@@ -359,13 +437,10 @@ function parseWpConfig(string $docroot): array {
     $creds = [];
     foreach (['DB_NAME', 'DB_USER', 'DB_PASSWORD', 'DB_HOST'] as $const) {
         if (preg_match("/define\s*\(\s*['\"]" . $const . "['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*\)/", $content, $m)) {
-            // Standard wp-config.php: define('DB_NAME', 'value')
             $creds[$const] = $m[1];
         } elseif (preg_match("/Config::define\s*\(\s*['\"]" . $const . "['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*\)/", $content, $m)) {
-            // Bedrock config/application.php: Config::define('DB_NAME', 'value')
             $creds[$const] = $m[1];
         } elseif (preg_match("/" . $const . "\s*=\s*['\"]([^'\"]+)['\"]/", $content, $m)) {
-            // Assignment style: DB_NAME = 'value'
             $creds[$const] = $m[1];
         }
     }
@@ -374,7 +449,6 @@ function parseWpConfig(string $docroot): array {
 
 /**
  * Parse a .env file for DB credentials.
- * Handles KEY=value, KEY='value', KEY="value" formats.
  */
 function parseEnvFile(string $path): array {
     $creds = [];
@@ -384,14 +458,12 @@ function parseEnvFile(string $path): array {
         $line = trim($line);
         if ($line === '' || $line[0] === '#') continue;
         if (strpos($line, '=') === false) continue;
-        // Strip optional `export ` prefix (common in some shell-sourced .env files)
         if (strncasecmp($line, 'export ', 7) === 0) {
             $line = ltrim(substr($line, 7));
         }
         list($key, $value) = explode('=', $line, 2);
         $key   = trim($key);
         $value = trim($value);
-        // Strip surrounding quotes
         if (strlen($value) >= 2) {
             $first = $value[0];
             $last  = $value[strlen($value) - 1];
@@ -403,7 +475,6 @@ function parseEnvFile(string $path): array {
             $creds[$key] = $value;
         }
     }
-    // Fallback: parse DATABASE_URL (mysql://user:pass@host/dbname) when individual vars are absent
     if (empty($creds['DB_NAME'])) {
         $rawLines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
         if ($rawLines !== false) {
@@ -424,11 +495,78 @@ function parseEnvFile(string $path): array {
             }
         }
     }
-    // Default DB_HOST to localhost if not set
     if (!empty($creds['DB_NAME']) && empty($creds['DB_HOST'])) {
         $creds['DB_HOST'] = 'localhost';
     }
     return $creds;
+}
+
+function estimateMysqlBytes(string $mycnfFile, string $dbPort, string $dbName): int {
+    $query = sprintf(
+        "SELECT COALESCE(SUM(data_length + index_length), 0) FROM information_schema.TABLES WHERE table_schema='%s'",
+        str_replace("'", "''", $dbName)
+    );
+    $cmd = sprintf(
+        'mysql --defaults-extra-file=%s%s -N -s -e %s 2>/dev/null',
+        escapeshellarg($mycnfFile),
+        $dbPort,
+        escapeshellarg($query)
+    );
+    exec($cmd, $qOut, $qCode);
+    if ($qCode === 0 && isset($qOut[0]) && is_numeric(trim($qOut[0]))) {
+        return (int)trim($qOut[0]);
+    }
+    return 0;
+}
+
+function estimateDirectoryBytes(string $path): int {
+    exec('du -sk ' . escapeshellarg($path) . ' 2>/dev/null', $dOut, $dCode);
+    if ($dCode === 0 && !empty($dOut[0]) && preg_match('/^(\d+)/', trim($dOut[0]), $m)) {
+        return ((int)$m[1]) * 1024;
+    }
+    return 0;
+}
+
+function assertDiskFreeSpace(string $targetPath, int $requiredBytes, string $stageLabel): void {
+    $probeDir = is_dir($targetPath) ? $targetPath : dirname($targetPath);
+    if (!is_dir($probeDir)) {
+        return;
+    }
+    $free = @disk_free_space($probeDir);
+    if ($free !== false && $free < $requiredBytes) {
+        $freeMb = round($free / 1048576, 1);
+        $reqMb = round($requiredBytes / 1048576, 1);
+        fwrite(STDERR, "ERROR: ENOSPC: Insufficient disk space during {$stageLabel} in {$probeDir} ({$freeMb} MB available, {$reqMb} MB required)\n");
+        exit(1);
+    }
+}
+
+function classifyTarWarnings(array $tarLines): array {
+    $benign = [];
+    $critical = [];
+    $benignPattern = '/(?:^|\/)(?:cache|et-cache|et_temp|litespeed|uploads\/elementor\/css|storage\/framework\/cache)(?:\/|$)|\.log(?:\.\d+)?$|\/sess_[a-zA-Z0-9]+$/i';
+
+    foreach ($tarLines as $line) {
+        $trimmed = trim($line);
+        if ($trimmed === '') continue;
+        if (preg_match('/^tar:\s*(.+?):\s*(?:file changed as we read it|File removed before we read it|file shrank by)/i', $trimmed, $m)) {
+            $changedPath = trim($m[1]);
+            if (preg_match($benignPattern, $changedPath)) {
+                $benign[] = $changedPath;
+            } else {
+                $critical[] = $changedPath;
+            }
+        }
+    }
+
+    return [
+        'benign_files' => array_values(array_unique($benign)),
+        'critical_files' => array_values(array_unique($critical)),
+    ];
+}
+
+function sedEscapeRegex(string $value): string {
+    return preg_replace('/([.\[\]^$*|\\\\\/])/', '\\\\$1', $value) ?? $value;
 }
 
 $parts        = [];
@@ -436,13 +574,9 @@ $dbDumpFile   = null;
 $isIncremental = ($type === 'incremental');
 
 if ($type === 'full' || $type === 'db_only' || $isIncremental) {
-    $creds = parseWpConfig($docroot);
-
-    // Determine credential source for diagnostic logging
+    $creds = parseWpConfig($resolvedDocroot);
     $credSource = 'filesystem';
 
-    // If filesystem parsing is incomplete and CLI credential overrides were supplied
-    // (passed by the worker from stored encrypted credentials), use them as fallback.
     $missingCred = false;
     foreach (['DB_NAME', 'DB_USER', 'DB_PASSWORD', 'DB_HOST'] as $required) {
         if (empty($creds[$required])) { $missingCred = true; break; }
@@ -455,21 +589,20 @@ if ($type === 'full' || $type === 'db_only' || $isIncremental) {
         $credSource = 'stored (CLI fallback)';
     }
 
-    // Validate all required credentials are present before attempting mysqldump
     foreach (['DB_NAME', 'DB_USER', 'DB_PASSWORD', 'DB_HOST'] as $required) {
         if (empty($creds[$required])) {
-            fwrite(STDERR, "ERROR: Missing or empty credential '{$required}'. Checked .env, wp-config.php, and config/application.php under {$docroot}\n");
+            fwrite(STDERR, "ERROR: Missing or empty credential '{$required}'. Checked .env, wp-config.php, and config/application.php under {$resolvedDocroot}\n");
             exit(1);
         }
     }
 
-    // Log credential source and identity for diagnostics (never log the password)
     fwrite(STDERR, "DB creds source={$credSource} user={$creds['DB_USER']} db={$creds['DB_NAME']} host={$creds['DB_HOST']}\n");
 
-    $dbDumpFile = sys_get_temp_dir() . '/forge_db_' . time() . '.sql';
-    $stderrFile = sys_get_temp_dir() . '/forge_db_err_' . time() . '.txt';
+    $dbDumpFile = $runStageDir . '/forge_db_' . $runToken . '.sql';
+    $stderrFile = $runStageDir . '/forge_db_err_' . $runToken . '.txt';
+    @touch($dbDumpFile);
+    @chmod($dbDumpFile, 0600);
 
-    // Handle DB_HOST containing an embedded port (e.g. localhost:3307).
     $dbHost = $creds['DB_HOST'];
     $dbPort = '';
     if (strpos($dbHost, ':') !== false) {
@@ -479,18 +612,20 @@ if ($type === 'full' || $type === 'db_only' || $isIncremental) {
         $dbPort = ' --port=' . (int)$creds['DB_PORT'];
     }
 
-    // ── Use --defaults-extra-file to pass credentials to mysqldump ──────────
-    // Writing credentials to a temporary .my.cnf avoids ALL shell escaping
-    // issues with special characters (!@^$`" etc.) in passwords. The file is
-    // read directly by the mysqldump binary — no shell interpretation, no
-    // MYSQL_PWD env var leaking into the process list.
-    $mycnfFile = tempnam(sys_get_temp_dir(), 'forge_mycnf_');
+    $mycnfFile = $runStageDir . '/forge_mycnf_' . $runToken . '.cnf';
     $mycnfContent = "[client]\n"
         . "user=" . $creds['DB_USER'] . "\n"
         . "password=" . $creds['DB_PASSWORD'] . "\n"
         . "host=" . $dbHost . "\n";
     file_put_contents($mycnfFile, $mycnfContent);
     chmod($mycnfFile, 0600);
+    $forgeCleanupState['mycnf'] = $mycnfFile;
+
+    $estDbBytes = estimateMysqlBytes($mycnfFile, $dbPort, $creds['DB_NAME']);
+    if ($estDbBytes > 0) {
+        $requiredDbSpace = (int)ceil($estDbBytes * 1.2) + (32 * 1048576);
+        assertDiskFreeSpace($runStageDir, $requiredDbSpace, 'mysqldump staging');
+    }
 
     $cmd = sprintf(
         'mysqldump --defaults-extra-file=%s%s --single-transaction --quick %s > %s 2>%s',
@@ -501,10 +636,12 @@ if ($type === 'full' || $type === 'db_only' || $isIncremental) {
         escapeshellarg($stderrFile)
     );
     exec($cmd, $out, $code);
-    @unlink($mycnfFile);  // always clean up credentials file
+    @unlink($mycnfFile);
+    $forgeCleanupState['mycnf'] = null;
     if ($code !== 0) {
         $errDetail = file_exists($stderrFile) ? trim(file_get_contents($stderrFile)) : implode("\n", $out);
         @unlink($stderrFile);
+        @unlink($dbDumpFile);
         fwrite(STDERR, "ERROR: mysqldump failed (exit {$code}): {$errDetail}\n");
         exit($code);
     }
@@ -512,38 +649,60 @@ if ($type === 'full' || $type === 'db_only' || $isIncremental) {
     $parts[] = $dbDumpFile;
 }
 
-$basename = basename($docroot);
+$basename = $logicalBasename;
 $cacheDir = null;
+$runCacheRoot = null;
+$currentDir = null;
 
 if ($isIncremental) {
-    $parentDir = dirname($docroot);
-    $cacheDir = $parentDir . '/.forge_backup_cache';
-    if (!is_dir($cacheDir)) {
-        if (!mkdir($cacheDir, 0755, true)) {
-            fwrite(STDERR, "ERROR: Could not create incremental backup cache directory: {$cacheDir}\n");
-            exit(1);
-        }
+    $parentDir = dirname($docrootTrimmed);
+    $cacheBaseRoot = $parentDir . '/.forge_backup_cache';
+    if (!is_dir($cacheBaseRoot) && !@mkdir($cacheBaseRoot, 0700, true)) {
+        fwrite(STDERR, "ERROR: Could not create incremental backup cache root: {$cacheBaseRoot}\n");
+        exit(1);
     }
+    @chmod($cacheBaseRoot, 0700);
 
-    $latestDir = $cacheDir . '/latest/' . $basename;
-    $currentDir = $cacheDir . '/current/' . $basename;
+    $envKey = hash('sha256', $resolvedDocroot);
+    $cacheDir = $cacheBaseRoot . '/' . $envKey;
+    $latestParent = $cacheDir . '/latest';
+    $latestDir = $latestParent . '/' . $basename;
+    $runCacheRoot = $cacheDir . '/runs/' . $runToken;
+    $currentDir = $runCacheRoot . '/' . $basename;
+    $forgeCleanupState['runCacheRoot'] = $runCacheRoot;
 
-    @mkdir($cacheDir . '/latest', 0755, true);
-    @mkdir($cacheDir . '/current', 0755, true);
+    @mkdir($cacheDir, 0700, true);
+    @chmod($cacheDir, 0700);
+    @mkdir($latestParent, 0700, true);
+    @mkdir($runCacheRoot, 0700, true);
+    @mkdir($currentDir, 0755, true);
 
     $rsyncFlags = '-a --delete';
     if (is_dir($latestDir)) {
         $rsyncFlags .= ' --link-dest=' . escapeshellarg($latestDir);
     }
 
-    $rsyncCmd = "rsync {$rsyncFlags} " . escapeshellarg($docroot . '/') . ' ' . escapeshellarg($currentDir . '/');
+    $rsyncCmd = "rsync {$rsyncFlags} " . escapeshellarg($resolvedDocroot . '/') . ' ' . escapeshellarg($currentDir . '/');
     fwrite(STDERR, "Executing incremental rsync: {$rsyncCmd}\n");
     exec($rsyncCmd . ' 2>&1', $rsyncOut, $rsyncCode);
     if ($rsyncCode !== 0) {
         fwrite(STDERR, "ERROR: Incremental rsync failed (exit {$rsyncCode}): " . implode("\n", $rsyncOut) . "\n");
-        exec('rm -rf ' . escapeshellarg($cacheDir . '/current'));
+        exec('rm -rf ' . escapeshellarg($runCacheRoot));
         exit($rsyncCode);
     }
+}
+
+$outputDir = dirname($output);
+if (!is_dir($outputDir)) {
+    @mkdir($outputDir, 0700, true);
+}
+
+$rawFilesBytes = ($type === 'db_only') ? 0 : estimateDirectoryBytes($resolvedDocroot);
+$sqlDumpBytes = ($dbDumpFile && file_exists($dbDumpFile)) ? (int)filesize($dbDumpFile) : 0;
+$estimatedRawTotal = $rawFilesBytes + $sqlDumpBytes;
+if ($estimatedRawTotal > 0) {
+    $requiredTarSpace = (int)ceil($estimatedRawTotal * 0.75) + (32 * 1048576);
+    assertDiskFreeSpace($outputDir, $requiredTarSpace, 'archive creation');
 }
 
 // Exclude volatile cache and temporary directories from backup archive
@@ -559,54 +718,135 @@ $tarExcludes = [
 ];
 $excludeFlags = ' ' . implode(' ', $tarExcludes) . ' ';
 
-// Use pigz (parallel gzip) when available for faster compression on multi-core
-// servers. Falls back to standard gzip transparently.
+$transformFlag = '';
+if ($isSymlinkDocroot && ($type === 'full' || $type === 'files_only') && $physicalBasename !== $logicalBasename) {
+    $tarVersion = shell_exec('tar --version 2>/dev/null') ?? '';
+    if (stripos($tarVersion, 'GNU tar') !== false) {
+        $srcEsc = sedEscapeRegex($physicalBasename);
+        $dstEsc = str_replace('/', '\\/', $logicalBasename);
+        $transformExpr = "flags=r;s|^" . $srcEsc . "/|" . $dstEsc . "/|;s|^" . $srcEsc . "$|" . $dstEsc . "|";
+        $transformFlag = ' --transform=' . escapeshellarg($transformExpr) . ' ';
+    } else {
+        fwrite(STDERR, "WARNING: Non-GNU tar detected with symlinked docroot name mismatch ({$logicalBasename} -> {$physicalBasename}); archiving resolved directory name\n");
+    }
+}
+
 $pigz = trim(shell_exec('which pigz 2>/dev/null') ?? '');
 if ($pigz) {
-    $tarCmd = 'tar --use-compress-program=' . escapeshellarg($pigz) . $excludeFlags . '-cf ' . escapeshellarg($output);
+    $tarCmd = 'tar --use-compress-program=' . escapeshellarg($pigz) . $excludeFlags . $transformFlag . '-cf ' . escapeshellarg($output);
 } else {
-    $tarCmd = 'tar -czf ' . escapeshellarg($output) . $excludeFlags;
+    $tarCmd = 'tar -czf ' . escapeshellarg($output) . $excludeFlags . $transformFlag;
 }
 
 if ($type === 'full' || $type === 'files_only') {
-    $tarCmd .= ' -C ' . escapeshellarg(dirname($docroot)) . ' ' . escapeshellarg(basename($docroot));
+    if ($isSymlinkDocroot) {
+        $tarCmd .= ' -C ' . escapeshellarg(dirname($resolvedDocroot)) . ' ' . escapeshellarg($physicalBasename);
+    } else {
+        $tarCmd .= ' -C ' . escapeshellarg(dirname($docrootTrimmed)) . ' ' . escapeshellarg($logicalBasename);
+    }
 } elseif ($isIncremental) {
-    $tarCmd .= ' -C ' . escapeshellarg($cacheDir . '/current') . ' ' . escapeshellarg(basename($docroot));
+    $tarCmd .= ' -C ' . escapeshellarg($runCacheRoot) . ' ' . escapeshellarg($logicalBasename);
 }
 
 foreach ($parts as $part) {
     $tarCmd .= ' -C ' . escapeshellarg(dirname($part)) . ' ' . escapeshellarg(basename($part));
 }
 
-exec($tarCmd . ' 2>&1', $out, $code);
+$tarAttempts = 0;
+$warnings = ['benign_files' => [], 'critical_files' => []];
+$out = [];
+$code = 0;
 
-// Cleanup temp SQL dump
-if ($dbDumpFile && file_exists($dbDumpFile)) {
-    unlink($dbDumpFile);
-}
+do {
+    $tarAttempts++;
+    $out = [];
+    $code = 0;
+    @touch($output);
+    @chmod($output, 0600);
+    exec($tarCmd . ' 2>&1', $out, $code);
 
-// tar exit code 1 = "file changed as we read it" — a harmless warning that
-// occurs when the site receives traffic during the backup. The archive is still
-// valid and complete. Only exit codes >= 2 indicate a real failure.
-if ($code > 1) {
-    if ($isIncremental && $cacheDir) {
-        exec('rm -rf ' . escapeshellarg($cacheDir . '/current'));
+    if ($code > 1) {
+        @unlink($output);
+        if ($isIncremental && $runCacheRoot) {
+            exec('rm -rf ' . escapeshellarg($runCacheRoot));
+        }
+        fwrite(STDERR, "ERROR: tar failed (exit {$code}): " . implode("\n", $out) . "\n");
+        exit($code);
     }
-    fwrite(STDERR, "ERROR: tar failed (exit {$code}): " . implode("\n", $out) . "\n");
-    exit($code);
+
+    $warnings = ($code === 1)
+        ? classifyTarWarnings($out)
+        : ['benign_files' => [], 'critical_files' => []];
+
+    if ($code === 1 && !empty($warnings['critical_files']) && $tarAttempts < 2) {
+        fwrite(STDERR, "WARNING: tar exited 1 on critical files (" . implode(', ', $warnings['critical_files']) . ") — retrying once for clean snapshot\n");
+        @unlink($output);
+        continue;
+    }
+    break;
+} while ($tarAttempts < 2);
+
+// Cleanup temp SQL dump now that archive is written
+if ($dbDumpFile && file_exists($dbDumpFile)) {
+    @unlink($dbDumpFile);
 }
+
+if ($code === 1 && !empty($warnings['critical_files'])) {
+    @unlink($output);
+    if ($isIncremental && $runCacheRoot) {
+        exec('rm -rf ' . escapeshellarg($runCacheRoot));
+    }
+    fwrite(STDERR, "ERROR: Backup inconsistent — critical application files changed during tar after retry: " . implode(', ', $warnings['critical_files']) . "\n");
+    exit(1);
+}
+
+// Verify archive structural integrity before reporting success
+$verifyCode = 0;
+$verifyOut = [];
+exec('tar -tzf ' . escapeshellarg($output) . ' >/dev/null 2>&1', $verifyOut, $verifyCode);
+$size = file_exists($output) ? (int)filesize($output) : 0;
+if ($verifyCode !== 0 || $size <= 0) {
+    @unlink($output);
+    if ($isIncremental && $runCacheRoot) {
+        exec('rm -rf ' . escapeshellarg($runCacheRoot));
+    }
+    fwrite(STDERR, "ERROR: Backup archive failed tar -tzf verification (exit {$verifyCode}, size={$size})\n");
+    exit(1);
+}
+
+@chmod($output, 0600);
+
 if ($code === 1) {
-    fwrite(STDERR, "WARNING: tar exited 1 (file changed during read) — backup archive is still valid\n");
+    fwrite(STDERR, "WARNING: tar exited 1 on benign volatile files (" . implode(', ', $warnings['benign_files']) . ") — verified via tar -tzf\n");
 }
 
-if ($isIncremental && $cacheDir) {
-    // Promote current to latest
-    exec('rm -rf ' . escapeshellarg($cacheDir . '/latest'));
-    @mkdir($cacheDir . '/latest', 0755, true);
-    exec('mv ' . escapeshellarg($cacheDir . '/current/' . $basename) . ' ' . escapeshellarg($cacheDir . '/latest/' . $basename));
-    exec('rm -rf ' . escapeshellarg($cacheDir . '/current'));
+if ($isIncremental && $cacheDir && $runCacheRoot) {
+    $latestDir = $cacheDir . '/latest/' . $basename;
+    $prevLatest = $cacheDir . '/latest/' . $basename . '.prev_' . $runToken;
+    if (is_dir($latestDir)) {
+        @rename($latestDir, $prevLatest);
+    }
+    if (@rename($currentDir, $latestDir)) {
+        if (is_dir($prevLatest)) {
+            exec('rm -rf ' . escapeshellarg($prevLatest));
+        }
+    } else {
+        exec('rm -rf ' . escapeshellarg($latestDir));
+        @mkdir($cacheDir . '/latest', 0700, true);
+        exec('mv ' . escapeshellarg($currentDir) . ' ' . escapeshellarg($latestDir));
+        if (is_dir($prevLatest)) {
+            exec('rm -rf ' . escapeshellarg($prevLatest));
+        }
+    }
+    exec('rm -rf ' . escapeshellarg($runCacheRoot));
 }
 
-$size = file_exists($output) ? filesize($output) : 0;
-echo json_encode(['filename' => $output, 'size' => $size]);
+$forgeCleanupState['succeeded'] = true;
+echo json_encode([
+    'filename' => $output,
+    'size' => $size,
+    'archive_verified' => true,
+    'consistent' => empty($warnings['critical_files']),
+    'warnings' => $warnings,
+]) . "\n";
 exit(0);

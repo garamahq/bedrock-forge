@@ -2,12 +2,14 @@ import { Processor, WorkerHost } from "@nestjs/bullmq";
 import { Logger } from "@nestjs/common";
 import { Job } from "bullmq";
 import { execFile } from "child_process";
+import { randomUUID } from "crypto";
 import { promisify } from "util";
 import { mkdir, stat, rm, writeFile } from "fs/promises";
 import { join } from "path";
 import { QUEUES, JOB_TYPES } from "@bedrock-forge/shared";
 import { PrismaService } from "../../prisma/prisma.service";
 import { RcloneService } from "../../services/rclone.service";
+import { buildPgDumpConnection } from "../../utils/pg-dump.utils";
 
 const execFileAsync = promisify(execFile);
 
@@ -234,16 +236,11 @@ export class SystemBackupProcessor extends WorkerHost {
     const dbUrl = process.env.DATABASE_URL;
     if (!dbUrl) throw new Error("DATABASE_URL is not set in environment");
 
-    const parsed = new URL(dbUrl);
-    const dbHost = parsed.hostname;
-    const dbPort = parsed.port || "5432";
-    const dbName = parsed.pathname.slice(1);
-    const dbUser = parsed.username;
-    const dbPassword = decodeURIComponent(parsed.password);
+    const conn = buildPgDumpConnection(dbUrl);
 
-    await mkdir(STAGING_DIR, { recursive: true });
+    await mkdir(STAGING_DIR, { recursive: true, mode: 0o700 });
     const timestamp = formatTimestamp(startedAt);
-    const filename = `forge-system-${timestamp}.dump`;
+    const filename = `forge-system-${timestamp}_${randomUUID().slice(0, 8)}.dump`;
     const tmpPath = join(STAGING_DIR, filename);
     onTmpPath(tmpPath);
 
@@ -251,25 +248,12 @@ export class SystemBackupProcessor extends WorkerHost {
 
     const pgpassFilename = `.${filename}.pgpass`;
     const pgpassPath = join(STAGING_DIR, pgpassFilename);
-    const pgpassContent = `${dbHost}:${dbPort}:${dbName}:${dbUser}:${dbPassword}\n`;
-    await writeFile(pgpassPath, pgpassContent, { mode: 0o600 });
+    await writeFile(pgpassPath, conn.pgpassLine, { mode: 0o600 });
 
     try {
       await execFileAsync(
         "pg_dump",
-        [
-          "-h",
-          dbHost,
-          "-p",
-          dbPort,
-          "-U",
-          dbUser,
-          "-d",
-          dbName,
-          "-Fc",
-          "-f",
-          tmpPath,
-        ],
+        ["-d", conn.connectionUri, "-Fc", "-f", tmpPath],
         { env: { ...process.env, PGPASSFILE: pgpassPath } },
       );
     } finally {
