@@ -12,6 +12,7 @@ import {
   DEFAULT_JOB_OPTIONS,
   BACKUP_JOB_OPTIONS,
   PaginationQuery,
+  normalizeGoogleDriveFolderId,
 } from "@bedrock-forge/shared";
 import { EnqueueBackupDto, RestoreBackupDto } from "./dto/backup.dto";
 import { BackupsRepository } from "./backups.repository";
@@ -44,6 +45,15 @@ export class BackupsService {
     if (!env.google_drive_folder_id) {
       throw new BadRequestException(
         `Environment ${dto.environmentId} has no Google Drive folder ID configured.`,
+      );
+    }
+    try {
+      normalizeGoogleDriveFolderId(env.google_drive_folder_id);
+    } catch (err) {
+      throw new BadRequestException(
+        err instanceof Error
+          ? err.message
+          : "Environment Google Drive folder ID is invalid.",
       );
     }
     const hasActive = await this.repo.hasActiveJob(BigInt(dto.environmentId));
@@ -205,13 +215,35 @@ export class BackupsService {
 
   async remove(id: number) {
     const backup = await this.findOne(id);
-    // Enqueue async GDrive file deletion before removing the DB record
+    // Keep a retryable DB cleanup reference until the worker confirms remote deletion
     if (backup.file_path) {
-      await this.backupsQueue.add(
-        JOB_TYPES.BACKUP_DELETE_FILE,
-        { filePath: backup.file_path },
-        { ...DEFAULT_JOB_OPTIONS, attempts: 5 },
-      );
+      const prevStatus = backup.status as
+        | "pending"
+        | "running"
+        | "completed"
+        | "failed"
+        | "deleting";
+      await this.repo.updateStatus(BigInt(id), {
+        status: "deleting",
+        error_message: null,
+      });
+      try {
+        await this.backupsQueue.add(
+          JOB_TYPES.BACKUP_DELETE_FILE,
+          { filePath: backup.file_path, backupId: Number(backup.id) },
+          { ...DEFAULT_JOB_OPTIONS, attempts: 5 },
+        );
+      } catch (err) {
+        await this.repo
+          .updateStatus(BigInt(id), {
+            status: prevStatus === "deleting" ? "failed" : prevStatus,
+            error_message:
+              err instanceof Error ? err.message : "Failed to queue deletion",
+          })
+          .catch(() => undefined);
+        throw err;
+      }
+      return { id: backup.id, status: "deleting" };
     }
     return this.repo.delete(BigInt(id));
   }

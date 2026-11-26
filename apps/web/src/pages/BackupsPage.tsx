@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "@/lib/api-client";
+import { triggerAuthenticatedBackupDownload } from "@/lib/download";
 import { useAuthStore } from "@/store/auth.store";
 import { useWebSocketEvent, useSubscribeEnvironment } from "@/lib/websocket";
 import { WS_EVENTS } from "@bedrock-forge/shared";
@@ -656,12 +657,21 @@ export function BackupsPage() {
                                     size="icon"
                                     className="h-7 w-7 text-muted-foreground hover:text-foreground"
                                     title="Download backup"
-                                    onClick={() =>
-                                      window.open(
+                                    onClick={() => {
+                                      void triggerAuthenticatedBackupDownload(
+                                        `/backups/${b.id}/download-ticket`,
                                         `/api/backups/${b.id}/download`,
-                                        "_blank",
-                                      )
-                                    }
+                                      ).catch((err) => {
+                                        toast({
+                                          title: "Download failed",
+                                          description:
+                                            err instanceof Error
+                                              ? err.message
+                                              : "Could not start backup download",
+                                          variant: "destructive",
+                                        });
+                                      });
+                                    }}
                                   >
                                     <Download className="h-3.5 w-3.5" />
                                   </Button>

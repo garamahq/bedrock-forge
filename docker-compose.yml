@@ -90,6 +90,7 @@ services:
     volumes:
       - forge-backups:/tmp/forge-backups
       - forge-system-backups:/tmp/forge-system-backups
+      - forge-rclone:/home/node/.config/rclone
     environment:
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:8080}
       DATABASE_URL: postgresql://${POSTGRES_USER:-forge}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-bedrock_forge}
@@ -168,3 +169,4 @@ volumes:
   redis_data:
   forge-backups:
   forge-system-backups:
+  forge-rclone:

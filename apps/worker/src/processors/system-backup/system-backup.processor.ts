@@ -5,7 +5,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import { mkdir, stat, rm, writeFile } from "fs/promises";
 import { join } from "path";
-import { QUEUES, JOB_TYPES } from "@bedrock-forge/shared";
+import { QUEUES, JOB_TYPES, normalizeGoogleDriveFolderId } from "@bedrock-forge/shared";
 import { PrismaService } from "../../prisma/prisma.service";
 import { RcloneService } from "../../services/rclone.service";
 
@@ -192,24 +192,24 @@ export class SystemBackupProcessor extends WorkerHost {
         }),
       ]);
 
-      // Stamp last_run_at on the schedule
+      // Schedule maintenance (last_run_at + retention) is isolated from backup outcome
+      // so a post-upload maintenance failure does not flip a valid completed backup to failed.
       if (schedule) {
-        await this.prisma.systemBackupSchedule.update({
-          where: { id: schedule.id },
-          data: { last_run_at: completedAt },
-        });
-      }
-
-      this.logger.log(
-        `[SystemBackupSchedule #${scheduleId}] ✓ Completed → ${remotePath}`,
-      );
-
-      // Apply retention policy
-      if (schedule) {
-        await this.applyRetention(
-          schedule.retention_count,
-          schedule.retention_days,
-        );
+        try {
+          await this.prisma.systemBackupSchedule.update({
+            where: { id: schedule.id },
+            data: { last_run_at: completedAt },
+          });
+          await this.applyRetention(
+            schedule.retention_count,
+            schedule.retention_days,
+            backup.id,
+          );
+        } catch (maintErr) {
+          this.logger.error(
+            `[SystemBackupSchedule #${scheduleId}] Post-backup maintenance warning: ${maintErr instanceof Error ? maintErr.message : String(maintErr)}`,
+          );
+        }
       }
     } catch (err) {
       await this.markFailed(backup.id, exec.id, err);
@@ -276,9 +276,15 @@ export class SystemBackupProcessor extends WorkerHost {
       await rm(pgpassPath, { force: true }).catch(() => undefined);
     }
 
-    this.logger.log(`Uploading to GDrive folder ${folderId}`);
-    await this.rclone.writeConfig();
-    return this.rclone.upload(tmpPath, folderId, filename);
+    const normalizedFolderId = normalizeGoogleDriveFolderId(folderId);
+    this.logger.log(`Uploading to GDrive folder ${normalizedFolderId}`);
+    const configWritten = await this.rclone.writeConfig();
+    if (!configWritten) {
+      throw new Error(
+        "Google Drive is not configured or rclone config could not be prepared",
+      );
+    }
+    return this.rclone.upload(tmpPath, normalizedFolderId, filename);
   }
 
   private async getFileSize(tmpPath: string): Promise<bigint | undefined> {
@@ -317,35 +323,81 @@ export class SystemBackupProcessor extends WorkerHost {
   private async applyRetention(
     retentionCount: number | null,
     retentionDays: number | null,
+    justCreatedBackupId?: bigint,
   ) {
-    if (retentionCount) {
-      // Keep the N most recent completed backups; delete the rest
-      const completed = await this.prisma.systemBackup.findMany({
-        where: { status: "completed" },
-        orderBy: { created_at: "desc" },
-        select: { id: true },
-      });
-      if (completed.length > retentionCount) {
-        const toDelete = completed.slice(retentionCount).map((b) => b.id);
-        await this.prisma.systemBackup.deleteMany({
-          where: { id: { in: toDelete } },
-        });
-        this.logger.log(
-          `Retention: deleted ${toDelete.length} old system backup(s)`,
-        );
+    if (!retentionCount && !retentionDays) return;
+
+    const scheduledBackups = await this.prisma.systemBackup.findMany({
+      where: {
+        status: "completed",
+        jobExecution: { is: { job_type: JOB_TYPES.SYSTEM_BACKUP_SCHEDULED } },
+      },
+      orderBy: { created_at: "desc" },
+      select: { id: true, file_path: true, created_at: true },
+    });
+
+    const candidates = new Map<bigint, string | null>();
+    if (retentionCount && scheduledBackups.length > retentionCount) {
+      for (const b of scheduledBackups.slice(retentionCount)) {
+        candidates.set(b.id, b.file_path ?? null);
       }
     }
 
     if (retentionDays) {
       const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
-      const { count } = await this.prisma.systemBackup.deleteMany({
-        where: { status: "completed", created_at: { lt: cutoff } },
-      });
-      if (count) {
-        this.logger.log(
-          `Retention: deleted ${count} system backup(s) older than ${retentionDays} days`,
-        );
+      for (const b of scheduledBackups) {
+        if (b.created_at < cutoff) {
+          candidates.set(b.id, b.file_path ?? null);
+        }
       }
+    }
+
+    if (justCreatedBackupId !== undefined) {
+      candidates.delete(justCreatedBackupId);
+    }
+
+    if (candidates.size === 0) return;
+
+    const needsDriveDelete = Array.from(candidates.values()).some((fp) => Boolean(fp));
+    if (needsDriveDelete) {
+      const configReady = await this.rclone.writeConfig();
+      if (!configReady) {
+        this.logger.error(
+          "Retention: cannot delete stale system backups because rclone config is unavailable",
+        );
+        return;
+      }
+    }
+
+    const deletedIds: bigint[] = [];
+    for (const [id, filePath] of candidates.entries()) {
+      if (filePath) {
+        try {
+          await this.rclone.deleteFile(filePath);
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          this.logger.error(
+            `Retention: failed to delete Drive file ${filePath} for system backup #${id}: ${errMsg}`,
+          );
+          await this.prisma.systemBackup
+            .update({
+              where: { id },
+              data: { error_message: `Retention Drive delete failed: ${errMsg}` },
+            })
+            .catch(() => undefined);
+          continue;
+        }
+      }
+      deletedIds.push(id);
+    }
+
+    if (deletedIds.length > 0) {
+      await this.prisma.systemBackup.deleteMany({
+        where: { id: { in: deletedIds } },
+      });
+      this.logger.log(
+        `Retention: deleted ${deletedIds.length} stale scheduled system backup(s)`,
+      );
     }
   }
 }

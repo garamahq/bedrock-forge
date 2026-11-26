@@ -34,6 +34,7 @@ export type BackupRestorePayload = z.infer<typeof BackupRestorePayloadSchema>;
 
 export const BackupDeleteFilePayloadSchema = z.object({
   filePath: z.string().min(1),
+  backupId: z.number().int().positive().optional(),
 });
 export type BackupDeleteFilePayload = z.infer<
   typeof BackupDeleteFilePayloadSchema

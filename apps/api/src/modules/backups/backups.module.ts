@@ -8,11 +8,15 @@ import { BackupSchedulesController } from "./backup-schedules.controller";
 import { BackupSchedulesService } from "./backup-schedules.service";
 import { BackupSchedulesRepository } from "./backup-schedules.repository";
 import { EnvironmentsModule } from "../environments/environments.module";
+import { SettingsModule } from "../settings/settings.module";
+import { DownloadTicketModule } from "../../common/auth/download-ticket.module";
 
 @Module({
   imports: [
     BullModule.registerQueue({ name: QUEUES.BACKUPS }),
     forwardRef(() => EnvironmentsModule),
+    SettingsModule,
+    DownloadTicketModule,
   ],
   controllers: [BackupsController, BackupSchedulesController],
   providers: [

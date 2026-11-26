@@ -3,11 +3,11 @@ import { PrismaService } from "../../prisma/prisma.service";
 
 export interface CreateSystemBackupData {
   job_execution_id?: bigint;
-  status: "pending" | "running" | "completed" | "failed";
+  status: "pending" | "running" | "completed" | "failed" | "deleting";
 }
 
 export interface UpdateSystemBackupData {
-  status?: "pending" | "running" | "completed" | "failed";
+  status?: "pending" | "running" | "completed" | "failed" | "deleting";
   file_path?: string;
   size_bytes?: bigint;
   error_message?: string;

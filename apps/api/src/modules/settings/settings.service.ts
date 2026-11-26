@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, Logger } from "@nestjs/common";
 import { promises as dns } from "dns";
 import * as ipaddr from "ipaddr.js";
+import { normalizeGoogleDriveFolderId } from "@bedrock-forge/shared";
 import { SettingsRepository } from "./settings.repository";
 import { EncryptionService } from "../../common/encryption/encryption.service";
 
@@ -39,8 +40,20 @@ export class SettingsService {
   }
 
   async set(key: string, value: string) {
+    let normalizedValue = value;
+    if (key === "forge_system_backup_folder_id") {
+      try {
+        normalizedValue = normalizeGoogleDriveFolderId(value);
+      } catch (err) {
+        throw new BadRequestException(
+          err instanceof Error ? err.message : "Invalid Google Drive folder ID",
+        );
+      }
+    }
     // Auto-encrypt sensitive values so callers don't need to know about encryption.
-    const stored = SENSITIVE_KEYS.has(key) ? this.enc.encrypt(value) : value;
+    const stored = SENSITIVE_KEYS.has(key)
+      ? this.enc.encrypt(normalizedValue)
+      : normalizedValue;
     return this.repo.upsert(key, stored);
   }
 

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isValidGoogleDriveFolderId } from "@bedrock-forge/shared";
 
 export const envSchema = z.object({
   type: z.enum(["production", "staging", "development"]),
@@ -8,7 +9,15 @@ export const envSchema = z.object({
   url: z.string().url("Must be a valid URL"),
   root_path: z.string().min(1, "Root path is required").max(500),
   backup_path: z.string().max(500).optional().or(z.literal("")),
-  google_drive_folder_id: z.string().max(500).optional().or(z.literal("")),
+  google_drive_folder_id: z
+    .string()
+    .max(500)
+    .optional()
+    .or(z.literal(""))
+    .refine(
+      (val) => !val || !val.trim() || isValidGoogleDriveFolderId(val),
+      "Must be a valid Google Drive folder ID or drive.google.com folder URL",
+    ),
 });
 export type EnvForm = z.infer<typeof envSchema>;
 

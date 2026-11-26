@@ -81,10 +81,12 @@ export class BackupProcessor extends WorkerHost {
   }
 
   async process(job: Job) {
-    // Fire-and-forget cloud file cleanup — no JobExecution involved
+    // Retryable cloud file cleanup — DB row is removed only after remote deletion succeeds
     if (job.name === JOB_TYPES.BACKUP_DELETE_FILE) {
-      const { filePath } = BackupDeleteFilePayloadSchema.parse(job.data);
-      return this.handleDelete(filePath);
+      const { filePath, backupId } = BackupDeleteFilePayloadSchema.parse(job.data);
+      return backupId !== undefined
+        ? this.handleDelete(filePath, backupId, job)
+        : this.handleDelete(filePath);
     }
 
     // Scheduled backup: create Backup + JobExecution rows, then run create flow
@@ -1120,46 +1122,106 @@ export class BackupProcessor extends WorkerHost {
       `[env ${environmentId}] Retention cleanup: removing ${toDelete.size} stale scheduled backup(s)`,
     );
 
-    // Enqueue GDrive file deletion before removing DB rows (fire-and-forget)
+    const fileBackedIds: bigint[] = [];
+    const dbOnlyIds: bigint[] = [];
     for (const id of toDelete) {
       const b = scheduledBackups.find((sb) => sb.id === id);
       if (b?.file_path) {
-        await this.backupsQueue.add(
-          JOB_TYPES.BACKUP_DELETE_FILE,
-          { filePath: b.file_path },
-          { ...DEFAULT_JOB_OPTIONS, attempts: 5 },
-        );
+        fileBackedIds.push(id);
+      } else {
+        dbOnlyIds.push(id);
       }
     }
 
-    await this.prisma.backup.deleteMany({
-      where: { id: { in: [...toDelete] } },
-    });
+    // Mark file-backed backups as 'deleting' BEFORE enqueueing so DB references remain
+    // retryable until Drive confirms deletion (or confirms file already missing).
+    if (fileBackedIds.length > 0) {
+      await this.prisma.backup.updateMany({
+        where: { id: { in: fileBackedIds } },
+        data: { status: "deleting", error_message: null },
+      });
+
+      for (const id of fileBackedIds) {
+        const b = scheduledBackups.find((sb) => sb.id === id);
+        if (b?.file_path) {
+          await this.backupsQueue.add(
+            JOB_TYPES.BACKUP_DELETE_FILE,
+            { filePath: b.file_path, backupId: Number(id) },
+            { ...DEFAULT_JOB_OPTIONS, attempts: 5 },
+          );
+        }
+      }
+    }
+
+    if (dbOnlyIds.length > 0) {
+      await this.prisma.backup.deleteMany({
+        where: { id: { in: dbOnlyIds } },
+      });
+    }
   }
 
   // ── Delete file ───────────────────────────────────────────────────────────
 
-  private async handleDelete(filePath: string) {
+  private async handleDelete(filePath: string, backupId?: number, job?: Job) {
     if (!filePath) return;
 
     this.logger.log(`Deleting GDrive backup file: ${filePath}`);
     const configWritten = await this.rclone.writeConfig();
 
     if (!configWritten) {
-      this.logger.warn(
-        `No rclone config — cannot delete GDrive file: ${filePath}`,
-      );
-      return;
+      const msg = `No valid rclone config — cannot delete GDrive file: ${filePath}`;
+      this.logger.error(msg);
+      if (backupId) {
+        const isFinalAttempt =
+          job !== undefined &&
+          typeof job.opts?.attempts === "number" &&
+          job.attemptsMade + 1 >= job.opts.attempts;
+        await this.prisma.backup
+          .update({
+            where: { id: BigInt(backupId) },
+            data: {
+              ...(isFinalAttempt ? { status: "failed" } : {}),
+              error_message: msg,
+            },
+          })
+          .catch(() => undefined);
+      }
+      throw new Error(msg);
     }
 
     try {
       await this.rclone.deleteFile(filePath);
       this.logger.log(`Deleted GDrive file: ${filePath}`);
     } catch (err) {
-      // Non-fatal — log and continue. File can be cleaned up manually.
-      this.logger.error(
-        `Failed to delete GDrive file ${filePath}: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      const errMsg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Failed to delete GDrive file ${filePath}: ${errMsg}`);
+      if (backupId) {
+        const isFinalAttempt =
+          job !== undefined &&
+          typeof job.opts?.attempts === "number" &&
+          job.attemptsMade + 1 >= job.opts.attempts;
+        await this.prisma.backup
+          .update({
+            where: { id: BigInt(backupId) },
+            data: {
+              ...(isFinalAttempt ? { status: "failed" } : {}),
+              error_message: `Google Drive deletion failed: ${errMsg}`,
+            },
+          })
+          .catch(() => undefined);
+      }
+      throw err;
+    }
+
+    // Confirmed deleted (or verified already missing) — safe to remove DB reference
+    if (backupId) {
+      await this.prisma.backup
+        .delete?.({ where: { id: BigInt(backupId) } })
+        ?.catch(() => undefined);
+    } else {
+      await this.prisma.backup
+        .deleteMany?.({ where: { file_path: filePath, status: "deleting" } })
+        ?.catch(() => undefined);
     }
   }
 }
