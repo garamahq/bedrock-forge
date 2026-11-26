@@ -12,6 +12,7 @@ import {
   JOB_TYPES,
   DEFAULT_JOB_OPTIONS,
   PaginationQuery,
+  isValidDbHost,
 } from "@bedrock-forge/shared";
 import { ProjectsRepository } from "./projects.repository";
 import type { PaginatedProjects } from "./projects.repository";
@@ -429,6 +430,11 @@ export class ProjectsService {
     const dbUser = dto.db_user?.trim() || `u_${dbSuffix}`;
     const dbPassword =
       dto.db_password?.trim() || randomBytes(16).toString("base64url");
+    if (dto.db_host !== undefined && !isValidDbHost(dto.db_host)) {
+      throw new BadRequestException(
+        "Database host must be a valid hostname, IP, host:port, or socket path without spaces or control characters.",
+      );
+    }
     const dbHost = dto.db_host?.trim() || "localhost";
 
     // Create Project + Environment + encrypted WpDbCredentials in a transaction

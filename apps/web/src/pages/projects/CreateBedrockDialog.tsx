@@ -239,6 +239,7 @@ export function CreateBedrockDialog({ open, onOpenChange, onSuccess }: Props) {
       return;
     }
 
+    const trimmedDbHost = dbHost.trim() || "localhost";
     const body: Record<string, unknown> = {
       name,
       client_id: parseInt(clientId, 10),
@@ -249,7 +250,7 @@ export function CreateBedrockDialog({ open, onOpenChange, onSuccess }: Props) {
       db_name: dbName || undefined,
       db_user: dbUser || undefined,
       db_password: dbPassword || undefined,
-      db_host: dbHost !== "localhost" ? dbHost : undefined,
+      db_host: trimmedDbHost !== "localhost" ? trimmedDbHost : undefined,
     };
     if (mode === "clone") {
       body.source_environment_id = parseInt(sourceEnvId, 10);
@@ -320,6 +321,21 @@ export function CreateBedrockDialog({ open, onOpenChange, onSuccess }: Props) {
           toast({
             title: "Missing source",
             description: "Select a source environment to clone from.",
+            variant: "destructive",
+          });
+          return;
+        }
+      }
+      if (step === 2) {
+        const trimmedHost = dbHost.trim();
+        if (
+          trimmedHost &&
+          !/^[a-zA-Z0-9._:\-\[\]\/]+$/.test(trimmedHost)
+        ) {
+          toast({
+            title: "Invalid database host",
+            description:
+              "Enter a valid hostname, IP, host:port, or socket path without spaces.",
             variant: "destructive",
           });
           return;

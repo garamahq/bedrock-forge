@@ -487,5 +487,63 @@ describe("ProjectsService", () => {
       expect(JSON.stringify(queuePayload)).not.toContain(syntheticPass);
       expect(JSON.stringify(queuePayload)).not.toContain("dbPassword");
     });
+
+    it("forwards custom db_host to both repository credentials and BullMQ clone payload (#110)", async () => {
+      const project = makeProject(BigInt(15));
+      const environment = makeEnvironment(BigInt(39));
+      (repo as any).createFull.mockResolvedValue({
+        project,
+        environment,
+        jobExecution: { id: BigInt(88) },
+      });
+
+      await svc.createFull({
+        name: "Clone Custom Host",
+        client_id: 2,
+        server_id: 5,
+        domain: "clone-custom.example.test",
+        admin_email: "admin@example.test",
+        source_environment_id: 10,
+        db_name: "wp_clone",
+        db_user: "u_clone",
+        db_password: "clone-Pass-123!",
+        db_host: " 127.0.0.1 ",
+      } as any);
+
+      expect((repo as any).createFull).toHaveBeenCalledWith(
+        expect.objectContaining({
+          dbCredentials: expect.objectContaining({
+            dbHost: "127.0.0.1",
+          }),
+        }),
+      );
+      expect(queue.add).toHaveBeenCalledWith(
+        "project:create-bedrock",
+        expect.objectContaining({
+          sourceEnvironmentId: 10,
+          cyberpanel: expect.objectContaining({
+            dbHost: "127.0.0.1",
+          }),
+        }),
+        expect.any(Object),
+      );
+    });
+
+    it("rejects malformed db_host before creating project or queueing job (#110)", async () => {
+      await expect(
+        svc.createFull({
+          name: "Bad Host",
+          client_id: 2,
+          server_id: 5,
+          domain: "bad-host.example.test",
+          admin_email: "admin@example.test",
+          source_environment_id: 10,
+          db_host: "localhost; rm -rf /",
+        } as any),
+      ).rejects.toThrow(BadRequestException);
+
+      expect((repo as any).createFull).not.toHaveBeenCalled();
+      expect(queue.add).not.toHaveBeenCalled();
+    });
   });
 });
