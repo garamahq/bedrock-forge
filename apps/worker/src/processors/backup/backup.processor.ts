@@ -26,9 +26,13 @@ import {
   pushRemoteScript,
   createRemoteMyCnf,
   cleanupRemoteMyCnf,
-  flipProtocol,
   WpCliBuilder,
 } from "../../utils/processor-utils";
+import {
+  detectContentDirectory,
+  replaceLiteralUrlInFiles,
+  runSerializedDbSearchReplace,
+} from "../../utils/url-replace.utils";
 
 const STAGING_DIR = "/tmp/forge-backups";
 
@@ -728,152 +732,37 @@ export class BackupProcessor extends WorkerHost {
             where: { environment_id: BigInt(environmentId) },
           });
 
-          if (targetCreds) {
+          if (targetCreds && backup.type !== "files_only") {
             const dbName = this.encryption.decrypt(targetCreds.db_name_encrypted);
             const dbUser = this.encryption.decrypt(targetCreds.db_user_encrypted);
             const dbPass = this.encryption.decrypt(targetCreds.db_password_encrypted);
             const dbHost = this.encryption.decrypt(targetCreds.db_host_encrypted);
 
-            const srMycnf = await createRemoteMyCnf(
+            await runSerializedDbSearchReplace({
               executor,
-              { dbUser, dbPassword: dbPass, dbHost },
-              job.id ?? "default",
-              "forge_sr_restore",
+              creds: { dbUser, dbPassword: dbPass, dbHost },
+              dbName,
+              sourceUrl: srcUrl,
+              targetUrl: tgtUrl,
+              jobId: job.id ?? "default",
+              tmpTag: "restore",
+              scriptsDir: scriptsPath,
+              onLog: (entry) => tracker.track(entry),
+            });
+          }
+
+          if (backup.type !== "db_only") {
+            const contentPath = await detectContentDirectory(
+              executor,
+              env.root_path,
             );
-            const srScript = `/tmp/forge_sr_restore_${job.id}.php`;
-
-            try {
-              await pushRemoteScript(
-                executor,
-                join(scriptsPath, "search-replace.php"),
-                srScript,
-              );
-
-              // Auto-detect WP table prefix; fallback 'wp_'
-              const prefixRes = await executor.execute(
-                `mysql --defaults-extra-file=${shellQuote(srMycnf)} ${shellQuote(dbName)} -sN -e ${shellQuote(
-                  `SELECT REPLACE(table_name,'options','') FROM information_schema.tables WHERE table_schema='${escapeMysql(dbName)}' AND table_name LIKE '%options' LIMIT 1`,
-                )}`,
-              );
-              const p =
-                prefixRes.code === 0 && prefixRes.stdout.trim()
-                  ? prefixRes.stdout.trim()
-                  : "wp_";
-
-              const pairs: Array<[string, string]> = [[srcUrl, tgtUrl]];
-              const alt = flipProtocol(srcUrl);
-              const altTgt = flipProtocol(tgtUrl);
-              if (alt && altTgt && alt !== tgtUrl) pairs.push([alt, altTgt]);
-
-              let allPairsOk = true;
-              for (const [oldUrl, newUrl] of pairs) {
-                const phpResult = await executor.execute(
-                  `php ${shellQuote(srScript)}` +
-                    ` --mycnf=${shellQuote(srMycnf)}` +
-                    ` --db-name=${shellQuote(dbName)}` +
-                    ` --prefix=${shellQuote(p)}` +
-                    ` --search=${shellQuote(oldUrl)}` +
-                    ` --replace=${shellQuote(newUrl)}`,
-                  { timeout: 5 * 60_000 },
-                );
-                if (phpResult.code !== 0) {
-                  allPairsOk = false;
-                  await tracker.track({
-                    step: "PHP search-replace failed for pair, falling back to SQL",
-                    level: "warn",
-                    detail: `${oldUrl} → ${newUrl}: ${phpResult.stderr || phpResult.stdout}`,
-                  });
-                  break;
-                }
-              }
-
-              if (allPairsOk) {
-                await tracker.track({
-                  step: "URL search-replace complete (PHP, serialization-aware)",
-                  level: "info",
-                  detail: `${pairs.length} pair(s) — serialized data handled correctly`,
-                });
-              } else {
-                const srSqlFile = `/tmp/forge_sr_restore_${job.id}.sql`;
-                const statements: string[] = [];
-                for (const [oldRaw, newRaw] of pairs) {
-                  const o = escapeMysql(oldRaw);
-                  const n = escapeMysql(newRaw);
-                  statements.push(
-                    `UPDATE \`${p}options\` SET option_value = REPLACE(option_value, '${o}', '${n}')`,
-                    `UPDATE \`${p}posts\` SET post_content = REPLACE(post_content, '${o}', '${n}')`,
-                    `UPDATE \`${p}posts\` SET post_excerpt = REPLACE(post_excerpt, '${o}', '${n}')`,
-                    `UPDATE \`${p}postmeta\` SET meta_value = REPLACE(CAST(meta_value AS CHAR), '${o}', '${n}')`,
-                    `UPDATE \`${p}usermeta\` SET meta_value = REPLACE(meta_value, '${o}', '${n}')`,
-                    `UPDATE \`${p}comments\` SET comment_content = REPLACE(comment_content, '${o}', '${n}')`,
-                    `UPDATE \`${p}comments\` SET comment_author_url = REPLACE(comment_author_url, '${o}', '${n}')`,
-                    `UPDATE \`${p}commentmeta\` SET meta_value = REPLACE(meta_value, '${o}', '${n}')`,
-                    `UPDATE \`${p}termmeta\` SET meta_value = REPLACE(meta_value, '${o}', '${n}')`,
-                    `UPDATE \`${p}links\` SET link_url = REPLACE(link_url, '${o}', '${n}')`,
-                    `UPDATE \`${p}links\` SET link_image = REPLACE(link_image, '${o}', '${n}')`,
-                    `UPDATE \`${p}links\` SET link_rss = REPLACE(link_rss, '${o}', '${n}')`,
-                  );
-                }
-                await executor.pushFile({
-                  remotePath: srSqlFile,
-                  content: Buffer.from(statements.join(";\n") + ";"),
-                });
-                const srResult = await executor.execute(
-                  `mysql --defaults-extra-file=${shellQuote(srMycnf)} ${shellQuote(dbName)} < ${shellQuote(srSqlFile)}`,
-                );
-                await executor.execute(`rm -f ${shellQuote(srSqlFile)}`).catch(() => {});
-
-                if (srResult.code !== 0) {
-                  await tracker.track({
-                    step: "URL search-replace SQL failed",
-                    level: "warn",
-                    detail: srResult.stderr,
-                  });
-                } else {
-                  await tracker.track({
-                    step: "URL search-replace SQL completed",
-                    level: "info",
-                  });
-                }
-              }
-            } finally {
-              await cleanupRemoteMyCnf(executor, srMycnf);
-              await executor.execute(`rm -f ${srScript}`).catch(() => {});
-            }
-
-            // Determine content path (Standard wp-content vs Bedrock web/app)
-            const isBedrock = await executor
-              .execute(
-                `test -d ${shellQuote(env.root_path + "/web/app")} && echo ok || echo missing`,
-              )
-              .then((r) => r.stdout.trim() === "ok")
-              .catch(() => false);
-            const contentPath = isBedrock
-              ? `${env.root_path}/web/app`
-              : `${env.root_path}/wp-content`;
-
-            // Replace hardcoded URLs in content files (CSS, JS, PHP, etc.)
-            const sedEscape = (s: string) =>
-              s.replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
-            const filePairs: Array<[string, string]> = [[srcUrl, tgtUrl]];
-            const altSrc = flipProtocol(srcUrl);
-            const altTgt = flipProtocol(tgtUrl);
-            if (altSrc && altTgt && altSrc !== tgtUrl)
-              filePairs.push([altSrc, altTgt]);
-
-            for (const [oldUrl, newUrl] of filePairs) {
-              await executor
-                .execute(
-                  [
-                    `find ${shellQuote(contentPath)} -type f`,
-                    `\\( -name '*.css' -o -name '*.js' -o -name '*.json' -o -name '*.html'`,
-                    `-o -name '*.htm' -o -name '*.svg' -o -name '*.xml' -o -name '*.txt'`,
-                    `-o -name '*.php' \\)`,
-                    `-exec sed -i 's|${sedEscape(oldUrl)}|${sedEscape(newUrl)}|g' {} +`,
-                  ].join(" "),
-                )
-                .catch(() => {});
-            }
+            await replaceLiteralUrlInFiles(
+              executor,
+              contentPath,
+              srcUrl,
+              tgtUrl,
+              (entry) => tracker.track(entry),
+            );
 
             // Flush caches
             const wpCli = await WpCliBuilder.create(executor, env.root_path);
