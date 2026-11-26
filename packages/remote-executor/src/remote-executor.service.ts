@@ -7,6 +7,7 @@ import {
   type WriteStream as SftpWriteStream,
 } from "ssh2";
 import {
+  buildSshPoolKey,
   sshPoolManager,
   SshServerConfig,
   SshPoolManager,
@@ -147,7 +148,7 @@ export class RemoteExecutorService {
   private async withConnection<T>(
     fn: (client: Client) => Promise<T>,
   ): Promise<T> {
-    const serverKey = `${this.config.host}:${this.config.port}`;
+    const serverKey = buildSshPoolKey(this.config);
     const client = await this.pool.getConnection(serverKey, this.config);
     try {
       return await fn(client);
