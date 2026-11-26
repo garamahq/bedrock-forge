@@ -256,20 +256,24 @@ describe("BackupsService", () => {
   // ── remove ───────────────────────────────────────────────────────────────
 
   describe("remove", () => {
-    it("enqueues GDrive file deletion when backup has file_path", async () => {
+    it("marks backup as deleting and enqueues GDrive file deletion when backup has file_path", async () => {
       const backup = makeBackup({ file_path: "backups/mysite.tar.gz" });
       repo.findById.mockResolvedValue(backup);
-      repo.delete.mockResolvedValue(backup);
+      repo.updateStatus.mockResolvedValue({ ...backup, status: "deleting" });
       queue.add.mockResolvedValue({ id: "del-job" });
 
       await svc.remove(10);
 
+      expect(repo.updateStatus).toHaveBeenCalledWith(BigInt(10), {
+        status: "deleting",
+        error_message: null,
+      });
       expect(queue.add).toHaveBeenCalledWith(
         JOB_TYPES.BACKUP_DELETE_FILE,
-        { filePath: "backups/mysite.tar.gz" },
+        { filePath: "backups/mysite.tar.gz", backupId: 10 },
         expect.any(Object),
       );
-      expect(repo.delete).toHaveBeenCalledWith(BigInt(10));
+      expect(repo.delete).not.toHaveBeenCalled();
     });
 
     it("does not enqueue GDrive deletion when backup has no file_path", async () => {

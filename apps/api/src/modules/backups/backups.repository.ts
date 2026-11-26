@@ -7,7 +7,7 @@ export interface CreateBackupData {
   environment_id: bigint;
   job_execution_id?: bigint;
   type: "full" | "db_only" | "files_only" | "incremental";
-  status: "pending" | "running" | "completed" | "failed";
+  status: "pending" | "running" | "completed" | "failed" | "deleting";
   file_path?: string;
   size_bytes?: bigint;
   error_message?: string;
@@ -81,10 +81,10 @@ export class BackupsRepository {
   updateStatus(
     id: bigint,
     data: {
-      status?: "pending" | "running" | "completed" | "failed";
+      status?: "pending" | "running" | "completed" | "failed" | "deleting";
       file_path?: string;
       size_bytes?: bigint;
-      error_message?: string;
+      error_message?: string | null;
       started_at?: Date;
       completed_at?: Date;
     },
@@ -122,7 +122,7 @@ export class BackupsRepository {
     backupData: {
       environment_id: bigint;
       type: "full" | "db_only" | "files_only" | "incremental";
-      status: "pending" | "running" | "completed" | "failed";
+      status: "pending" | "running" | "completed" | "failed" | "deleting";
     },
   ) {
     return this.prisma.$transaction(async (tx) => {

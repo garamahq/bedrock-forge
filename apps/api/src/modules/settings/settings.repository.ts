@@ -21,6 +21,13 @@ export class SettingsRepository {
     });
   }
 
+  updateIfValueMatches(key: string, previousValue: string, nextValue: string) {
+    return this.prisma.appSetting.updateMany({
+      where: { key, value: previousValue },
+      data: { value: nextValue, updated_at: new Date() },
+    });
+  }
+
   delete(key: string) {
     return this.prisma.appSetting.delete({ where: { key } });
   }

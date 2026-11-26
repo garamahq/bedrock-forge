@@ -4,16 +4,48 @@ import { PrismaService } from "../prisma/prisma.service";
 import { EncryptionService } from "../encryption/encryption.service";
 import { execFile, spawn } from "child_process";
 import { promisify } from "util";
-import { writeFile, mkdir } from "fs/promises";
+import {
+  writeFile,
+  mkdir,
+  readFile,
+  stat,
+  rename,
+  rm,
+  chmod,
+  utimes,
+} from "fs/promises";
 import { dirname } from "path";
+import { randomUUID } from "crypto";
 import type { Readable } from "stream";
+import {
+  GdriveFilePath,
+  normalizeGoogleDriveFolderId,
+  parseGdriveFilePath,
+  reconcileRcloneConfigState,
+} from "@bedrock-forge/shared";
 
 const execFileAsync = promisify(execFile);
 
-/** Parsed components of a stored gdrive file_path. */
-export interface GdriveFilePath {
-  folderId: string;
-  filename: string;
+export type { GdriveFilePath };
+
+export interface RcloneDeleteResult {
+  deleted: boolean;
+  alreadyMissing: boolean;
+}
+
+function isRcloneNotFoundError(err: unknown): boolean {
+  const msg =
+    err instanceof Error
+      ? `${err.message} ${String((err as { stderr?: unknown }).stderr ?? "")}`
+      : String(err);
+  const code = (err as { code?: unknown })?.code;
+  return (
+    code === 3 ||
+    code === 4 ||
+    /object not found|directory not found|file not found|doesn't exist|no such file|404/i.test(
+      msg,
+    )
+  );
 }
 
 /**
@@ -28,6 +60,7 @@ export class RcloneService {
   private readonly logger = new Logger(RcloneService.name);
   private readonly configPath: string;
   private readonly remoteName: string;
+  private configMutex: Promise<unknown> = Promise.resolve();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -38,49 +71,174 @@ export class RcloneService {
     this.remoteName = this.config.get<string>("rclone.remoteName")!;
   }
 
-  /**
-   * Parse a stored gdrive file_path into its folder ID and filename.
-   * Format: gdrive:{folderId}/{filename}
-   * Throws if the format is unrecognised.
-   */
-  static parseFilePath(filePath: string): GdriveFilePath {
-    if (!filePath.startsWith("gdrive:")) {
-      throw new Error(`Invalid gdrive file_path format: ${filePath}`);
-    }
-    const rest = filePath.slice("gdrive:".length);
-    const slashIdx = rest.indexOf("/");
-    if (slashIdx < 1 || !rest.slice(slashIdx + 1)) {
-      throw new Error(
-        `Invalid gdrive file_path — expected gdrive:{folderId}/{filename}, got: ${filePath}`,
-      );
-    }
-    return {
-      folderId: rest.slice(0, slashIdx),
-      filename: rest.slice(slashIdx + 1),
-    };
+  private runWithConfigLock<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.configMutex.then(fn, fn);
+    this.configMutex = next.catch(() => undefined);
+    return next;
   }
 
   /**
-   * Fetch the rclone config from AppSetting, decrypt it, and write it to disk.
-   * Returns true if config was written, false if not configured.
+   * Parse a stored gdrive file_path into its canonical folder ID and filename.
+   * Format: gdrive:{folderId}/{filename}
+   * Recovers legacy stored Drive folder URL prefixes via `parseGdriveFilePath`.
+   */
+  static parseFilePath(filePath: string): GdriveFilePath {
+    return parseGdriveFilePath(filePath);
+  }
+
+  private async atomicWriteConfig(content: string): Promise<void> {
+    await mkdir(dirname(this.configPath), { recursive: true });
+    const tmpPath = `${this.configPath}.tmp.${randomUUID()}`;
+    try {
+      await writeFile(tmpPath, content, { mode: 0o600 });
+      await chmod(tmpPath, 0o600);
+      await rename(tmpPath, this.configPath);
+    } catch (err) {
+      await rm(tmpPath, { force: true }).catch(() => undefined);
+      throw err;
+    }
+  }
+
+  /**
+   * Persist locally refreshed rclone config back to PostgreSQL when disk mtime
+   * is newer than (or equal to) the stored DB record without clobbering an
+   * intentional relink stored in PostgreSQL. Never logs config or tokens.
+   */
+  async syncRefreshedConfig(): Promise<void> {
+    return this.runWithConfigLock(async () => {
+      let diskContent: string;
+      let diskMtimeMs: number;
+      try {
+        const [st, content] = await Promise.all([
+          stat(this.configPath),
+          readFile(this.configPath, "utf8"),
+        ]);
+        diskMtimeMs = st.mtimeMs;
+        diskContent = content;
+      } catch {
+        return;
+      }
+
+      const setting = await this.prisma.appSetting.findUnique({
+        where: { key: "rclone_gdrive_config" },
+      });
+      if (!setting) {
+        await rm(this.configPath, { force: true }).catch(() => undefined);
+        return;
+      }
+
+      let dbContent: string;
+      try {
+        dbContent = this.enc.decrypt(setting.value);
+      } catch {
+        return;
+      }
+
+      const decision = reconcileRcloneConfigState({
+        dbContent,
+        dbUpdatedAt: setting.updated_at,
+        diskContent,
+        diskMtimeMs,
+        remoteName: this.remoteName,
+      });
+
+      if (decision === "keep_disk_and_sync_db") {
+        await chmod(this.configPath, 0o600).catch(() => undefined);
+        const encrypted = this.enc.encrypt(diskContent);
+        const res = await this.prisma.appSetting.updateMany({
+          where: { key: "rclone_gdrive_config", value: setting.value },
+          data: { value: encrypted, updated_at: new Date() },
+        });
+        if (res.count > 0) {
+          const now = new Date();
+          await utimes(this.configPath, now, now).catch(() => undefined);
+        }
+      }
+    });
+  }
+
+  /**
+   * Reconcile and ensure rclone config on disk from AppSetting.
+   * - Removes any stale local config if unconfigured or undecryptable, returning false.
+   * - Preserves locally refreshed OAuth tokens on disk and syncs them back to DB.
+   * - Overwrites disk when DB holds a newer intentional relink/rotation.
    */
   async writeConfig(): Promise<boolean> {
-    const setting = await this.prisma.appSetting.findUnique({
-      where: { key: "rclone_gdrive_config" },
+    return this.runWithConfigLock(async () => {
+      const setting = await this.prisma.appSetting.findUnique({
+        where: { key: "rclone_gdrive_config" },
+      });
+      if (!setting) {
+        await rm(this.configPath, { force: true }).catch(() => undefined);
+        return false;
+      }
+
+      let decrypted: string;
+      try {
+        decrypted = this.enc.decrypt(setting.value);
+      } catch (err) {
+        await rm(this.configPath, { force: true }).catch(() => undefined);
+        this.logger.error(
+          `Failed to decrypt rclone config: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return false;
+      }
+
+      try {
+        let diskContent: string | null = null;
+        let diskMtimeMs = 0;
+        try {
+          const [st, content] = await Promise.all([
+            stat(this.configPath),
+            readFile(this.configPath, "utf8"),
+          ]);
+          diskContent = content;
+          diskMtimeMs = st.mtimeMs;
+        } catch {
+          diskContent = null;
+        }
+
+        if (diskContent !== null) {
+          const decision = reconcileRcloneConfigState({
+            dbContent: decrypted,
+            dbUpdatedAt: setting.updated_at,
+            diskContent,
+            diskMtimeMs,
+            remoteName: this.remoteName,
+          });
+
+          if (decision === "in_sync") {
+            await chmod(this.configPath, 0o600).catch(() => undefined);
+            return true;
+          }
+
+          if (decision === "keep_disk_and_sync_db") {
+            await chmod(this.configPath, 0o600).catch(() => undefined);
+            const encrypted = this.enc.encrypt(diskContent);
+            const res = await this.prisma.appSetting.updateMany({
+              where: { key: "rclone_gdrive_config", value: setting.value },
+              data: { value: encrypted, updated_at: new Date() },
+            });
+            if (res.count > 0) {
+              const now = new Date();
+              await utimes(this.configPath, now, now).catch(() => undefined);
+            }
+            this.logger.log("rclone refreshed OAuth token preserved and synced");
+            return true;
+          }
+        }
+
+        await this.atomicWriteConfig(decrypted);
+        this.logger.log("rclone config written to disk");
+        return true;
+      } catch (err) {
+        await rm(this.configPath, { force: true }).catch(() => undefined);
+        this.logger.error(
+          `Failed to write rclone config: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return false;
+      }
     });
-    if (!setting) return false;
-    try {
-      const decrypted = this.enc.decrypt(setting.value);
-      await mkdir(dirname(this.configPath), { recursive: true });
-      await writeFile(this.configPath, decrypted, { mode: 0o600 });
-      this.logger.log("rclone config written to disk");
-      return true;
-    } catch (err) {
-      this.logger.error(
-        `Failed to write rclone config: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      return false;
-    }
   }
 
   /**
@@ -97,6 +255,7 @@ export class RcloneService {
         "--max-depth",
         "1",
       ]);
+      await this.syncRefreshedConfig().catch(() => undefined);
       return true;
     } catch {
       return false;
@@ -105,8 +264,7 @@ export class RcloneService {
 
   /**
    * Upload a local file directly into a Google Drive folder.
-   * Uses rclone copyto with --drive-root-folder-id to target the folder by ID
-   * and rename the file to the given filename in one operation.
+   * Normalizes supported Drive URLs or canonical folder IDs before invoking rclone.
    * Returns the stored file_path: gdrive:{folderId}/{filename}
    */
   async upload(
@@ -114,74 +272,99 @@ export class RcloneService {
     folderId: string,
     filename: string,
   ): Promise<string> {
+    const normalizedFolderId = normalizeGoogleDriveFolderId(folderId);
     this.logger.log(
-      `Uploading ${localFilePath} → gdrive:${folderId}/${filename}`,
+      `Uploading ${localFilePath} → gdrive:${normalizedFolderId}/${filename}`,
     );
-    await execFileAsync(
-      "rclone",
-      [
-        "copyto",
-        "--config",
-        this.configPath,
-        "--drive-root-folder-id",
-        folderId,
-        localFilePath,
-        `${this.remoteName}:${filename}`,
-      ],
-      { timeout: 2 * 60 * 60 * 1_000 }, // 2-hour max for large file uploads
-    );
-    return `gdrive:${folderId}/${filename}`;
+    try {
+      await execFileAsync(
+        "rclone",
+        [
+          "copyto",
+          "--config",
+          this.configPath,
+          "--drive-root-folder-id",
+          normalizedFolderId,
+          localFilePath,
+          `${this.remoteName}:${filename}`,
+        ],
+        { timeout: 2 * 60 * 60 * 1_000 }, // 2-hour max for large file uploads
+      );
+      return `gdrive:${normalizedFolderId}/${filename}`;
+    } finally {
+      await this.syncRefreshedConfig().catch(() => undefined);
+    }
   }
 
   /**
    * Download a file from Google Drive to a local directory.
-   * Parses the stored file_path (gdrive:{folderId}/{filename}) and uses
-   * --drive-root-folder-id to target the correct folder.
    */
   async download(filePath: string, localDir: string): Promise<void> {
     const { folderId, filename } = RcloneService.parseFilePath(filePath);
     this.logger.log(`Downloading gdrive:${folderId}/${filename} → ${localDir}`);
     await mkdir(localDir, { recursive: true });
-    await execFileAsync(
-      "rclone",
-      [
-        "copy",
+    try {
+      await execFileAsync(
+        "rclone",
+        [
+          "copy",
+          "--config",
+          this.configPath,
+          "--drive-root-folder-id",
+          folderId,
+          `${this.remoteName}:${filename}`,
+          localDir,
+        ],
+        { timeout: 2 * 60 * 60 * 1_000 }, // 2-hour max for large file downloads
+      );
+    } finally {
+      await this.syncRefreshedConfig().catch(() => undefined);
+    }
+  }
+
+  /**
+   * Delete a single file from Google Drive.
+   * Distinguishes verified missing objects (via `rclone lsf`) from transient storage/auth errors.
+   */
+  async deleteFile(filePath: string): Promise<RcloneDeleteResult> {
+    const { folderId, filename } = RcloneService.parseFilePath(filePath);
+    this.logger.log(`Deleting gdrive:${folderId}/${filename}`);
+    try {
+      await execFileAsync("rclone", [
+        "deletefile",
         "--config",
         this.configPath,
         "--drive-root-folder-id",
         folderId,
         `${this.remoteName}:${filename}`,
-        localDir,
-      ],
-      { timeout: 2 * 60 * 60 * 1_000 }, // 2-hour max for large file downloads
-    );
-  }
-
-  /**
-   * Delete a single file from Google Drive.
-   * Parses the stored file_path (gdrive:{folderId}/{filename}) and uses
-   * --drive-root-folder-id to target the correct folder.
-   */
-  async deleteFile(filePath: string): Promise<void> {
-    const { folderId, filename } = RcloneService.parseFilePath(filePath);
-    this.logger.log(`Deleting gdrive:${folderId}/${filename}`);
-    await execFileAsync("rclone", [
-      "deletefile",
-      "--config",
-      this.configPath,
-      "--drive-root-folder-id",
-      folderId,
-      `${this.remoteName}:${filename}`,
-    ]);
+      ]);
+      return { deleted: true, alreadyMissing: false };
+    } catch (err) {
+      if (isRcloneNotFoundError(err)) {
+        try {
+          const { stdout } = await execFileAsync("rclone", [
+            "lsf",
+            "--config",
+            this.configPath,
+            "--drive-root-folder-id",
+            folderId,
+            `${this.remoteName}:${filename}`,
+          ]);
+          if (String(stdout ?? "").trim() === "") {
+            return { deleted: false, alreadyMissing: true };
+          }
+        } catch {
+          // If verification itself fails (e.g. auth/network issue), surface original failure
+        }
+      }
+      throw err;
+    } finally {
+      await this.syncRefreshedConfig().catch(() => undefined);
+    }
   }
 
   /**
    * Stream a file from Google Drive directly as a Readable.
-   * Spawns `rclone cat` and returns the child process stdout.
-   * Callers must handle child.stderr and child process exit for error checking.
-   *
-   * Use this for zero-copy restore: pipe the returned stream directly
-   * into an SFTP write stream without writing to local disk.
    */
   downloadStream(filePath: string): {
     child: ReturnType<typeof spawn>;
@@ -197,6 +380,9 @@ export class RcloneService {
       folderId,
       `${this.remoteName}:${filename}`,
     ]);
+    child.once("close", () => {
+      void this.syncRefreshedConfig().catch(() => undefined);
+    });
     return { child, stream: child.stdout as Readable };
   }
 
@@ -204,6 +390,7 @@ export class RcloneService {
    * Get a shareable Google Drive web URL for a file using `rclone link`.
    */
   async getShareLink(folderId: string, filename: string): Promise<string | null> {
+    const normalizedFolderId = normalizeGoogleDriveFolderId(folderId);
     try {
       const { stdout } = await execFileAsync(
         "rclone",
@@ -212,7 +399,7 @@ export class RcloneService {
           "--config",
           this.configPath,
           "--drive-root-folder-id",
-          folderId,
+          normalizedFolderId,
           `${this.remoteName}:${filename}`,
         ],
         { timeout: 30_000 },
@@ -224,6 +411,8 @@ export class RcloneService {
         `Failed to generate Google Drive share link for ${filename}: ${err instanceof Error ? err.message : String(err)}`,
       );
       return null;
+    } finally {
+      await this.syncRefreshedConfig().catch(() => undefined);
     }
   }
 

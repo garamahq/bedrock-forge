@@ -6,7 +6,12 @@ import {
 import { InjectQueue } from "@nestjs/bullmq";
 import { Queue } from "bullmq";
 import { randomUUID } from "crypto";
-import { QUEUES, JOB_TYPES, DEFAULT_JOB_OPTIONS } from "@bedrock-forge/shared";
+import {
+  QUEUES,
+  JOB_TYPES,
+  DEFAULT_JOB_OPTIONS,
+  normalizeGoogleDriveFolderId,
+} from "@bedrock-forge/shared";
 import { SystemBackupsRepository } from "./system-backups.repository";
 import { SettingsService } from "../settings/settings.service";
 import { normalizePage, normalizePageSize } from "../../common/pagination";
@@ -36,10 +41,20 @@ export class SystemBackupsService {
     const folderResult = await this.settings.get(
       "forge_system_backup_folder_id",
     );
-    const folderId = folderResult?.value;
-    if (!folderId) {
+    const rawFolderId = folderResult?.value;
+    if (!rawFolderId) {
       throw new BadRequestException(
         "System backup Google Drive folder ID is not configured. Set it in Settings → System Backup.",
+      );
+    }
+    let folderId: string;
+    try {
+      folderId = normalizeGoogleDriveFolderId(rawFolderId);
+    } catch (err) {
+      throw new BadRequestException(
+        err instanceof Error
+          ? err.message
+          : "System backup Google Drive folder ID is invalid.",
       );
     }
 

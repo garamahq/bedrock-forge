@@ -12,9 +12,11 @@ import {
   IsNotEmpty,
   IsEmail,
   MinLength,
+  ValidateBy,
 } from "class-validator";
 import { PartialType } from "@nestjs/mapped-types";
 import { Type } from "class-transformer";
+import { isValidGoogleDriveFolderId } from "@bedrock-forge/shared";
 
 const ENVIRONMENT_TYPES = ["production", "staging", "development"] as const;
 export type EnvironmentType = (typeof ENVIRONMENT_TYPES)[number];
@@ -82,8 +84,20 @@ export class CreateEnvironmentDto {
       "backup_path must be an absolute path without traversal and may only contain letters, numbers, slashes, underscores, hyphens, and dots",
   })
   backup_path?: string;
-  /** Google Drive folder ID for backup destination override per environment */
-  @IsOptional() @IsString() @MaxLength(500) google_drive_folder_id?: string;
+  /** Google Drive folder ID (or folder URL) for backup destination override per environment */
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  @ValidateBy({
+    name: "isGoogleDriveFolderId",
+    validator: {
+      validate: (value: unknown) =>
+        value === "" || isValidGoogleDriveFolderId(value),
+      defaultMessage: () =>
+        "google_drive_folder_id must be a canonical Google Drive folder ID or drive.google.com folder URL",
+    },
+  })
+  google_drive_folder_id?: string;
   /** DB credentials extracted from the server scan — stored encrypted at creation time */
   @IsOptional()
   @ValidateNested()

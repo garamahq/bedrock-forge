@@ -5,6 +5,8 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useSystemBackups, useSystemBackupFolder } from "../hooks";
 import { SystemBackupItem } from "../types";
+import { triggerAuthenticatedBackupDownload } from "@/lib/download";
+import { toast } from "@/hooks/use-toast";
 
 export function BackupHistoryList() {
   const qc = useQueryClient();
@@ -93,12 +95,21 @@ export function BackupHistoryList() {
                   size="icon"
                   className="h-7 w-7"
                   title="Download backup (stream from Drive)"
-                  onClick={() =>
-                    window.open(
+                  onClick={() => {
+                    void triggerAuthenticatedBackupDownload(
+                      `/system-backups/${b.id}/download-ticket`,
                       `/api/system-backups/${b.id}/download`,
-                      "_blank",
-                    )
-                  }
+                    ).catch((err) => {
+                      toast({
+                        title: "Download failed",
+                        description:
+                          err instanceof Error
+                            ? err.message
+                            : "Could not start system backup download",
+                        variant: "destructive",
+                      });
+                    });
+                  }}
                 >
                   <Download className="h-3.5 w-3.5" />
                 </Button>

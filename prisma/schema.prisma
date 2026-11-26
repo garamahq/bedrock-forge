@@ -358,6 +358,7 @@ enum BackupStatus {
   running
   completed
   failed
+  deleting
 }
 
 model PluginScan {

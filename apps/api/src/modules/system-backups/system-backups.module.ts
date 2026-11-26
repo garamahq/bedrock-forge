@@ -6,11 +6,13 @@ import { SystemBackupsService } from "./system-backups.service";
 import { SystemBackupsRepository } from "./system-backups.repository";
 import { SystemBackupScheduleService } from "./system-backup-schedule.service";
 import { SettingsModule } from "../settings/settings.module";
+import { DownloadTicketModule } from "../../common/auth/download-ticket.module";
 
 @Module({
   imports: [
     BullModule.registerQueue({ name: QUEUES.SYSTEM_BACKUPS }),
     SettingsModule,
+    DownloadTicketModule,
   ],
   controllers: [SystemBackupsController],
   providers: [

@@ -31,7 +31,12 @@ import { MonitorsService } from "../monitors/monitors.service";
 import { DomainsService } from "../domains/domains.service";
 import { InjectQueue } from "@nestjs/bullmq";
 import { Queue } from "bullmq";
-import { QUEUES, JOB_TYPES, DEFAULT_JOB_OPTIONS } from "@bedrock-forge/shared";
+import {
+  QUEUES,
+  JOB_TYPES,
+  DEFAULT_JOB_OPTIONS,
+  normalizeGoogleDriveFolderId,
+} from "@bedrock-forge/shared";
 import { BackupSchedulesService } from "../backups/backup-schedules.service";
 import { PluginUpdateSchedulesService } from "../plugin-update-schedules/plugin-update-schedules.service";
 import { randomBytes, createHmac, timingSafeEqual } from "crypto";
@@ -123,7 +128,26 @@ export class EnvironmentsService {
       }
     }
 
-    const env = await this.repo.create(BigInt(projectId), dto);
+    let normalizedDto = dto;
+    if (dto.google_drive_folder_id !== undefined) {
+      const trimmed = dto.google_drive_folder_id.trim();
+      if (!trimmed) {
+        normalizedDto = { ...dto, google_drive_folder_id: undefined };
+      } else {
+        try {
+          normalizedDto = {
+            ...dto,
+            google_drive_folder_id: normalizeGoogleDriveFolderId(trimmed),
+          };
+        } catch (err) {
+          throw new BadRequestException(
+            err instanceof Error ? err.message : "Invalid Google Drive folder ID",
+          );
+        }
+      }
+    }
+
+    const env = await this.repo.create(BigInt(projectId), normalizedDto);
     // Store DB credentials extracted during server scan (if provided)
     if (dto.db_credentials) {
       try {
@@ -261,7 +285,28 @@ export class EnvironmentsService {
 
   async update(id: number, dto: UpdateEnvironmentDto) {
     await this.findOne(id);
-    return this.repo.update(BigInt(id), dto);
+    let normalizedDto = dto;
+    if (dto.google_drive_folder_id !== undefined) {
+      const trimmed = dto.google_drive_folder_id.trim();
+      if (!trimmed) {
+        normalizedDto = {
+          ...dto,
+          google_drive_folder_id: null as unknown as string,
+        };
+      } else {
+        try {
+          normalizedDto = {
+            ...dto,
+            google_drive_folder_id: normalizeGoogleDriveFolderId(trimmed),
+          };
+        } catch (err) {
+          throw new BadRequestException(
+            err instanceof Error ? err.message : "Invalid Google Drive folder ID",
+          );
+        }
+      }
+    }
+    return this.repo.update(BigInt(id), normalizedDto);
   }
 
   async remove(id: number) {

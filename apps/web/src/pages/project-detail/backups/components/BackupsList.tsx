@@ -15,6 +15,8 @@ import {
 } from "@/components/ui/execution-log-panel";
 import { Backup, Environment } from "../types";
 import { BACKUP_TYPE_LABELS, STATUS_VARIANT, formatBytes } from "../utils";
+import { triggerAuthenticatedBackupDownload } from "@/lib/download";
+import { toast } from "@/hooks/use-toast";
 
 export function BackupsList({
   data,
@@ -135,12 +137,21 @@ export function BackupsList({
                           size="icon"
                           className="h-7 w-7"
                           title="Download backup (stream from Drive)"
-                          onClick={() =>
-                            window.open(
+                          onClick={() => {
+                            void triggerAuthenticatedBackupDownload(
+                              `/backups/${b.id}/download-ticket`,
                               `/api/backups/${b.id}/download`,
-                              "_blank",
-                            )
-                          }
+                            ).catch((err) => {
+                              toast({
+                                title: "Download failed",
+                                description:
+                                  err instanceof Error
+                                    ? err.message
+                                    : "Could not start backup download",
+                                variant: "destructive",
+                              });
+                            });
+                          }}
                         >
                           <Download className="h-3.5 w-3.5" />
                         </Button>
