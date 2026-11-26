@@ -281,6 +281,155 @@ export async function fixCyberPanelOwnership(
   return { owner, webGroup };
 }
 
+export type PhpExtensionRequirement = "json" | "mysqli";
+
+/**
+ * Discover OpenLiteSpeed/CyberPanel lsphp candidates in preference order:
+ * 1. Site's vhost.conf configured lsphp version (prefer CLI `bin/php` over `bin/lsphp`)
+ * 2. Highest installed `/usr/local/lsws/lsphpXX/bin/php`
+ */
+async function discoverSiteLsphpCandidates(
+  executor: RemoteExecutorService,
+  wpPath: string,
+): Promise<string[]> {
+  const candidates: string[] = [];
+
+  try {
+    let domain: string | null = null;
+    const match = wpPath.match(/\/home\/([^\/]+)\/public_html/);
+    if (match) {
+      domain = match[1];
+    } else {
+      const parts = wpPath.split("/");
+      const idx = parts.indexOf("public_html");
+      if (idx > 0) {
+        domain = parts[idx - 1];
+      }
+    }
+
+    if (domain) {
+      const vhostConfigPath = `/usr/local/lsws/conf/vhosts/${domain}/vhost.conf`;
+      const vhostResult = await executor.execute(
+        `grep -oE '/usr/local/lsws/lsphp[0-9]+/bin/(ls)?php' ${shellQuote(vhostConfigPath)} 2>/dev/null | head -1`,
+      );
+      const vhostPhp = vhostResult.stdout.trim();
+      if (
+        vhostPhp &&
+        /^\/usr\/local\/lsws\/lsphp\d+\/bin\/(ls)?php$/.test(vhostPhp)
+      ) {
+        const cliPhp = vhostPhp.replace(/\/bin\/lsphp$/, "/bin/php");
+        const checkResult = await executor.execute(
+          `[ -f ${shellQuote(cliPhp)} ] && echo yes || echo no`,
+        );
+        if (checkResult.stdout.trim() === "yes") {
+          candidates.push(cliPhp);
+        }
+        if (vhostPhp !== cliPhp) {
+          const checkOrigResult = await executor.execute(
+            `[ -f ${shellQuote(vhostPhp)} ] && echo yes || echo no`,
+          );
+          if (checkOrigResult.stdout.trim() === "yes") {
+            candidates.push(vhostPhp);
+          }
+        }
+      }
+    }
+  } catch {
+    // Ignore and fallback
+  }
+
+  try {
+    const lsphpResult = await executor.execute(
+      `ls /usr/local/lsws/lsphp*/bin/php 2>/dev/null | sort -V | tail -1`,
+    );
+    const bin = lsphpResult.stdout.trim();
+    if (
+      bin &&
+      /^\/usr\/local\/lsws\/lsphp\d+\/bin\/php$/.test(bin) &&
+      !candidates.includes(bin)
+    ) {
+      candidates.push(bin);
+    }
+  } catch {
+    // lsphp not found — fall through
+  }
+
+  return candidates;
+}
+
+/**
+ * Resolve a verified PHP CLI interpreter on the remote host that satisfies
+ * PHP >= 7.0 and all requested extensions (e.g. `json`, `mysqli`/`pdo_mysql`).
+ * Prefers the site's configured OLS/CyberPanel lsphp binary before system PHP.
+ */
+export async function resolveSitePhpBinary(
+  executor: RemoteExecutorService,
+  docroot: string,
+  requiredExtensions: PhpExtensionRequirement[] = ["json"],
+): Promise<string> {
+  const candidates = await discoverSiteLsphpCandidates(executor, docroot);
+
+  try {
+    const cmdWhich = await executor.execute("command -v php 2>/dev/null");
+    const sysPhp = cmdWhich.stdout.trim();
+    if (
+      sysPhp &&
+      /^\/[a-zA-Z0-9_.\/-]+$/.test(sysPhp) &&
+      !candidates.includes(sysPhp)
+    ) {
+      const check = await executor.execute(
+        `[ -x ${shellQuote(sysPhp)} ] && echo yes || echo no`,
+      );
+      if (check.stdout.trim() === "yes") {
+        candidates.push(sysPhp);
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  for (const fallback of ["/usr/bin/php", "/usr/local/bin/php"]) {
+    if (!candidates.includes(fallback)) {
+      try {
+        const check = await executor.execute(
+          `[ -x ${shellQuote(fallback)} ] && echo yes || echo no`,
+        );
+        if (check.stdout.trim() === "yes") {
+          candidates.push(fallback);
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  const checks = ["PHP_VERSION_ID >= 70000"];
+  if (requiredExtensions.includes("json")) {
+    checks.push("extension_loaded('json')");
+  }
+  if (requiredExtensions.includes("mysqli")) {
+    checks.push("(extension_loaded('mysqli') || extension_loaded('pdo_mysql'))");
+  }
+  const probeExpr = `exit((${checks.join(" && ")}) ? 0 : 1);`;
+
+  for (const bin of candidates) {
+    try {
+      const res = await executor.execute(
+        `${shellQuote(bin)} -r ${shellQuote(probeExpr)} >/dev/null 2>&1`,
+      );
+      if (res.code === 0) {
+        return bin;
+      }
+    } catch {
+      // probe next candidate
+    }
+  }
+
+  throw new Error(
+    `No supported PHP interpreter found for ${docroot} (required PHP >= 7.0 with extensions: ${requiredExtensions.join(", ")})`,
+  );
+}
+
 /**
  * Detect the owner of a WordPress installation directory and return the
  * appropriate WP-CLI invocation prefix.
@@ -336,73 +485,15 @@ export async function buildWpCliPrefix(
   } catch {
     // detection failed — proceed with --allow-root
   }
+
   // Detect LiteSpeed PHP binary and WP-CLI path for direct phar invocation.
   // On CyberPanel, system PHP (/usr/bin/php) often lacks mysqli; lsphpXX does not.
   // When wp is installed as a PHP Phar (common on CyberPanel), WP_CLI_PHP env var
   // is silently ignored because the Phar shebang (#!/usr/bin/env php) is hardcoded.
   // The only reliable fix is to call:  lsphpXX /path/to/wp.phar args
-  let lsphpBin: string | null = null;
+  const lsphpCandidates = await discoverSiteLsphpCandidates(executor, wpPath);
+  const lsphpBin: string | null = lsphpCandidates[0] ?? null;
   let wpBin: string | null = null;
-
-  // 1. Try to extract domain from wpPath and parse vhost.conf config
-  try {
-    let domain: string | null = null;
-    const match = wpPath.match(/\/home\/([^\/]+)\/public_html/);
-    if (match) {
-      domain = match[1];
-    } else {
-      const parts = wpPath.split("/");
-      const idx = parts.indexOf("public_html");
-      if (idx > 0) {
-        domain = parts[idx - 1];
-      }
-    }
-
-    if (domain) {
-      const vhostConfigPath = `/usr/local/lsws/conf/vhosts/${domain}/vhost.conf`;
-      const vhostResult = await executor.execute(
-        `grep -oE '/usr/local/lsws/lsphp[0-9]+/bin/(ls)?php' ${shellQuote(vhostConfigPath)} 2>/dev/null | head -1`,
-      );
-      const vhostPhp = vhostResult.stdout.trim();
-      if (
-        vhostPhp &&
-        /^\/usr\/local\/lsws\/lsphp\d+\/bin\/(ls)?php$/.test(vhostPhp)
-      ) {
-        const cliPhp = vhostPhp.replace(/\/bin\/lsphp$/, "/bin/php");
-        const checkResult = await executor.execute(
-          `[ -f ${shellQuote(cliPhp)} ] && echo yes || echo no`,
-        );
-        if (checkResult.stdout.trim() === "yes") {
-          lsphpBin = cliPhp;
-        } else {
-          const checkOrigResult = await executor.execute(
-            `[ -f ${shellQuote(vhostPhp)} ] && echo yes || echo no`,
-          );
-          if (checkOrigResult.stdout.trim() === "yes") {
-            lsphpBin = vhostPhp;
-          }
-        }
-      }
-    }
-  } catch {
-    // Ignore and fallback
-  }
-
-  // 2. Fallback: Find the highest version of OpenLiteSpeed PHP
-  if (!lsphpBin) {
-    try {
-      const lsphpResult = await executor.execute(
-        `ls /usr/local/lsws/lsphp*/bin/php 2>/dev/null | sort -V | tail -1`,
-      );
-      const bin = lsphpResult.stdout.trim();
-      // Strict path validation — only accept canonical CyberPanel/OpenLiteSpeed paths
-      if (bin && /^\/usr\/local\/lsws\/lsphp\d+\/bin\/php$/.test(bin)) {
-        lsphpBin = bin;
-      }
-    } catch {
-      // lsphp not found — proceed without PHP override
-    }
-  }
 
   try {
     const wpResult = await executor.execute(`which wp 2>/dev/null`);

@@ -127,6 +127,7 @@ export class RemoteExecutorService {
     readable: Readable,
     timeoutMs: number = SFTP_STALL_TIMEOUT_MS,
     onProgress?: (bytes: number) => void,
+    fileMode: number = 0o644,
   ): Promise<void> {
     return this.withConnection((client) =>
       this.sftpPutFromStream(
@@ -135,6 +136,7 @@ export class RemoteExecutorService {
         readable,
         timeoutMs,
         onProgress,
+        fileMode,
       ),
     );
   }
@@ -454,6 +456,7 @@ export class RemoteExecutorService {
     readable: Readable,
     timeoutMs: number,
     onProgress?: (bytes: number) => void,
+    fileMode: number = 0o644,
   ): Promise<void> {
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -501,7 +504,7 @@ export class RemoteExecutorService {
         sftpRef = sftp;
 
         const writeStream = sftp.createWriteStream(remotePath, {
-          mode: 0o644,
+          mode: fileMode,
         });
         writeStreamRef = writeStream;
         let totalBytes = 0;

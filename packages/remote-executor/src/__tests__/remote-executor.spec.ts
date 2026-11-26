@@ -307,5 +307,43 @@ describe("SSH Execution & Pooling Integration", () => {
       expect(result.toString()).toBe("chunk");
       expect(mockSftp.end).toHaveBeenCalled();
     });
+
+    it("applies custom fileMode and defaults to 0o644 in pushFileFromStream (#46)", async () => {
+      const { PassThrough } = require("stream");
+      const mockWriteStream = Object.assign(new EventEmitter(), {
+        destroy: jest.fn(),
+        end: jest.fn(),
+        write: jest.fn(),
+        once: function (ev: string, fn: (...args: any[]) => void) {
+          return EventEmitter.prototype.once.call(this, ev, fn);
+        },
+      });
+      const mockSftp = {
+        createWriteStream: jest.fn().mockReturnValue(mockWriteStream),
+        end: jest.fn(),
+      };
+      const client = await pool.getConnection("127.0.0.1:22", config);
+      const mockClientInstance = mockClients.find((c) => c === (client as any))!;
+      mockClientInstance.sftp = jest.fn().mockImplementation((cb: (err: any, sftp: any) => void) => {
+        cb(null, mockSftp);
+      });
+      pool.releaseConnection("127.0.0.1:22", client);
+
+      const stream1 = new PassThrough();
+      stream1.pipe = jest.fn(() => {
+        process.nextTick(() => mockWriteStream.emit("close"));
+        return mockWriteStream as any;
+      });
+      await executor.pushFileFromStream("/tmp/secret.tar.gz", stream1, 1000, undefined, 0o600);
+      expect(mockSftp.createWriteStream).toHaveBeenCalledWith("/tmp/secret.tar.gz", { mode: 0o600 });
+
+      const stream2 = new PassThrough();
+      stream2.pipe = jest.fn(() => {
+        process.nextTick(() => mockWriteStream.emit("close"));
+        return mockWriteStream as any;
+      });
+      await executor.pushFileFromStream("/tmp/default.tar.gz", stream2, 1000);
+      expect(mockSftp.createWriteStream).toHaveBeenCalledWith("/tmp/default.tar.gz", { mode: 0o644 });
+    });
   });
 });

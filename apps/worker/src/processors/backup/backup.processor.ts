@@ -2,6 +2,7 @@ import { Processor, WorkerHost, InjectQueue } from "@nestjs/bullmq";
 import { Logger } from "@nestjs/common";
 import { Job, Queue } from "bullmq";
 import { mkdir, rm, readFile, stat, statfs } from "fs/promises";
+import { randomBytes } from "crypto";
 import { StepTracker } from "../../services/step-tracker";
 import { join, dirname } from "path";
 import { PrismaService } from "../../prisma/prisma.service";
@@ -28,18 +29,125 @@ import {
   cleanupRemoteMyCnf,
   flipProtocol,
   WpCliBuilder,
+  resolveSitePhpBinary,
 } from "../../utils/processor-utils";
 
 const STAGING_DIR = "/tmp/forge-backups";
 
 /** Lower-case, replace non-alphanumeric runs with hyphens, strip leading/trailing hyphens. */
-function slugify(s: string): string {
+function slugify(s: string, fallback = "env"): string {
   return (
     s
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "") || "env"
+      .replace(/^-+|-+$/g, "") || fallback
   );
+}
+
+function sanitizeJobToken(rawId: string | number | undefined): string {
+  const token = String(rawId ?? randomBytes(4).toString("hex")).replace(
+    /[^a-zA-Z0-9_-]/g,
+    "",
+  );
+  return token || randomBytes(4).toString("hex");
+}
+
+function resolveSafeRemoteStagingDir(
+  candidate: string | null | undefined,
+  docroot: string,
+): string | null {
+  if (!candidate) return null;
+  const trimmed = candidate.trim().replace(/\/+$/, "");
+  const cleanRoot = docroot.trim().replace(/\/+$/, "");
+  if (!trimmed.startsWith("/") || trimmed.length < 2) return null;
+  if (trimmed === cleanRoot || trimmed.startsWith(`${cleanRoot}/`)) {
+    return null;
+  }
+  return trimmed;
+}
+
+interface BackupScriptOutput {
+  size: number;
+  filename: string;
+  archive_verified?: boolean;
+  consistent?: boolean;
+}
+
+function parseJsonObjectFromOutput<T extends Record<string, unknown>>(
+  rawStdout: string,
+): T {
+  const trimmed = rawStdout.trim();
+  if (!trimmed) {
+    throw new Error("Script produced empty stdout");
+  }
+  try {
+    return JSON.parse(trimmed) as T;
+  } catch {
+    const lines = trimmed
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (lines[i].startsWith("{") && lines[i].endsWith("}")) {
+        return JSON.parse(lines[i]) as T;
+      }
+    }
+    throw new Error(`No valid JSON payload found in stdout: ${trimmed.slice(0, 200)}`);
+  }
+}
+
+function parseBackupScriptOutput(rawStdout: string): BackupScriptOutput {
+  const parsed = parseJsonObjectFromOutput<Partial<BackupScriptOutput>>(rawStdout);
+  if (
+    typeof parsed.filename !== "string" ||
+    parsed.filename.trim() === "" ||
+    typeof parsed.size !== "number" ||
+    !Number.isFinite(parsed.size) ||
+    parsed.size <= 0
+  ) {
+    throw new Error(
+      `Invalid backup script JSON payload: ${JSON.stringify(parsed)}`,
+    );
+  }
+  if (parsed.archive_verified === false) {
+    throw new Error("Remote backup archive failed structural verification");
+  }
+  return {
+    filename: parsed.filename,
+    size: parsed.size,
+    archive_verified: parsed.archive_verified,
+    consistent: parsed.consistent,
+  };
+}
+
+async function verifyRemoteAvailableSpace(
+  executor: ReturnType<typeof createRemoteExecutor>,
+  remotePath: string,
+  requiredBytes: number,
+  label: string,
+): Promise<void> {
+  if (requiredBytes <= 0) return;
+  const dfRes = await executor
+    .execute(`df -Pk ${shellQuote(remotePath)} 2>/dev/null`)
+    .catch(() => ({ code: 1, stdout: "", stderr: "" }));
+  if (dfRes.code !== 0) return;
+  const lines = dfRes.stdout
+    .trim()
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  const lastLine = lines[lines.length - 1] ?? "";
+  const cols = lastLine.split(/\s+/);
+  const availKb = cols.length >= 4 ? parseInt(cols[3], 10) : NaN;
+  if (!Number.isFinite(availKb) || availKb < 0) return;
+  const availBytes = availKb * 1024;
+  if (availBytes < requiredBytes) {
+    const availGb = (availBytes / 1_073_741_824).toFixed(2);
+    const reqGb = (requiredBytes / 1_073_741_824).toFixed(2);
+    throw new Error(
+      `Insufficient remote disk space (${label}): ${availGb} GB available, ${reqGb} GB required.`,
+    );
+  }
 }
 
 /** Format a Date as YYYY-MM-DD_HH-mm-ss for use in filenames. */
@@ -176,12 +284,18 @@ export class BackupProcessor extends WorkerHost {
     );
 
     const scriptsPath = this.config.get<string>("scriptsPath")!;
-    const remoteScript = `/tmp/forge_backup_${job.id}.php`;
-    const remoteOutput = `/tmp/forge_backup_${job.id}.tar.gz`;
-    const localStagingDir = `${STAGING_DIR}/${job.id}`;
-    const localFile = `${localStagingDir}/forge_backup_${job.id}.tar.gz`;
-    const backupFilename = `${slugify(env.project.name)}_${slugify(env.type)}_${formatTimestamp(new Date())}.tar.gz`;
-    let output: { size: number; filename: string } | null = null;
+    const jobToken = sanitizeJobToken(job.id);
+    const remoteWorkDir = `/tmp/forge_backup_${jobToken}`;
+    const remoteScript = `${remoteWorkDir}/backup.php`;
+    const safeStagingDir = resolveSafeRemoteStagingDir(
+      env.backup_path,
+      env.root_path,
+    );
+    const remoteOutput = `${safeStagingDir ?? remoteWorkDir}/forge_backup_${jobToken}.tar.gz`;
+    const localStagingDir = `${STAGING_DIR}/${jobToken}`;
+    const localFile = `${localStagingDir}/forge_backup_${jobToken}.tar.gz`;
+    const backupFilename = `${slugify(env.project.name, `project-${env.project_id}`)}_${slugify(env.type)}_env${environmentId}_${formatTimestamp(new Date())}_${jobToken}-${randomBytes(3).toString("hex")}.tar.gz`;
+    let output: BackupScriptOutput | null = null;
 
     await tracker.track({
       step: "Backup started",
@@ -196,6 +310,11 @@ export class BackupProcessor extends WorkerHost {
     });
 
     try {
+      await executor.execute(`mkdir -p -m 700 ${shellQuote(remoteWorkDir)}`);
+      if (safeStagingDir) {
+        await executor.execute(`mkdir -p -m 700 ${shellQuote(safeStagingDir)}`);
+      }
+
       // ── Step A: Push backup.php to remote server ────────────────────────
       const pushStart = Date.now();
       await pushRemoteScript(
@@ -208,6 +327,10 @@ export class BackupProcessor extends WorkerHost {
         level: "info",
         durationMs: Date.now() - pushStart,
       });
+
+      const phpBin = await resolveSitePhpBinary(executor, env.root_path, [
+        "json",
+      ]);
 
       // ── Step B: Execute backup.php ──────────────────────────────────────
       // Attempt to retrieve stored DB credentials to pass as fallback CLI args.
@@ -242,7 +365,10 @@ export class BackupProcessor extends WorkerHost {
       }
 
       try {
-        const phpCmd = `php ${shellQuote(remoteScript)} --docroot=${shellQuote(env.root_path)} --type=${shellQuote(type)} --output=${shellQuote(remoteOutput)}${storedCredsArgs}`;
+        const stagingArg = safeStagingDir
+          ? ` --staging-dir=${shellQuote(safeStagingDir)}`
+          : "";
+        const phpCmd = `${shellQuote(phpBin)} ${shellQuote(remoteScript)} --docroot=${shellQuote(env.root_path)} --type=${shellQuote(type)} --output=${shellQuote(remoteOutput)}${stagingArg}${storedCredsArgs}`;
         const maskedCmd = myCnfPath
           ? phpCmd.replace(myCnfPath, "/tmp/forge_backup_mycnf_***.cnf")
           : phpCmd;
@@ -268,7 +394,7 @@ export class BackupProcessor extends WorkerHost {
           );
         }
 
-        output = JSON.parse(result.stdout) as { size: number; filename: string };
+        output = parseBackupScriptOutput(result.stdout);
       } finally {
         if (myCnfPath) {
           await cleanupRemoteMyCnf(executor, myCnfPath);
@@ -330,7 +456,7 @@ export class BackupProcessor extends WorkerHost {
       await rm(localStagingDir, { recursive: true, force: true }).catch(
         () => undefined,
       );
-      await mkdir(localStagingDir, { recursive: true });
+      await mkdir(localStagingDir, { recursive: true, mode: 0o700 });
       const pullStart = Date.now();
       let lastLoggedMb = 0;
       await executor.pullFileToPath(
@@ -348,6 +474,17 @@ export class BackupProcessor extends WorkerHost {
         },
       );
       const { size: pulledBytes } = await stat(localFile);
+      if (pulledBytes !== output.size) {
+        throw new Error(
+          `Archive size mismatch after SFTP pull: pulled ${pulledBytes} bytes, expected ${output.size} bytes`,
+        );
+      }
+      const headerBuf = await readFile(localFile);
+      if (headerBuf.length < 2 || headerBuf[0] !== 0x1f || headerBuf[1] !== 0x8b) {
+        throw new Error(
+          "Pulled backup archive failed gzip magic header validation",
+        );
+      }
       await tracker.track({
         step: "Backup pulled via SFTP",
         level: "info",
@@ -386,7 +523,7 @@ export class BackupProcessor extends WorkerHost {
       await job.updateProgress({ value: 85, step: "Uploaded to Google Drive" });
 
       // ── Step E: Remote cleanup ──────────────────────────────────────────
-      const cleanCmd = `rm -f ${shellQuote(remoteScript)} ${shellQuote(remoteOutput)}`;
+      const cleanCmd = `rm -rf ${shellQuote(remoteWorkDir)} ${shellQuote(remoteOutput)}`;
       const cleanStart = Date.now();
       const cleanResult = await executor.execute(cleanCmd);
       await tracker.trackCommand(
@@ -431,7 +568,7 @@ export class BackupProcessor extends WorkerHost {
       }
       // Attempt remote cleanup even on failure so temp files do not accumulate
       await executor
-        .execute(`rm -f ${shellQuote(remoteScript)} ${shellQuote(remoteOutput)}`)
+        .execute(`rm -rf ${shellQuote(remoteWorkDir)} ${shellQuote(remoteOutput)}`)
         .catch((e) =>
           this.logger.warn(
             `[${job.id}] Remote cleanup on failure failed: ${e}`,
@@ -482,8 +619,10 @@ export class BackupProcessor extends WorkerHost {
     );
 
     const scriptsPath = this.config.get<string>("scriptsPath")!;
-    const remoteScript = `/tmp/forge_restore_${job.id}.php`;
-    const remoteBackupPath = `/tmp/forge_restore_${job.id}.tar.gz`;
+    const restoreToken = sanitizeJobToken(job.id);
+    const remoteWorkDir = `/tmp/forge_restore_${restoreToken}`;
+    const remoteScript = `${remoteWorkDir}/backup.php`;
+    const remoteBackupPath = `${remoteWorkDir}/archive.tar.gz`;
 
     await tracker.track({
       step: "Restore started",
@@ -521,6 +660,8 @@ export class BackupProcessor extends WorkerHost {
     }
 
     try {
+      await executor.execute(`mkdir -p -m 700 ${shellQuote(remoteWorkDir)}`);
+
       // ── Step A: Configure rclone ────────────────────────────────────────
       const configWritten = await this.rclone.writeConfig();
       if (!configWritten) {
@@ -545,8 +686,17 @@ export class BackupProcessor extends WorkerHost {
       // ── Step C: Stream archive directly from Google Drive → server ──────
       // Zero local temp files — rclone stdout is piped directly into SFTP.
       const totalBytes = backup.size_bytes ? Number(backup.size_bytes) : 0;
+      if (totalBytes > 0) {
+        await verifyRemoteAvailableSpace(
+          executor,
+          remoteWorkDir,
+          Math.ceil(totalBytes * 1.1),
+          "restore archive staging",
+        );
+      }
       let lastLoggedMb = 0;
       let lastCancelCheckMb = 0;
+      let actualTransferredBytes = 0;
 
       await tracker.track({
         step: "Streaming archive from Google Drive to server",
@@ -570,6 +720,7 @@ export class BackupProcessor extends WorkerHost {
         downloadStream,
         45 * 60 * 1000,
         async (bytesTransferred) => {
+          actualTransferredBytes = bytesTransferred;
           const mb = Math.floor(bytesTransferred / (1024 * 1024));
 
           // Check for user cancellation every ~10 MB — responsive but
@@ -606,6 +757,7 @@ export class BackupProcessor extends WorkerHost {
             });
           }
         },
+        0o600,
       );
 
       // Verify rclone exited cleanly after stdout closed
@@ -637,21 +789,60 @@ export class BackupProcessor extends WorkerHost {
         rcloneChild.on("error", reject);
       });
 
+      const remoteStatRes = await executor.execute(
+        `stat -c%s ${shellQuote(remoteBackupPath)}`,
+        { timeout: 15_000 },
+      );
+      if (remoteStatRes.code !== 0) {
+        throw new Error(
+          `Failed to stat uploaded restore archive on remote server: ${remoteStatRes.stderr}`,
+        );
+      }
+      const remoteBytes = parseInt(remoteStatRes.stdout.trim(), 10);
+      if (!Number.isFinite(remoteBytes) || remoteBytes <= 0) {
+        throw new Error(
+          "Uploaded restore archive is empty or unreadable on remote server",
+        );
+      }
+      if (
+        totalBytes > 0 &&
+        (remoteBytes !== totalBytes ||
+          (actualTransferredBytes > 0 && actualTransferredBytes !== totalBytes))
+      ) {
+        throw new Error(
+          `Restore archive size mismatch: transferred ${remoteBytes} bytes (streamed ${actualTransferredBytes}), expected ${totalBytes} bytes`,
+        );
+      }
+
+      const verifyTarRes = await executor.execute(
+        `tar -tzf ${shellQuote(remoteBackupPath)} >/dev/null 2>&1`,
+        { timeout: 120_000 },
+      );
+      if (verifyTarRes.code !== 0) {
+        throw new Error(
+          `Restore archive failed gzip/tar integrity verification before extract (exit ${verifyTarRes.code})`,
+        );
+      }
+
       await tracker.track({
-        step: "Archive transferred to server",
+        step: "Archive transferred & verified on server",
         level: "info",
-        detail: `${lastLoggedMb} MB — ${remoteBackupPath}`,
+        detail: `${remoteBytes} bytes — ${remoteBackupPath}`,
         durationMs: Date.now() - streamStart,
       });
       await job.updateProgress({
         value: 78,
-        step: "Archive on server, starting restore",
+        step: "Archive verified on server, starting restore",
       });
 
       // ── Step D: Execute restore script ──────────────────────────────────
       if (await tracker.isCancelled(this.backupsQueue)) {
         throw new Error("Cancelled by user");
       }
+
+      const restorePhpBin = await resolveSitePhpBinary(executor, env.root_path, [
+        "json",
+      ]);
 
       // Proactively unlock any immutable attributes and grant write permissions using root SSH
       await executor
@@ -662,7 +853,7 @@ export class BackupProcessor extends WorkerHost {
 
       const isCrossRestore = backup.environment_id !== BigInt(environmentId);
       const siteUrlArg = isCrossRestore ? ` --site-url=${shellQuote(env.url)}` : "";
-      const restoreCmd = `php ${shellQuote(remoteScript)} --restore --file=${shellQuote(remoteBackupPath)} --docroot=${shellQuote(env.root_path)}${storedCredsArgs}${siteUrlArg}`;
+      const restoreCmd = `${shellQuote(restorePhpBin)} ${shellQuote(remoteScript)} --restore --file=${shellQuote(remoteBackupPath)} --docroot=${shellQuote(env.root_path)} --staging-dir=${shellQuote(remoteWorkDir)}${storedCredsArgs}${siteUrlArg}`;
       const maskedCmd = myCnfPath
         ? restoreCmd.replace(myCnfPath, "/tmp/forge_restore_mycnf_***.cnf")
         : restoreCmd;
@@ -692,7 +883,9 @@ export class BackupProcessor extends WorkerHost {
 
       // Parse result to log db_imported status
       try {
-        const parsed = JSON.parse(result.stdout) as { db_imported?: boolean };
+        const parsed = parseJsonObjectFromOutput<{ db_imported?: boolean }>(
+          result.stdout,
+        );
         await tracker.track({
           step: parsed.db_imported
             ? "Files + database restored"
@@ -765,10 +958,15 @@ export class BackupProcessor extends WorkerHost {
               const altTgt = flipProtocol(tgtUrl);
               if (alt && altTgt && alt !== tgtUrl) pairs.push([alt, altTgt]);
 
+              const srPhpBin = await resolveSitePhpBinary(
+                executor,
+                env.root_path,
+                ["json", "mysqli"],
+              );
               let allPairsOk = true;
               for (const [oldUrl, newUrl] of pairs) {
                 const phpResult = await executor.execute(
-                  `php ${shellQuote(srScript)}` +
+                  `${shellQuote(srPhpBin)} ${shellQuote(srScript)}` +
                     ` --mycnf=${shellQuote(srMycnf)}` +
                     ` --db-name=${shellQuote(dbName)}` +
                     ` --prefix=${shellQuote(p)}` +
@@ -914,7 +1112,7 @@ export class BackupProcessor extends WorkerHost {
       });
 
       // ── Step E: Remote cleanup ──────────────────────────────────────────
-      const cleanCmd = `rm -f ${remoteScript} ${remoteBackupPath}`;
+      const cleanCmd = `rm -rf ${shellQuote(remoteWorkDir)}`;
       const cleanResult = await executor.execute(cleanCmd);
       await tracker.trackCommand(
         "Remote temp file cleanup",
@@ -934,7 +1132,7 @@ export class BackupProcessor extends WorkerHost {
         await cleanupRemoteMyCnf(executor, myCnfPath).catch(() => {});
       }
       await executor
-        .execute(`rm -f ${remoteScript} ${remoteBackupPath}`)
+        .execute(`rm -rf ${shellQuote(remoteWorkDir)}`)
         .catch((e) =>
           this.logger.warn(
             `[${job.id}] Remote cleanup on failure failed: ${e}`,
