@@ -1,4 +1,8 @@
-export { SshPoolManager, sshPoolManager } from "./ssh-pool.manager.js";
+export {
+  buildSshPoolKey,
+  SshPoolManager,
+  sshPoolManager,
+} from "./ssh-pool.manager.js";
 export type { SshServerConfig } from "./ssh-pool.manager.js";
 export {
   RemoteExecutorService,

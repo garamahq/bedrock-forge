@@ -1,5 +1,5 @@
 import { EventEmitter } from "events";
-import { SshPoolManager } from "../ssh-pool.manager";
+import { SshPoolManager, buildSshPoolKey } from "../ssh-pool.manager";
 import { RemoteExecutorService } from "../remote-executor.service";
 
 // Jest allows variables prefixed with "mock" to be referenced in jest.mock
@@ -139,6 +139,8 @@ describe("SSH Execution & Pooling Integration", () => {
   // ─── 2. Execution & Error Handling Tests ───────────────────────────────────
 
   describe("RemoteExecutorService", () => {
+    const executorPoolKey = buildSshPoolKey(config);
+
     it("successfully runs remote commands", async () => {
       const execResult = { stdout: "hello", stderr: "", code: 0 };
 
@@ -146,7 +148,7 @@ describe("SSH Execution & Pooling Integration", () => {
       const mockStream = new EventEmitter() as any;
       mockStream.stderr = new EventEmitter();
 
-      const client = await pool.getConnection("127.0.0.1:22", config);
+      const client = await pool.getConnection(executorPoolKey, config);
       const mockClientInstance = mockClients.find((c) => c === (client as any))!;
       mockClientInstance.exec = jest.fn().mockImplementation((_cmd: string, cb: (err: any, stream: any) => void) => {
         cb(null, mockStream);
@@ -157,7 +159,7 @@ describe("SSH Execution & Pooling Integration", () => {
           });
         });
       });
-      pool.releaseConnection("127.0.0.1:22", client);
+      pool.releaseConnection(executorPoolKey, client);
 
       const res = await executor.execute("echo hello");
       expect(res).toEqual(execResult);
@@ -168,12 +170,12 @@ describe("SSH Execution & Pooling Integration", () => {
       mockStream.stderr = new EventEmitter();
       mockStream.destroy = jest.fn();
 
-      const client = await pool.getConnection("127.0.0.1:22", config);
+      const client = await pool.getConnection(executorPoolKey, config);
       const mockClientInstance = mockClients.find((c) => c === (client as any))!;
       mockClientInstance.exec = jest.fn().mockImplementation((_cmd: string, cb: (err: any, stream: any) => void) => {
         cb(null, mockStream);
       });
-      pool.releaseConnection("127.0.0.1:22", client);
+      pool.releaseConnection(executorPoolKey, client);
 
       // Test execution timeout using a short real-time timeout
       const p = executor.execute("sleep 60", { timeout: 15 });
@@ -183,67 +185,67 @@ describe("SSH Execution & Pooling Integration", () => {
     });
 
     it("evicts connection and retries on Channel Open Failure", async () => {
-      const client1 = await pool.getConnection("127.0.0.1:22", config);
+      const client1 = await pool.getConnection(executorPoolKey, config);
       const mockClientInstance1 = mockClients[0];
 
       // Simulate Channel Open Failure on first attempt
       mockClientInstance1.exec = jest.fn().mockImplementation((_cmd: string, cb: (err: any) => void) => {
         cb(new Error("Channel open failure: maximum sessions reached"));
       });
-      pool.releaseConnection("127.0.0.1:22", client1);
+      pool.releaseConnection(executorPoolKey, client1);
 
       // Trigger the executor execution (which will fail first, evict client1, and retry using a fresh client2)
       const executePromise = executor.execute("echo retry");
 
       const res = await executePromise;
       expect(res.stdout).toBe("success");
-      expect(pool.getPoolStats("127.0.0.1:22").total).toBe(1); // Old one was destroyed, only new one left
+      expect(pool.getPoolStats(executorPoolKey).total).toBe(1); // Old one was destroyed, only new one left
     });
 
     it("evicts a disconnected pooled client and retries before starting the operation", async () => {
-      const client1 = await pool.getConnection("127.0.0.1:22", config);
+      const client1 = await pool.getConnection(executorPoolKey, config);
       const staleClient = mockClients[0];
       staleClient.exec = jest.fn().mockImplementation(() => {
         throw new Error("Not connected");
       });
-      pool.releaseConnection("127.0.0.1:22", client1);
+      pool.releaseConnection(executorPoolKey, client1);
 
       const result = await executor.execute("echo retry");
 
       expect(result.stdout).toBe("success");
       expect(staleClient.destroy).toHaveBeenCalled();
       expect(mockClients).toHaveLength(2);
-      expect(pool.getPoolStats("127.0.0.1:22").total).toBe(1);
+      expect(pool.getPoolStats(executorPoolKey).total).toBe(1);
     });
 
     it("retries when the SSH server rejects an exec request", async () => {
-      const client1 = await pool.getConnection("127.0.0.1:22", config);
+      const client1 = await pool.getConnection(executorPoolKey, config);
       const rejectedClient = mockClients[0];
       rejectedClient.exec = jest.fn().mockImplementation((_cmd: string, cb: (err: Error) => void) => {
         cb(new Error("Unable to exec"));
       });
-      pool.releaseConnection("127.0.0.1:22", client1);
+      pool.releaseConnection(executorPoolKey, client1);
 
       const result = await executor.execute("echo retry");
 
       expect(result.stdout).toBe("success");
       expect(rejectedClient.destroy).toHaveBeenCalled();
       expect(mockClients).toHaveLength(2);
-      expect(pool.getPoolStats("127.0.0.1:22").total).toBe(1);
+      expect(pool.getPoolStats(executorPoolKey).total).toBe(1);
     });
 
     it("explains a repeated exec request rejection without exposing the command", async () => {
-      const client1 = await pool.getConnection("127.0.0.1:22", config);
+      const client1 = await pool.getConnection(executorPoolKey, config);
       const rejectedClient = mockClients[0];
       rejectedClient.exec = jest.fn().mockImplementation((_cmd: string, cb: (err: Error) => void) => {
         cb(new Error("Unable to exec"));
       });
-      const client2 = await pool.getConnection("127.0.0.1:22", config);
+      const client2 = await pool.getConnection(executorPoolKey, config);
       mockClients[1].exec = jest.fn().mockImplementation((_cmd: string, cb: (err: Error) => void) => {
         cb(new Error("Unable to exec"));
       });
-      pool.releaseConnection("127.0.0.1:22", client1);
-      pool.releaseConnection("127.0.0.1:22", client2);
+      pool.releaseConnection(executorPoolKey, client1);
+      pool.releaseConnection(executorPoolKey, client2);
 
       await expect(executor.execute("mysql --password=secret")).rejects.toThrow(
         "SSH server rejected the remote command request after one reconnect attempt.",
@@ -261,12 +263,12 @@ describe("SSH Execution & Pooling Integration", () => {
         end: jest.fn(),
       };
 
-      const client = await pool.getConnection("127.0.0.1:22", config);
+      const client = await pool.getConnection(executorPoolKey, config);
       const mockClientInstance = mockClients.find((c) => c === (client as any))!;
       mockClientInstance.sftp = jest.fn().mockImplementation((cb: (err: any, sftp: any) => void) => {
         cb(null, mockSftp);
       });
-      pool.releaseConnection("127.0.0.1:22", client);
+      pool.releaseConnection(executorPoolKey, client);
 
       // Direct invocation of the private sftpGet method with a short 10ms timeout
       const p = (executor as any).sftpGet(client, "/remote/path", 10);
@@ -284,12 +286,12 @@ describe("SSH Execution & Pooling Integration", () => {
         end: jest.fn(),
       };
 
-      const client = await pool.getConnection("127.0.0.1:22", config);
+      const client = await pool.getConnection(executorPoolKey, config);
       const mockClientInstance = mockClients.find((c) => c === (client as any))!;
       mockClientInstance.sftp = jest.fn().mockImplementation((cb: (err: any, sftp: any) => void) => {
         cb(null, mockSftp);
       });
-      pool.releaseConnection("127.0.0.1:22", client);
+      pool.releaseConnection(executorPoolKey, client);
 
       // Call private sftpGet with 60ms stall timeout
       const p = (executor as any).sftpGet(client, "/remote/path", 60);
