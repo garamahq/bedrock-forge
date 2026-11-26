@@ -45,7 +45,7 @@ function makeBackup(
     environment_id: BigInt(1),
     type: "full",
     status: "completed",
-    file_path: "backups/site_prod_2026.tar.gz",
+    file_path: "gdrive:gdrive-folder-abc/site_prod_2026.tar.gz",
     size_bytes: BigInt(1024),
     created_at: new Date(),
     ...overrides,

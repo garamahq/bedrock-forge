@@ -9,6 +9,7 @@ import { PluginUpdateProcessor } from "./plugin-update.processor";
       { name: QUEUES.PLUGIN_UPDATES },
       { name: QUEUES.PLUGIN_SCANS },
       { name: QUEUES.NOTIFICATIONS },
+      { name: QUEUES.BACKUPS },
     ),
   ],
   providers: [PluginUpdateProcessor],

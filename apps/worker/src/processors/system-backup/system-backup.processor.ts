@@ -1,6 +1,6 @@
-import { Processor, WorkerHost } from "@nestjs/bullmq";
-import { Logger } from "@nestjs/common";
-import { Job } from "bullmq";
+import { Processor, WorkerHost, InjectQueue } from "@nestjs/bullmq";
+import { Logger, Optional } from "@nestjs/common";
+import { Job, Queue, UnrecoverableError } from "bullmq";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { mkdir, stat, rm, writeFile } from "fs/promises";
@@ -38,6 +38,9 @@ export class SystemBackupProcessor extends WorkerHost {
   constructor(
     private readonly prisma: PrismaService,
     private readonly rclone: RcloneService,
+    @Optional()
+    @InjectQueue(QUEUES.SYSTEM_BACKUPS)
+    private readonly systemBackupsQueue?: Queue,
   ) {
     super();
   }
@@ -125,8 +128,31 @@ export class SystemBackupProcessor extends WorkerHost {
   private async processScheduled(job: Job) {
     const { scheduleId } = job.data as { scheduleId: number };
 
-    // Fetch the schedule row for retention settings
-    const schedule = await this.prisma.systemBackupSchedule.findFirst();
+    // Match the exact schedule ID and skip cleanly if disabled or deleted
+    const schedule = await this.prisma.systemBackupSchedule.findUnique({
+      where: { id: BigInt(scheduleId) },
+    });
+    if (!schedule || !schedule.enabled) {
+      this.logger.warn(
+        `[SystemBackupSchedule #${scheduleId}] Schedule is disabled or deleted — removing orphaned scheduler and skipping`,
+      );
+      const orphanKey = `system-backup-schedule-${scheduleId}`;
+      try {
+        await this.systemBackupsQueue?.removeJobScheduler?.(orphanKey);
+        const repeatables =
+          (await this.systemBackupsQueue?.getRepeatableJobs?.()) ?? [];
+        for (const rj of repeatables) {
+          if (rj.id === orphanKey || rj.key?.includes(orphanKey)) {
+            await this.systemBackupsQueue?.removeRepeatableByKey?.(rj.key);
+          }
+        }
+      } catch (cleanupErr) {
+        this.logger.warn(
+          `[SystemBackupSchedule #${scheduleId}] Failed cleaning orphaned scheduler: ${cleanupErr}`,
+        );
+      }
+      return;
+    }
 
     // Look up the Google Drive folder ID from app settings
     const setting = await this.prisma.appSetting.findUnique({
@@ -134,10 +160,25 @@ export class SystemBackupProcessor extends WorkerHost {
     });
     const folderId = setting?.value;
     if (!folderId) {
-      this.logger.error(
-        `[SystemBackupSchedule #${scheduleId}] No GDrive folder ID configured — skipping`,
-      );
-      return;
+      const msg =
+        "Google Drive system backup folder ID is not configured";
+      this.logger.error(`[SystemBackupSchedule #${scheduleId}] ${msg}`);
+      const failedAt = new Date();
+      await this.prisma.jobExecution
+        .create({
+          data: {
+            queue_name: QUEUES.SYSTEM_BACKUPS,
+            job_type: JOB_TYPES.SYSTEM_BACKUP_SCHEDULED,
+            bull_job_id: job.id ?? "",
+            payload: { scheduleId } as Record<string, string | number>,
+            status: "failed",
+            last_error: msg,
+            started_at: failedAt,
+            completed_at: failedAt,
+          },
+        })
+        .catch(() => undefined);
+      throw new UnrecoverableError(msg);
     }
 
     const startedAt = new Date();
@@ -192,23 +233,26 @@ export class SystemBackupProcessor extends WorkerHost {
         }),
       ]);
 
-      // Stamp last_run_at on the schedule
-      if (schedule) {
-        await this.prisma.systemBackupSchedule.update({
-          where: { id: schedule.id },
-          data: { last_run_at: completedAt },
-        });
-      }
-
       this.logger.log(
         `[SystemBackupSchedule #${scheduleId}] ✓ Completed → ${remotePath}`,
       );
 
-      // Apply retention policy
-      if (schedule) {
+      // Isolate schedule maintenance from backup creation status so maintenance
+      // errors are surfaced without marking an uploaded backup as failed (#41).
+      try {
+        await this.prisma.systemBackupSchedule.update({
+          where: { id: schedule.id },
+          data: { last_run_at: completedAt },
+        });
         await this.applyRetention(
           schedule.retention_count,
           schedule.retention_days,
+        );
+      } catch (maintErr) {
+        const maintMsg =
+          maintErr instanceof Error ? maintErr.message : String(maintErr);
+        this.logger.error(
+          `[SystemBackupSchedule #${scheduleId}] Post-backup maintenance error (backup preserved): ${maintMsg}`,
         );
       }
     } catch (err) {

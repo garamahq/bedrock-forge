@@ -1,6 +1,6 @@
 import { Processor, WorkerHost, InjectQueue } from "@nestjs/bullmq";
 import { Logger } from "@nestjs/common";
-import { Job, Queue } from "bullmq";
+import { Job, Queue, UnrecoverableError } from "bullmq";
 import { mkdir, rm, readFile, stat, statfs } from "fs/promises";
 import { StepTracker } from "../../services/step-tracker";
 import { join, dirname } from "path";
@@ -18,6 +18,7 @@ import {
   BackupScheduledPayloadSchema,
   BackupRestorePayloadSchema,
   BackupCreatePayloadSchema,
+  classifyRestorableBackupFormat,
 } from "@bedrock-forge/shared";
 import { ConfigService } from "@nestjs/config";
 import {
@@ -160,42 +161,49 @@ export class BackupProcessor extends WorkerHost {
       job,
     );
 
-    const env = await this.prisma.environment.findUniqueOrThrow({
-      where: { id: BigInt(environmentId) },
-      include: { server: true, project: true },
-    });
-
-    if (!env.google_drive_folder_id) {
-      throw new Error(
-        `Environment ${environmentId} has no google_drive_folder_id configured — backup aborted.`,
-      );
-    }
-
-    const executor = createRemoteExecutor(
-      await this.sshKey.getSshConfig(env.server),
-    );
-
+    let env: Awaited<ReturnType<typeof this.prisma.environment.findUniqueOrThrow>> & {
+      server: NonNullable<unknown>;
+      project: { name: string };
+    };
+    let executor!: ReturnType<typeof createRemoteExecutor>;
+    let backupFilename = "";
     const scriptsPath = this.config.get<string>("scriptsPath")!;
     const remoteScript = `/tmp/forge_backup_${job.id}.php`;
     const remoteOutput = `/tmp/forge_backup_${job.id}.tar.gz`;
     const localStagingDir = `${STAGING_DIR}/${job.id}`;
     const localFile = `${localStagingDir}/forge_backup_${job.id}.tar.gz`;
-    const backupFilename = `${slugify(env.project.name)}_${slugify(env.type)}_${formatTimestamp(new Date())}.tar.gz`;
     let output: { size: number; filename: string } | null = null;
 
-    await tracker.track({
-      step: "Backup started",
-      level: "info",
-      detail: `env=${environmentId} type=${type} server=${env.server.ip_address}`,
-    });
-
-    // Mark the pre-created Backup row as running
-    await this.prisma.backup.update({
-      where: { id: BigInt(backupId) },
-      data: { status: "running", started_at: new Date() },
-    });
-
     try {
+      const foundEnv = await this.prisma.environment.findUniqueOrThrow({
+        where: { id: BigInt(environmentId) },
+        include: { server: true, project: true },
+      });
+      env = foundEnv;
+
+      if (!env.google_drive_folder_id) {
+        throw new Error(
+          `Environment ${environmentId} has no google_drive_folder_id configured — backup aborted.`,
+        );
+      }
+
+      executor = createRemoteExecutor(
+        await this.sshKey.getSshConfig(foundEnv.server),
+      );
+
+      backupFilename = `${slugify(foundEnv.project.name)}_${slugify(env.type)}_${formatTimestamp(new Date())}.tar.gz`;
+
+      await tracker.track({
+        step: "Backup started",
+        level: "info",
+        detail: `env=${environmentId} type=${type} server=${foundEnv.server.ip_address}`,
+      });
+
+      // Mark the pre-created Backup row as running
+      await this.prisma.backup.update({
+        where: { id: BigInt(backupId) },
+        data: { status: "running", started_at: new Date() },
+      });
       // ── Step A: Push backup.php to remote server ────────────────────────
       const pushStart = Date.now();
       await pushRemoteScript(
@@ -468,8 +476,25 @@ export class BackupProcessor extends WorkerHost {
       include: { environment: true },
     });
 
-    if (!backup.file_path) {
-      throw new Error("Backup has no file_path — cannot restore.");
+    if (backup.status !== "completed") {
+      const err = new UnrecoverableError(
+        `Backup ${backupId} cannot be restored because it is not in completed state (status: ${backup.status}).`,
+      );
+      await tracker.fail(err, "Restore validation");
+      throw err;
+    }
+
+    let backupFormat: "gdrive_tar_gz" | "gdrive_sql";
+    try {
+      backupFormat = classifyRestorableBackupFormat(backup.file_path);
+    } catch (formatErr) {
+      const err = new UnrecoverableError(
+        formatErr instanceof Error
+          ? formatErr.message
+          : "Backup has invalid or unsupported file_path — cannot restore.",
+      );
+      await tracker.fail(err, "Restore validation");
+      throw err;
     }
 
     const env = await this.prisma.environment.findUniqueOrThrow({
@@ -480,6 +505,16 @@ export class BackupProcessor extends WorkerHost {
     const executor = createRemoteExecutor(
       await this.sshKey.getSshConfig(env.server),
     );
+
+    if (backupFormat === "gdrive_sql") {
+      return this.handleRestoreSqlDump(
+        job,
+        tracker,
+        executor,
+        backup,
+        environmentId,
+      );
+    }
 
     const scriptsPath = this.config.get<string>("scriptsPath")!;
     const remoteScript = `/tmp/forge_restore_${job.id}.php`;
@@ -556,7 +591,7 @@ export class BackupProcessor extends WorkerHost {
       await job.updateProgress({ value: 5, step: "Download stream started" });
 
       const { child: rcloneChild, stream: downloadStream } =
-        this.rclone.downloadStream(backup.file_path);
+        this.rclone.downloadStream(backup.file_path!);
 
       // Collect rclone stderr for error reporting
       const rcloneStderrChunks: string[] = [];
@@ -955,7 +990,7 @@ export class BackupProcessor extends WorkerHost {
       `[${job.id}] Scheduled backup triggered: scheduleId=${scheduleId} env=${environmentId} type=${type}`,
     );
 
-    // Guard: if the schedule was deleted from the DB or disabled, self-clean the orphaned repeatable job
+    // Guard: if the schedule was deleted from the DB or disabled, self-clean the orphaned scheduler
     const scheduleRecord = await this.prisma.backupSchedule.findUnique({
       where: { id: BigInt(scheduleId) },
     });
@@ -963,11 +998,12 @@ export class BackupProcessor extends WorkerHost {
       this.logger.warn(
         `[${job.id}] Schedule ${scheduleId} is disabled or no longer exists in DB — removing orphaned repeatable job and skipping`,
       );
+      const orphanKey = `backup-schedule-${scheduleId}`;
       try {
+        await this.backupsQueue.removeJobScheduler?.(orphanKey);
         const repeatableJobs = await this.backupsQueue.getRepeatableJobs();
-        const orphanKey = `backup-schedule-${scheduleId}`;
         for (const rj of repeatableJobs) {
-          if (rj.id === orphanKey) {
+          if (rj.id === orphanKey || rj.key?.includes(orphanKey)) {
             await this.backupsQueue.removeRepeatableByKey(rj.key);
             this.logger.log(
               `[${job.id}] Removed orphaned repeatable job: ${rj.key}`,
@@ -982,12 +1018,13 @@ export class BackupProcessor extends WorkerHost {
       return;
     }
 
-    // Create the Backup and JobExecution rows, then delegate to handleCreate
     const bullJobId = job.id ?? String(scheduleId);
 
+    // Persist job_type so environment retention cleanup identifies scheduled backups reliably
     const exec = await this.prisma.jobExecution.create({
       data: {
         queue_name: QUEUES.BACKUPS,
+        job_type: JOB_TYPES.BACKUP_SCHEDULED,
         bull_job_id: bullJobId,
         environment_id: BigInt(environmentId),
         status: "queued",
@@ -995,51 +1032,52 @@ export class BackupProcessor extends WorkerHost {
       },
     });
 
-    const env = await this.prisma.environment.findUniqueOrThrow({
-      where: { id: BigInt(environmentId) },
-    });
+    const tracker = await StepTracker.start(
+      this.prisma,
+      exec.id,
+      this.logger,
+      job,
+    );
 
-    if (!env.google_drive_folder_id) {
-      const tracker = await StepTracker.start(
-        this.prisma,
-        exec.id,
-        this.logger,
-        job,
-      );
-      await tracker.fail(
-        new Error(`Environment ${environmentId} has no google_drive_folder_id`),
-        "Scheduled backup pre-flight",
-      );
-      this.logger.error(
-        `[${job.id}] Scheduled backup aborted: no google_drive_folder_id on env ${environmentId}`,
-      );
-      return;
-    }
-
-    const backup = await this.prisma.backup.create({
-      data: {
-        environment_id: BigInt(environmentId),
-        job_execution_id: exec.id,
-        type: type as "full" | "db_only" | "files_only",
-        status: "pending",
-      },
-    });
-
-    // Update schedule's last_run_at
-    await this.prisma.backupSchedule
-      .update({
-        where: { id: BigInt(scheduleId) },
-        data: { last_run_at: new Date() },
-      })
-      .catch((e) =>
-        this.logger.warn(`Could not update schedule last_run_at: ${e}`),
-      );
-
-    // Delegate to the standard create flow
-    const jobExecutionId = Number(exec.id);
-    const backupId = Number(backup.id);
-
+    let backupId: number | undefined;
     try {
+      const env = await this.prisma.environment.findUniqueOrThrow({
+        where: { id: BigInt(environmentId) },
+      });
+
+      if (!env.google_drive_folder_id) {
+        const missingErr = new UnrecoverableError(
+          `Environment ${environmentId} has no google_drive_folder_id configured`,
+        );
+        await tracker.fail(missingErr, "Scheduled backup pre-flight");
+        this.logger.error(
+          `[${job.id}] Scheduled backup aborted: no google_drive_folder_id on env ${environmentId}`,
+        );
+        throw missingErr;
+      }
+
+      const backup = await this.prisma.backup.create({
+        data: {
+          environment_id: BigInt(environmentId),
+          job_execution_id: exec.id,
+          type: type as "full" | "db_only" | "files_only",
+          status: "pending",
+        },
+      });
+      backupId = Number(backup.id);
+
+      // Update schedule's last_run_at
+      await this.prisma.backupSchedule
+        .update({
+          where: { id: BigInt(scheduleId) },
+          data: { last_run_at: new Date() },
+        })
+        .catch((e) =>
+          this.logger.warn(`Could not update schedule last_run_at: ${e}`),
+        );
+
+      // Delegate to the standard create flow
+      const jobExecutionId = Number(exec.id);
       await this.handleCreate(
         job,
         environmentId,
@@ -1047,22 +1085,134 @@ export class BackupProcessor extends WorkerHost {
         jobExecutionId,
         backupId,
       );
+
+      // Run retention cleanup after a successful scheduled backup (non-fatal)
+      await this.cleanupRetention(
+        environmentId,
+        backupId,
+        scheduleRecord.retention_count ?? null,
+        scheduleRecord.retention_days ?? null,
+      ).catch((err) =>
+        this.logger.warn(
+          `[${job.id}] Retention cleanup failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
     } catch (err) {
-      // handleCreate already marks backup + jobExecution as failed
+      const msg = err instanceof Error ? err.message : String(err);
+      if (backupId !== undefined) {
+        await this.prisma.backup
+          .update({
+            where: { id: BigInt(backupId) },
+            data: {
+              status: "failed",
+              error_message: msg,
+              completed_at: new Date(),
+            },
+          })
+          .catch(() => undefined);
+      }
+      await tracker.fail(err, "Scheduled backup").catch(() => undefined);
       throw err;
     }
+  }
 
-    // Run retention cleanup after a successful scheduled backup (non-fatal)
-    await this.cleanupRetention(
-      environmentId,
-      backupId,
-      scheduleRecord.retention_count ?? null,
-      scheduleRecord.retention_days ?? null,
-    ).catch((err) =>
-      this.logger.warn(
-        `[${job.id}] Retention cleanup failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
-      ),
-    );
+  /**
+   * Restore a Sync database safety dump (`*.sql` on Google Drive) directly via MySQL
+   * without running backup.php's full docroot wipe and tar extraction.
+   */
+  private async handleRestoreSqlDump(
+    job: Job,
+    tracker: StepTracker,
+    executor: ReturnType<typeof createRemoteExecutor>,
+    backup: { id: bigint; file_path: string | null },
+    environmentId: number,
+  ): Promise<void> {
+    const remoteSqlPath = `/tmp/forge_restore_${job.id}.sql`;
+    let myCnfPath: string | null = null;
+
+    try {
+      const configWritten = await this.rclone.writeConfig();
+      if (!configWritten) {
+        throw new Error(
+          "Google Drive not configured — cannot restore a cloud SQL safety backup.",
+        );
+      }
+
+      const storedCreds = await this.prisma.wpDbCredentials.findUnique({
+        where: { environment_id: BigInt(environmentId) },
+      });
+      if (!storedCreds) {
+        throw new Error(
+          `Environment ${environmentId} has no stored DB credentials to restore SQL dump.`,
+        );
+      }
+      const dbName = this.encryption.decrypt(storedCreds.db_name_encrypted);
+      const dbUser = this.encryption.decrypt(storedCreds.db_user_encrypted);
+      const dbPassword = this.encryption.decrypt(storedCreds.db_password_encrypted);
+      const dbHost = this.encryption.decrypt(storedCreds.db_host_encrypted);
+
+      await tracker.track({
+        step: "Streaming SQL safety backup from Google Drive",
+        level: "info",
+        detail: backup.file_path ?? undefined,
+      });
+
+      const { child: rcloneChild, stream: downloadStream } =
+        this.rclone.downloadStream(backup.file_path!);
+      const rcloneStderrChunks: string[] = [];
+      rcloneChild.stderr?.on("data", (chunk: Buffer) => {
+        rcloneStderrChunks.push(chunk.toString());
+      });
+
+      await executor.pushFileFromStream(remoteSqlPath, downloadStream, 45 * 60 * 1000);
+      await executor.execute(`chmod 600 ${shellQuote(remoteSqlPath)}`).catch(() => {});
+
+      await new Promise<void>((resolve, reject) => {
+        if (rcloneChild.exitCode !== null) {
+          if (rcloneChild.exitCode !== 0) {
+            reject(new Error(`rclone cat failed (exit ${rcloneChild.exitCode}): ${rcloneStderrChunks.join("")}`));
+          } else {
+            resolve();
+          }
+          return;
+        }
+        rcloneChild.on("close", (code) => {
+          if (code !== 0) {
+            reject(new Error(`rclone cat failed (exit ${code}): ${rcloneStderrChunks.join("")}`));
+          } else {
+            resolve();
+          }
+        });
+        rcloneChild.on("error", reject);
+      });
+
+      myCnfPath = await createRemoteMyCnf(
+        executor,
+        { dbUser, dbPassword, dbHost },
+        job.id ?? "restore",
+        "forge_sql_restore",
+      );
+
+      const importCmd = `mysql --defaults-extra-file=${shellQuote(myCnfPath)} ${shellQuote(dbName)} < ${shellQuote(remoteSqlPath)}`;
+      const importRes = await executor.execute(importCmd, { timeout: 20 * 60 * 1000 });
+      if (importRes.code !== 0) {
+        throw new Error(`mysql import failed (exit ${importRes.code}): ${importRes.stderr}`);
+      }
+
+      await tracker.track({
+        step: "SQL safety backup restored",
+        level: "info",
+        detail: `database=${dbName}`,
+      });
+      await tracker.complete();
+      await job.updateProgress({ value: 100, step: "Restore complete" });
+    } catch (err) {
+      await tracker.fail(err, "SQL backup restore");
+      throw err;
+    } finally {
+      if (myCnfPath) await cleanupRemoteMyCnf(executor, myCnfPath).catch(() => undefined);
+      await executor.execute(`rm -f ${shellQuote(remoteSqlPath)}`).catch(() => undefined);
+    }
   }
 
   // ── Retention cleanup ─────────────────────────────────────────────────────
@@ -1081,19 +1231,35 @@ export class BackupProcessor extends WorkerHost {
   ): Promise<void> {
     if (!retentionCount && !retentionDays) return;
 
-    // Fetch all completed scheduled backups for this environment,
-    // ordered newest-first, excluding the backup just created.
-    const scheduledBackups = await this.prisma.backup.findMany({
+    // Fetch scheduled backups (including legacy records where job_type was omitted
+    // but payload.scheduleId proves scheduled origin); never select manual backups.
+    const rawCandidates = await this.prisma.backup.findMany({
       where: {
         environment_id: BigInt(environmentId),
         status: "completed",
         id: { not: BigInt(justCreatedBackupId) },
         jobExecution: {
-          job_type: JOB_TYPES.BACKUP_SCHEDULED,
+          OR: [{ job_type: JOB_TYPES.BACKUP_SCHEDULED }, { job_type: null }],
         },
       },
       orderBy: { created_at: "desc" },
-      select: { id: true, file_path: true, created_at: true },
+      select: {
+        id: true,
+        file_path: true,
+        created_at: true,
+        jobExecution: { select: { job_type: true, payload: true } },
+      },
+    });
+
+    const scheduledBackups = rawCandidates.filter((b) => {
+      const je = (b as { jobExecution?: { job_type: string | null; payload: unknown } | null }).jobExecution;
+      if (je === undefined) return true;
+      if (!je) return false;
+      if (je.job_type === JOB_TYPES.BACKUP_SCHEDULED) return true;
+      if (je.job_type == null && je.payload && typeof je.payload === "object") {
+        return (je.payload as Record<string, unknown>).scheduleId != null;
+      }
+      return false;
     });
 
     const toDelete = new Set<bigint>();

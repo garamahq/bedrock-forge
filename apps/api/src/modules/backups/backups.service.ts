@@ -12,6 +12,7 @@ import {
   DEFAULT_JOB_OPTIONS,
   BACKUP_JOB_OPTIONS,
   PaginationQuery,
+  classifyRestorableBackupFormat,
 } from "@bedrock-forge/shared";
 import { EnqueueBackupDto, RestoreBackupDto } from "./dto/backup.dto";
 import { BackupsRepository } from "./backups.repository";
@@ -107,6 +108,21 @@ export class BackupsService {
 
   async enqueueRestore(dto: RestoreBackupDto) {
     const backup = await this.findOne(dto.backupId);
+    if (backup.status !== "completed") {
+      throw new BadRequestException(
+        `Backup ${dto.backupId} cannot be restored because its status is '${backup.status}' (must be 'completed').`,
+      );
+    }
+    try {
+      classifyRestorableBackupFormat(backup.file_path);
+    } catch (err) {
+      throw new BadRequestException(
+        err instanceof Error
+          ? err.message
+          : `Backup ${dto.backupId} does not have a valid restorable file path.`,
+      );
+    }
+
     let targetEnvId = Number(backup.environment_id);
 
     if (dto.targetEnvironmentId) {
