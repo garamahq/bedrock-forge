@@ -1,6 +1,6 @@
 import { Processor, WorkerHost } from "@nestjs/bullmq";
 import { Logger } from "@nestjs/common";
-import { Job, Queue } from "bullmq";
+import { Job } from "bullmq";
 import { join } from "path";
 import { PrismaService } from "../../prisma/prisma.service";
 import { SshKeyService } from "../../services/ssh-key.service";
@@ -21,6 +21,7 @@ import {
   shellQuote,
   pushRemoteScript,
 } from "../../utils/processor-utils";
+import { runPreFlightDbBackup } from "../../utils/preflight-backup";
 
 function parsePluginScanOutput(value: unknown): PluginScanOutput {
   const output = PluginScanOutputSchema.safeParse(value);
@@ -361,78 +362,12 @@ export class PluginScanProcessor extends WorkerHost {
           );
         }
 
-        await tracker.track({
-          step: "Queueing pre-flight backup",
-          level: "info",
-        });
-
-        const backupExec = await this.prisma.jobExecution.create({
-          data: {
-            environment_id: BigInt(environmentId),
-            queue_name: QUEUES.BACKUPS,
-            job_type: JOB_TYPES.BACKUP_CREATE,
-            bull_job_id: "",
-            status: "queued",
-          },
-        });
-
-        const backup = await this.prisma.backup.create({
-          data: {
-            environment_id: BigInt(environmentId),
-            type: "db_only",
-            status: "running",
-            size_bytes: 0,
-            file_path: "temp",
-            job_execution_id: backupExec.id,
-          },
-        });
-
-        const redisUrl = this.config.get<string>("redis.url")!;
-        const backupQueue = new Queue(QUEUES.BACKUPS, {
-          connection: { url: redisUrl },
-        });
-        const { randomUUID } = await import("crypto");
-        const backupBullJobId = randomUUID();
-
-        await backupQueue.add(
-          JOB_TYPES.BACKUP_CREATE,
-          {
-            environmentId,
-            type: "db_only",
-            jobExecutionId: Number(backupExec.id),
-            backupId: Number(backup.id),
-          },
-          { jobId: backupBullJobId },
-        );
-        await backupQueue.close();
-
-        await this.prisma.jobExecution.update({
-          where: { id: backupExec.id },
-          data: { bull_job_id: backupBullJobId },
-        });
-
-        let attempts = 0;
-        let backupFailed = false;
-        while (attempts < 120) {
-          // wait up to 20 minutes (10s intervals)
-          const exec = await this.prisma.jobExecution.findUnique({
-            where: { id: backupExec.id },
-          });
-          if (exec?.status === "completed") break;
-          if (exec?.status === "failed") {
-            backupFailed = true;
-            throw new Error("Pre-flight backup failed: " + exec.last_error);
-          }
-          await new Promise((r) => setTimeout(r, 10000));
-          attempts++;
-        }
-        if (attempts >= 120 && !backupFailed) {
-          throw new Error("Pre-flight backup timed out after 20 minutes");
-        }
-
-        await tracker.track({
-          step: "Pre-flight backup completed successfully",
-          level: "info",
+        await runPreFlightDbBackup({
+          prisma: this.prisma,
+          redisUrl: this.config.get<string>("redis.url")!,
+          environmentId,
+          tracker,
+          logger: this.logger,
         });
         await job.updateProgress(5);
       }

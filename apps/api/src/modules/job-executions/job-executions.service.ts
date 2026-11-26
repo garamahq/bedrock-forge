@@ -3,18 +3,40 @@ import {
   NotFoundException,
   BadRequestException,
   Logger,
+  Optional,
 } from "@nestjs/common";
 import { JobExecutionStatus } from "@prisma/client";
 import { ModuleRef } from "@nestjs/core";
 import { getQueueToken } from "@nestjs/bullmq";
 import { Queue } from "bullmq";
-import { QueueName } from "@bedrock-forge/shared";
+import { JOB_TYPES, QUEUES, QueueName } from "@bedrock-forge/shared";
 import {
   JobExecutionsRepository,
   JobExecutionFilter,
   StalledExecutionCandidate,
 } from "./job-executions.repository";
 import { JobOrchestratorService } from "./job-orchestrator.service";
+import { BackupsService } from "../backups/backups.service";
+import { SystemBackupsService } from "../system-backups/system-backups.service";
+
+const VALID_BACKUP_TYPES = new Set([
+  "full",
+  "db_only",
+  "files_only",
+  "incremental",
+]);
+const RETRYABLE_EXECUTION_STATUSES = new Set([
+  "failed",
+  "dead_letter",
+  "discarded",
+]);
+
+function readPayloadRecord(payload: unknown): Record<string, unknown> {
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    return payload as Record<string, unknown>;
+  }
+  return {};
+}
 
 @Injectable()
 export class JobExecutionsService {
@@ -24,6 +46,8 @@ export class JobExecutionsService {
     private readonly repo: JobExecutionsRepository,
     private readonly orchestrator: JobOrchestratorService,
     private readonly moduleRef: ModuleRef,
+    @Optional() private readonly backupsService?: BackupsService,
+    @Optional() private readonly systemBackupsService?: SystemBackupsService,
   ) {}
 
   list(filter: JobExecutionFilter, page: number, limit: number) {
@@ -70,11 +94,117 @@ export class JobExecutionsService {
       throw new NotFoundException(`Job execution ${id} not found`);
     }
 
+    if (!RETRYABLE_EXECUTION_STATUSES.has(jobExec.status)) {
+      throw new BadRequestException(
+        `Job execution ${id} has status '${jobExec.status}' and cannot be retried.`,
+      );
+    }
+
+    const payload = readPayloadRecord(jobExec.payload);
+
+    if (jobExec.queue_name === QUEUES.SYSTEM_BACKUPS) {
+      if (
+        jobExec.job_type &&
+        jobExec.job_type !== JOB_TYPES.SYSTEM_BACKUP_CREATE
+      ) {
+        throw new BadRequestException(
+          `System backup job type '${jobExec.job_type}' cannot be retried.`,
+        );
+      }
+      if (!this.systemBackupsService) {
+        throw new BadRequestException(
+          "SystemBackupsService is unavailable for retry.",
+        );
+      }
+      return this.systemBackupsService.enqueueCreate();
+    }
+
+    if (jobExec.queue_name === QUEUES.BACKUPS) {
+      if (
+        jobExec.job_type === JOB_TYPES.BACKUP_CREATE ||
+        jobExec.job_type === JOB_TYPES.BACKUP_SCHEDULED ||
+        (!jobExec.job_type && typeof payload.type === "string")
+      ) {
+        const environmentId =
+          typeof payload.environmentId === "number" &&
+          Number.isFinite(payload.environmentId)
+            ? payload.environmentId
+            : jobExec.environment_id
+              ? Number(jobExec.environment_id)
+              : null;
+        const type =
+          typeof payload.type === "string" && VALID_BACKUP_TYPES.has(payload.type)
+            ? (payload.type as "full" | "db_only" | "files_only" | "incremental")
+            : null;
+        if (!environmentId || !type) {
+          throw new BadRequestException(
+            "Historical backup execution lacks required environmentId or valid backup type for retry.",
+          );
+        }
+        if (!this.backupsService) {
+          throw new BadRequestException(
+            "BackupsService is unavailable for retry.",
+          );
+        }
+        return this.backupsService.enqueueCreate({ environmentId, type });
+      }
+
+      if (jobExec.job_type === JOB_TYPES.BACKUP_RESTORE) {
+        const backupId =
+          typeof payload.backupId === "number" &&
+          Number.isInteger(payload.backupId) &&
+          payload.backupId > 0
+            ? payload.backupId
+            : null;
+        const targetEnvironmentId =
+          typeof payload.environmentId === "number" &&
+          Number.isInteger(payload.environmentId) &&
+          payload.environmentId > 0
+            ? payload.environmentId
+            : undefined;
+        if (!backupId) {
+          throw new BadRequestException(
+            "Backup restore execution lacks a valid backupId and cannot be retried.",
+          );
+        }
+        if (!this.backupsService) {
+          throw new BadRequestException(
+            "BackupsService is unavailable for retry.",
+          );
+        }
+        return this.backupsService.enqueueRestore({
+          backupId,
+          targetEnvironmentId,
+        });
+      }
+
+      if (jobExec.job_type === JOB_TYPES.BACKUP_DELETE_FILE) {
+        if (
+          typeof payload.filePath !== "string" ||
+          !payload.filePath.trim()
+        ) {
+          throw new BadRequestException(
+            "Backup delete execution lacks filePath and cannot be retried.",
+          );
+        }
+      } else {
+        throw new BadRequestException(
+          `Cannot retry backup execution with unsupported job type: ${jobExec.job_type ?? "missing"}.`,
+        );
+      }
+    }
+
+    if (!jobExec.job_type) {
+      throw new BadRequestException(
+        `Cannot retry a job execution with no job type`,
+      );
+    }
+
     let queue: Queue;
     try {
       const token = getQueueToken(jobExec.queue_name);
       queue = this.moduleRef.get<Queue>(token, { strict: false });
-    } catch (err) {
+    } catch {
       throw new BadRequestException(
         `Failed to resolve queue for name: ${jobExec.queue_name}`,
       );
@@ -86,10 +216,30 @@ export class JobExecutionsService {
       );
     }
 
-    if (!jobExec.job_type) {
-      throw new BadRequestException(
-        `Cannot retry a job execution with no job type`,
-      );
+    if (
+      jobExec.job_type === JOB_TYPES.PROJECT_CREATE_BEDROCK &&
+      jobExec.bull_job_id &&
+      jobExec.bull_job_id !== "0" &&
+      typeof queue.getJob === "function"
+    ) {
+      const existingJob = await queue.getJob(jobExec.bull_job_id).catch(() => null);
+      if (existingJob && typeof existingJob.getState === "function") {
+        const state = await existingJob.getState().catch(() => null);
+        if (
+          state &&
+          ["waiting", "active", "delayed", "prioritized", "paused"].includes(state)
+        ) {
+          await this.repo.updateStatus(
+            jobExec.id,
+            state === "active" ? "active" : "queued",
+          );
+          return {
+            jobExecutionId: Number(jobExec.id),
+            jobId: existingJob.id,
+            bullJobId: jobExec.bull_job_id,
+          };
+        }
+      }
     }
 
     return this.orchestrator.enqueue({

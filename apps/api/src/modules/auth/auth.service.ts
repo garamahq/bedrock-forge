@@ -116,29 +116,29 @@ export class AuthService {
     ipAddress?: string,
   ): Promise<TokenPair> {
     const tokenHash = this.hashToken(refreshToken);
-    const stored = await this.repo.findValidRefreshToken(tokenHash);
+    const { rawRefreshToken, refreshTokenHash, expiresAt } =
+      this.createRefreshTokenMaterial();
 
-    if (!stored) {
+    const user = await this.repo.rotateRefreshToken({
+      oldTokenHash: tokenHash,
+      newTokenHash: refreshTokenHash,
+      expiresAt,
+      userAgent,
+      ipAddress,
+    });
+
+    if (!user) {
       throw new UnauthorizedException("Invalid or expired refresh token");
     }
 
-    // Rotate: revoke old, issue new
-    await this.repo.revokeRefreshToken(stored.id);
-
-    const user = await this.repo.findUserById(Number(stored.user_id));
-    if (!user) {
-      throw new NotFoundException("User not found");
-    }
-
     const roles = user.user_roles.map((ur) => ur.role.name);
-    return this.issueTokens(
+    return this.signTokenPair(
       Number(user.id),
       user.email,
       user.name,
       roles,
       user.mfa_enabled,
-      userAgent,
-      ipAddress,
+      rawRefreshToken,
     );
   }
 
@@ -282,6 +282,39 @@ export class AuthService {
     return n * multipliers[match[2]];
   }
 
+  private createRefreshTokenMaterial(): {
+    rawRefreshToken: string;
+    refreshTokenHash: string;
+    expiresAt: Date;
+  } {
+    const rawRefreshToken = crypto.randomBytes(64).toString("hex");
+    const refreshTokenHash = this.hashToken(rawRefreshToken);
+    const expiresAt = new Date(Date.now() + this.refreshExpiresMs());
+    return { rawRefreshToken, refreshTokenHash, expiresAt };
+  }
+
+  private signTokenPair(
+    userId: number,
+    email: string,
+    name: string,
+    roles: string[],
+    mfaEnabled: boolean,
+    rawRefreshToken: string,
+  ): TokenPair {
+    const payload = { sub: userId, email, roles };
+    const accessToken = this.jwtService.sign(payload, {
+      secret: this.config.get<string>("jwt.secret"),
+      expiresIn: (this.config.get<string>("jwt.accessExpiresIn") ?? "15m") as
+        | `${number}${"s" | "m" | "h" | "d"}`
+        | number,
+    });
+    return {
+      accessToken,
+      refreshToken: rawRefreshToken,
+      user: { id: userId, email, name, roles, mfa_enabled: mfaEnabled },
+    };
+  }
+
   private async issueTokens(
     userId: number,
     email: string,
@@ -291,19 +324,8 @@ export class AuthService {
     userAgent?: string,
     ipAddress?: string,
   ): Promise<TokenPair> {
-    const payload = { sub: userId, email, roles };
-
-    const accessToken = this.jwtService.sign(payload, {
-      secret: this.config.get<string>("jwt.secret"),
-      expiresIn: (this.config.get<string>("jwt.accessExpiresIn") ?? "15m") as
-        | `${number}${"s" | "m" | "h" | "d"}`
-        | number,
-    });
-
-    const rawRefreshToken = crypto.randomBytes(64).toString("hex");
-    const refreshTokenHash = this.hashToken(rawRefreshToken);
-
-    const expiresAt = new Date(Date.now() + this.refreshExpiresMs());
+    const { rawRefreshToken, refreshTokenHash, expiresAt } =
+      this.createRefreshTokenMaterial();
 
     await this.repo.storeRefreshToken(
       BigInt(userId),
@@ -313,11 +335,14 @@ export class AuthService {
       ipAddress,
     );
 
-    return {
-      accessToken,
-      refreshToken: rawRefreshToken,
-      user: { id: userId, email, name, roles, mfa_enabled: mfaEnabled },
-    };
+    return this.signTokenPair(
+      userId,
+      email,
+      name,
+      roles,
+      mfaEnabled,
+      rawRefreshToken,
+    );
   }
 
   private hashToken(token: string): string {

@@ -1,4 +1,4 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
 
 @Injectable()
@@ -107,6 +107,62 @@ export class AuthRepository {
     return this.prisma.refreshToken.update({
       where: { id },
       data: { revoked_at: new Date() },
+    });
+  }
+
+  /**
+   * Atomically claim an unrevoked, unexpired refresh token, load its owner,
+   * and persist the replacement refresh token inside a single DB transaction.
+   * Returns null if the token was invalid, expired, or already claimed concurrently.
+   */
+  async rotateRefreshToken(params: {
+    oldTokenHash: string;
+    newTokenHash: string;
+    expiresAt: Date;
+    userAgent?: string;
+    ipAddress?: string;
+  }) {
+    const now = new Date();
+    return this.prisma.$transaction(async (tx) => {
+      const candidate = await tx.refreshToken.findFirst({
+        where: {
+          token_hash: params.oldTokenHash,
+          revoked_at: null,
+          expires_at: { gt: now },
+        },
+        select: { id: true, user_id: true },
+      });
+      if (!candidate) return null;
+
+      const claimed = await tx.refreshToken.updateMany({
+        where: {
+          id: candidate.id,
+          revoked_at: null,
+          expires_at: { gt: now },
+        },
+        data: { revoked_at: now },
+      });
+      if (claimed.count !== 1) return null;
+
+      const user = await tx.user.findUnique({
+        where: { id: candidate.user_id },
+        include: { user_roles: { include: { role: true } } },
+      });
+      if (!user) {
+        throw new NotFoundException("User not found");
+      }
+
+      await tx.refreshToken.create({
+        data: {
+          user_id: candidate.user_id,
+          token_hash: params.newTokenHash,
+          expires_at: params.expiresAt,
+          user_agent: params.userAgent ?? null,
+          ip_address: params.ipAddress ?? null,
+        },
+      });
+
+      return user;
     });
   }
 

@@ -559,6 +559,8 @@ export class ProjectsRepository {
     rootPath: string;
     queueName: string;
     jobType: string;
+    bullJobId?: string;
+    payload?: Prisma.InputJsonObject;
     notes?: string;
     links?: Prisma.InputJsonValue;
     dbCredentials?: {
@@ -602,14 +604,18 @@ export class ProjectsRepository {
           },
         });
       }
+      const payloadWithEnv = data.payload
+        ? ({ ...data.payload, environmentId: Number(environment.id) } as Prisma.InputJsonObject)
+        : undefined;
       const jobExecution = await tx.jobExecution.create({
         data: {
           queue_name: data.queueName,
-          bull_job_id: "0",
+          bull_job_id: data.bullJobId ?? "0",
           job_type: data.jobType,
           environment_id: environment.id,
           server_id: data.server_id,
           status: "queued",
+          ...(payloadWithEnv ? { payload: payloadWithEnv } : {}),
         },
       });
       return { project, environment, jobExecution };
@@ -620,6 +626,17 @@ export class ProjectsRepository {
     return this.prisma.jobExecution.update({
       where: { id: jobExecutionId },
       data: { bull_job_id: bullJobId },
+    });
+  }
+
+  async markJobExecutionFailed(jobExecutionId: bigint, lastError: string) {
+    return this.prisma.jobExecution.update({
+      where: { id: jobExecutionId },
+      data: {
+        status: "failed",
+        last_error: lastError,
+        completed_at: new Date(),
+      },
     });
   }
 }

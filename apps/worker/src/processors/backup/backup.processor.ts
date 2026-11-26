@@ -406,15 +406,34 @@ export class BackupProcessor extends WorkerHost {
       });
 
       // ── Step F: Update the pre-created Backup row to completed ───────────
-      await this.prisma.backup.update({
-        where: { id: BigInt(backupId) },
-        data: {
-          status: "completed",
-          file_path: finalFilePath,
-          size_bytes: BigInt(output!.size),
-          completed_at: new Date(),
-        },
-      });
+      try {
+        await this.prisma.backup.update({
+          where: { id: BigInt(backupId) },
+          data: {
+            status: "completed",
+            file_path: finalFilePath,
+            size_bytes: BigInt(output!.size),
+            completed_at: new Date(),
+          },
+        });
+      } catch (updateErr: unknown) {
+        // Belt-and-suspenders guard (#49): if the Backup record vanished externally
+        // after GDrive upload, clean up the unreferenced remote archive.
+        const errCode =
+          updateErr && typeof updateErr === "object" && "code" in updateErr
+            ? (updateErr as { code?: unknown }).code
+            : undefined;
+        if (errCode === "P2025") {
+          await this.backupsQueue
+            .add(
+              JOB_TYPES.BACKUP_DELETE_FILE,
+              { filePath: finalFilePath },
+              { ...DEFAULT_JOB_OPTIONS, attempts: 5 },
+            )
+            .catch(() => undefined);
+        }
+        throw updateErr;
+      }
 
       await tracker.complete();
 
@@ -988,6 +1007,7 @@ export class BackupProcessor extends WorkerHost {
     const exec = await this.prisma.jobExecution.create({
       data: {
         queue_name: QUEUES.BACKUPS,
+        job_type: JOB_TYPES.BACKUP_SCHEDULED,
         bull_job_id: bullJobId,
         environment_id: BigInt(environmentId),
         status: "queued",

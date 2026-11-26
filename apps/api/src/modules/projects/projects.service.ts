@@ -6,7 +6,7 @@ import {
 } from "@nestjs/common";
 import { InjectQueue } from "@nestjs/bullmq";
 import { Queue } from "bullmq";
-import { randomBytes } from "crypto";
+import { randomBytes, randomUUID } from "crypto";
 import {
   QUEUES,
   JOB_TYPES,
@@ -431,7 +431,17 @@ export class ProjectsService {
       dto.db_password?.trim() || randomBytes(16).toString("base64url");
     const dbHost = dto.db_host?.trim() || "localhost";
 
-    // Create Project + Environment + encrypted WpDbCredentials in a transaction
+    // Create Project + Environment + encrypted WpDbCredentials + pre-linked JobExecution in one transaction
+    const bullJobId = randomUUID();
+    const safeCyberpanelPayload = {
+      domain,
+      dbName,
+      dbUser,
+      dbHost,
+      phpVersion,
+      adminEmail: admin_email,
+    };
+
     const { project, environment, jobExecution } = await this.repo.createFull({
       name,
       client_id: BigInt(client_id),
@@ -444,6 +454,13 @@ export class ProjectsService {
       rootPath,
       queueName: QUEUES.PROJECTS,
       jobType: JOB_TYPES.PROJECT_CREATE_BEDROCK,
+      bullJobId,
+      payload: {
+        cyberpanel: safeCyberpanelPayload,
+        ...(dto.source_environment_id !== undefined
+          ? { sourceEnvironmentId: dto.source_environment_id }
+          : {}),
+      },
       notes: dto.notes,
       links: projectLinksJson(dto.links),
       dbCredentials: {
@@ -454,33 +471,45 @@ export class ProjectsService {
       },
     });
 
-    // Enqueue the provisioning job without plaintext dbPassword
-    const job = await this.projectsQueue.add(
-      JOB_TYPES.PROJECT_CREATE_BEDROCK,
-      {
-        environmentId: Number(environment.id),
-        jobExecutionId: Number(jobExecution.id),
-        cyberpanel: {
-          domain,
-          dbName,
-          dbUser,
-          dbHost,
-          phpVersion,
-          adminEmail: admin_email,
+    // Enqueue the provisioning job with pre-allocated jobId (omitting plaintext dbPassword)
+    let job;
+    try {
+      job = await this.projectsQueue.add(
+        JOB_TYPES.PROJECT_CREATE_BEDROCK,
+        {
+          environmentId: Number(environment.id),
+          jobExecutionId: Number(jobExecution.id),
+          cyberpanel: safeCyberpanelPayload,
+          sourceEnvironmentId: dto.source_environment_id,
         },
-        sourceEnvironmentId: dto.source_environment_id,
-      },
-      { ...DEFAULT_JOB_OPTIONS, attempts: 1 },
-    );
+        { ...DEFAULT_JOB_OPTIONS, attempts: 1, jobId: bullJobId },
+      );
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      await this.repo
+        .markJobExecutionFailed(jobExecution.id, errMsg)
+        .catch(() => undefined);
+      throw err;
+    }
 
-    // Back-fill the bull_job_id now that we have it
-    await this.repo.updateBullJobId(jobExecution.id, String(job.id));
+    const resolvedJobId = String(job.id ?? bullJobId);
+    if (resolvedJobId !== bullJobId) {
+      await this.repo
+        .updateBullJobId(jobExecution.id, resolvedJobId)
+        .catch((linkErr) => {
+          this.logger.warn(
+            `Failed to reconcile bull_job_id ${resolvedJobId} for jobExecution ${jobExecution.id}: ${
+              linkErr instanceof Error ? linkErr.message : String(linkErr)
+            }`,
+          );
+        });
+    }
 
     return {
       project: { id: Number(project.id), name: project.name },
       environment: { id: Number(environment.id), url: siteUrl },
       jobExecutionId: Number(jobExecution.id),
-      jobId: String(job.id),
+      jobId: jobExecution.bull_job_id || bullJobId,
     };
   }
 

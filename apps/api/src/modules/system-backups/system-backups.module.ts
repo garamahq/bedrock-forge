@@ -18,5 +18,6 @@ import { SettingsModule } from "../settings/settings.module";
     SystemBackupsRepository,
     SystemBackupScheduleService,
   ],
+  exports: [SystemBackupsService],
 })
 export class SystemBackupsModule {}

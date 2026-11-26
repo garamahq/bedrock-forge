@@ -1,5 +1,16 @@
 /// <reference types="jest" />
 
+const queueAddMock = jest.fn();
+const queueCloseMock = jest.fn().mockResolvedValue(undefined);
+
+jest.mock("bullmq", () => ({
+  ...jest.requireActual("bullmq"),
+  Queue: jest.fn().mockImplementation(() => ({
+    add: queueAddMock,
+    close: queueCloseMock,
+  })),
+}));
+
 import { PluginScanProcessor } from "./plugin-scan.processor";
 
 function makeProcessor(prisma: any) {
@@ -76,5 +87,77 @@ describe("PluginScanProcessor custom plugin reconciliation", () => {
         custom_plugin_id: { in: [BigInt(7)] },
       },
     });
+  });
+
+  it("allocates pre-flight backup bull_job_id and marks both backup and execution failed when Redis add fails (#43)", async () => {
+    queueAddMock.mockReset();
+    queueCloseMock.mockReset();
+    queueCloseMock.mockResolvedValue(undefined);
+    queueAddMock.mockRejectedValueOnce(new Error("Redis timeout"));
+
+    const execCreate = jest.fn().mockResolvedValue({ id: BigInt(50) });
+    const execUpdate = jest.fn().mockResolvedValue({});
+    const backupCreate = jest.fn().mockResolvedValue({ id: BigInt(60) });
+    const backupUpdate = jest.fn().mockResolvedValue({});
+    const prisma = {
+      environment: {
+        findUniqueOrThrow: jest.fn().mockResolvedValue({
+          id: BigInt(3),
+          google_drive_folder_id: "folder-1",
+          server: { id: BigInt(1), ip_address: "192.0.2.3" },
+        }),
+      },
+      jobExecution: {
+        create: execCreate,
+        update: execUpdate,
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
+      backup: {
+        create: backupCreate,
+        update: backupUpdate,
+      },
+      $transaction: jest.fn(async (cb: (tx: unknown) => Promise<unknown>) =>
+        cb({
+          jobExecution: { create: execCreate },
+          backup: { create: backupCreate },
+        }),
+      ),
+    };
+    const processor = new PluginScanProcessor(
+      prisma as never,
+      { get: jest.fn().mockReturnValue("redis://localhost:6379") } as never,
+      {} as never,
+    );
+
+    const job = {
+      id: "pm-1",
+      name: "plugin:manage",
+      data: {
+        environmentId: 3,
+        action: "update",
+        plugins: ["akismet"],
+        jobExecutionId: 91,
+        skipSafetyBackup: false,
+      } satisfies Record<string, unknown>,
+      updateProgress: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(processor.process(job as never)).rejects.toThrow("Redis timeout");
+
+    expect(backupCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "pending",
+          job_execution_id: BigInt(50),
+        }),
+      }),
+    );
+    expect(backupUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: BigInt(60) },
+        data: expect.objectContaining({ status: "failed" }),
+      }),
+    );
+    expect(queueCloseMock).toHaveBeenCalled();
   });
 });
