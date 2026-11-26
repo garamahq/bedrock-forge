@@ -27,6 +27,7 @@ import {
   WpCliBuilder,
   detectSiteOwnerAndGroup,
 } from "../../utils/processor-utils";
+import { streamDatabaseDumpBetweenServers } from "../../utils/stream-transfer.utils";
 
 // concurrency=1: Bedrock provisioning runs composer, git clone, SSH commands.
 @Processor(QUEUES.PROJECTS, { concurrency: 1 })
@@ -252,22 +253,32 @@ export class CreateBedrockProcessor extends WorkerHost {
         await job.updateProgress({ value: 50, step: "Source database dumped" });
 
         // ── Transfer + import ──
-        const dumpBuffer = await srcExecutor.pullFile(dumpTmp);
-        await srcExecutor.execute(`rm -f ${shellQuote(dumpTmp)}`).catch(() => {});
+        await streamDatabaseDumpBetweenServers({
+          sourceExecutor: srcExecutor,
+          targetExecutor: executor,
+          sourceRemotePath: dumpTmp,
+          targetRemotePath: dumpTmp,
+          sourceLabel: srcEnv.server.ip_address,
+          targetLabel: server.ip_address,
+          localDirectoryPrefix: `bf-cb-clone-${job.id ?? "default"}-`,
+          onProgress: async (offset, step) => {
+            await job.updateProgress({ value: 50 + offset, step });
+          },
+        });
 
         const dbName = cyberpanel?.dbName ?? srcCreds.dbName;
         const dbUser = cyberpanel?.dbUser ?? srcCreds.dbUser;
         const dbPassword = resolvedCyberpanelDbPassword ?? srcCreds.dbPassword;
         const dbHost = "localhost";
 
-        const tgtMycnf = await createRemoteMyCnf(
-          executor,
-          { dbUser, dbPassword, dbHost },
-          job.id ?? "default",
-          "cb_tgt",
-        );
-        await executor.pushFile({ remotePath: dumpTmp, content: dumpBuffer });
+        let tgtMycnf: string | null = null;
         try {
+          tgtMycnf = await createRemoteMyCnf(
+            executor,
+            { dbUser, dbPassword, dbHost },
+            job.id ?? "default",
+            "cb_tgt",
+          );
           const importResult = await executor.execute(
             `mysql --defaults-extra-file=${shellQuote(tgtMycnf)} ${shellQuote(dbName)} < ${shellQuote(dumpTmp)}`,
           );
@@ -277,7 +288,9 @@ export class CreateBedrockProcessor extends WorkerHost {
             );
           }
         } finally {
-          await cleanupRemoteMyCnf(executor, tgtMycnf);
+          if (tgtMycnf) {
+            await cleanupRemoteMyCnf(executor, tgtMycnf);
+          }
           await executor.execute(`rm -f ${shellQuote(dumpTmp)}`).catch(() => {});
         }
         await job.updateProgress({ value: 60, step: "Database imported" });
